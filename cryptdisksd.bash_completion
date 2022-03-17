@@ -1,0 +1,230 @@
+_cryptdisksd_completion()
+{
+	local commands="status add del put rmkey erase smart stop reload shell" cur=${COMP_WORDS[COMP_CWORD]} keys="" crypts="" devs="" cmd=""
+	[[ ${COMP_CWORD} -eq 1 ]] && COMPREPLY=( $( compgen -W '-h -d -f ${commands}' -- ${cur}) ) && return
+
+	args=(); COMPREPLY=()
+	declare -A conf
+	_cryptdisksd_init_conf
+	_cryptdisksd_parse_cmd
+
+	case ${cmd} in
+		cryptdisksd)
+			case ${args[1]} in
+				-h)
+					return;;
+				-d)
+					[[ ${args[2]} == cryptdisksd || ${args[2]} == -f ]] && _filedir -di
+					return;;
+				-f)
+					[[ ! ${args[@]} =~ (^| )-d( |$) ]] && COMPREPLY=( $(compgen -W "-d" -- ${cur}) ); return;;
+				*)
+					[[ ${args[@]} =~ (^| )-f( |$) ]] && return
+					[[ ${args[@]} =~ (^| )-d( |$) ]] && { COMPREPLY=( $(compgen -W "-f ${commands}" -- ${cur}) ); return; };;
+			esac
+			return;;
+		stop)
+			case ${args[1]} in
+				stop)
+					[[ ! ${COMP_CWORD} -gt 2 ]] && COMPREPLY=( $(compgen -W "-h" -- ${cur}) )
+					return;;
+				*)
+					return;;
+			esac
+			return;;					
+		status|shell|reload) 
+			case ${args[1]} in
+				status|shell|reload)
+					COMPREPLY=( $(compgen -W "-h ${commands}" -- ${cur}) ); return;;
+				*)
+					return;;
+			esac
+			return;;
+		erase)
+			case ${args[1]} in
+				erase)
+					COMPREPLY=( $(compgen -W "-h ${crypts}" -- ${cur}) ); return;;
+				-h)
+					return;;
+				*)
+					COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) ); return;;
+			esac;;
+		smart)
+			case ${args[1]} in
+				smart)
+					COMPREPLY=( $(compgen -W "-h -a -t ${crypts}" -- ${cur}) ); return;;
+				-h)
+					return;;
+				-a|-t)
+					if [[ ${args[0]} -eq 3 ]]; then
+						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+					else
+						COMPREPLY=( $(compgen -W "${crypts}" -- ${cur}) )
+					fi
+					return;;
+				*)
+					if [[ ${args[0]} -eq 2 ]]; then
+						COMPREPLY=( $(compgen -W "-a -t ${commands}" -- ${cur}) )
+					else
+						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+					fi
+					return;;
+			esac
+			return;;
+		add)
+			local opt_c=0 opt_p=0 opt_crypt=0 opt_dev=0 i=0 j=0 compreply=""
+			for (( i=1;i<${args[0]};i++ )); do
+				case ${args[i]} in
+					-p) [[ ${opt_p} -eq 0 ]] && opt_p=1 || return;;
+					-c) [[ ${opt_c} -eq 0 ]] && opt_c=1 || return;;
+					*)
+						if [[ ! ${args[i+1]} == "-p" ]]; then
+							j=$((j+1)); [[ ${j} -gt 2 ]] && return
+							[[ ${opt_crypt} -eq 0 && "${crypts}" =~ (^|$'\n')${args[i]}($'\n'|$) ]] && opt_crypt=1
+							[[ ${opt_dev} -eq 0 && ${devs} =~ (^|$'\n')${args[i]}($'\n'|$) ]] && opt_dev=1
+						fi
+				esac
+			done
+			case ${args[1]} in
+				add)
+					COMPREPLY=( $(compgen -W "-h -c -p ${crypts} ${devs}" -- ${cur}) ); return;;
+				-h)
+					return;;
+				-p)
+					COMPREPLY=( $(compgen -W "${keys}" -- ${cur}) )
+					return;;
+				*)
+					[[ ${opt_c} -eq 0 ]] && compreply+="-c "
+					[[ ${opt_p} -eq 0 ]] && compreply+="-p "
+					[[ ${j} -lt 2 && ${opt_crypt} -eq 0 ]] && compreply+="${crypts} "
+					[[ ${j} -lt 2 && ${opt_dev} -eq 0 ]] && compreply+="${devs} "
+					case "${args[0]} ${opt_c} ${opt_p}" in
+						"2 0 0") compreply+="${commands} ";;
+						"3 1 0") compreply+="${commands} ";;
+						"5 0 1") compreply+="${commands} ";;
+						"6 1 1") compreply+="${commands} ";;
+					esac
+					COMPREPLY=( $(compgen -W "${compreply}" -- ${cur}) )
+					return;;
+			esac
+			return;;
+		del)
+			case ${args[1]} in
+				del)
+					COMPREPLY=( $(compgen -W "-h -c -t ${crypts} ${devs}" -- ${cur}) ); return;;
+				-h)
+					return;;
+				-t)
+					case ${args[2]} in
+						del)
+							COMPREPLY=( $(compgen -W "-c ${crypts} ${devs}" -- ${cur}) ); return;;
+						-c)
+							if [[ ${args[3]} == del ]]; then
+								COMPREPLY=( $(compgen -W "${crypts} ${devs}" -- ${cur}) )
+							else
+								COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+							fi
+							return;;
+						*)
+							[[ ${args[3]} == del ]] && COMPREPLY=( $(compgen -W "-c ${commands}" -- ${cur}) )
+							[[ ${args[3]} == -c ]] && COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+							return;;
+					esac
+					return;;
+				-c)
+					case ${args[2]} in
+						del)
+							COMPREPLY=( $(compgen -W "-t ${crypts} ${devs}" -- ${cur}) ); return;;
+						-t)
+							if [[ ${args[3]} == del ]]; then
+								COMPREPLY=( $(compgen -W "${crypts} ${devs}" -- ${cur}) )
+							else
+								COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+							fi
+							return;;
+						*)
+							[[ ${args[3]} == del ]] && COMPREPLY=( $(compgen -W "-t ${commands}" -- ${cur}) )
+							[[ ${args[3]} == -t ]] && COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+							return;;
+					esac
+					return;;
+				*)
+					case ${args[2]} in
+						del)
+							COMPREPLY=( $(compgen -W "-c -t ${commands}" -- ${cur}) ); return;;
+						-t)
+							[[ ${args[3]} == del ]] && COMPREPLY=( $(compgen -W "-c ${commands}" -- ${cur}) )
+							[[ ${args[3]} == -c ]] && COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+							return;;
+						-c)
+							[[ ${args[3]} == del ]] && COMPREPLY=( $(compgen -W "-t ${commands}" -- ${cur}) )
+							[[ ${args[3]} == -t ]] && COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+							return;;
+						*)
+							return;;
+					esac
+					return;;
+			esac
+			return;;
+		put|rmkey)
+			case ${args[1]} in
+				rmkey|put)
+					COMPREPLY=( $(compgen -W "-h -c ${keys}" -- ${cur}) ); return;;
+				-h) return;;
+				-c|-a|-t) 
+					if [[ ${args[0]} -eq 3 ]]; then
+						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+					else
+						COMPREPLY=( $(compgen -W "${keys}" -- ${cur}) )
+					fi
+					return;;
+				*)
+					if [[ ${args[0]} -eq 2 ]]; then
+						COMPREPLY=( $(compgen -W "-c ${commands}" -- ${cur}) )
+					else
+						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+					fi
+					return;;
+			esac
+			return;;
+	esac
+}
+
+# Parse the command to be completed
+_cryptdisksd_parse_cmd()
+{
+	local i=${COMP_CWORD}; args[0]=0
+	while [[ ! " cryptdisksd ${commands} " =~ " ${args[args[0]]} " && ${i} -ge 0 ]]; do
+		args[0]=$((args[0]+1))
+		i=$((i-1))
+		args[args[0]]=${COMP_WORDS[i]}
+	done
+	cmd=${args[args[0]]}
+}
+
+_cryptdisksd_init_conf()
+{
+	local i=0 CONF=""
+	for (( i=0;i<${COMP_CWORD};i++ )); do
+		[[ ${COMP_WORDS[i]} == -d ]] && conf[CRYPTDISKSDDIR]=${COMP_WORDS[i+1]}
+	done 
+	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/cryptdisks.d
+	if [[ -s ${conf[CRYPTDISKSDDIR]}/cryptdisksd.conf ]]; then
+		CONF=${conf[CRYPTDISKSDDIR]}/cryptdisksd.conf
+	else
+		CONF=/etc/cryptdisks.d/cryptdisksd.conf
+	fi
+	if [[ -s ${CONF} ]]; then
+		local __var __val
+		while IFS="=" read -r __var __val; do
+			[[ ! -z "${__val}" ]] && conf[${__var^^}]="${__val}"
+		done <<<"$(cat ${CONF} |grep -ve "^\s*#")"
+	fi
+	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="/etc/cryptdisks.d/crypttab"
+	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
+	keys="$(cat ${conf[CRYPTTAB]} |tr -s "\t" |cut -f3 |sort -u)"
+	crypts="$(cat ${conf[CRYPTTAB]} |cut -f1)"
+	devs="$(for dir in ${conf[BLOCKDEVSDIRS]}; do ls ${dir};done |sort -u)"
+}
+
+complete -F _cryptdisksd_completion cryptdisksd
