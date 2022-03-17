@@ -1,0 +1,2653 @@
+#!/bin/bash
+
+# Function Definitions. All functions for serialized commands shall have their nemae prefixed by do_ all others shall not.
+
+do_init_conf()
+{
+	# Initialize System Variables. Default config in /etc/cryptdisks.d/cryptdisksd.conf. Systemd env CONF(DIR) will override.
+	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME:0:-1}.d"
+	[[ ! -d "${CONFDIR}" ]] && return 1
+	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
+	unset conf; declare -gA conf
+	if [[ -s ${CONF} ]]; then
+		local __var __val
+		while IFS="=" read -r __var __val; do
+			[[ ! -z "${__val}" ]] && conf[${__var^^}]="${__val}"
+	   	done <<<"$(cat ${CONF} |grep -ve "^\s*#")"
+	fi
+	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
+	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
+	[[ -z "${conf[RUNDIR]}" ]] && conf[RUNDIR]="/run"
+	[[ -z "${conf[LOGDIR]}" ]] && conf[LOGDIR]="/var/log/${MYNAME}"
+	[[ -z "${conf[LOGFILE]}" ]] && conf[LOGFILE]="/var/log/${MYNAME}.log"
+	[[ -z "${conf[CRYPTDISKSDDIR]}" ]] && conf[CRYPTDISKSDDIR]=${conf[RUNDIR]}/${MYNAME}
+	[[ -z "${conf[PIDFILE]}" ]] && conf[PIDFILE]="${conf[CRYPTDISKSDDIR]}/${MYNAME}.pid"
+	[[ -z "${conf[CRYPTDISKSD_GROUP]}" ]] && conf[CRYPTDISKSD_GROUP]="disk"
+	[[ -z "${conf[CRYPTDISKSDDIR_MODE]}" ]] && conf[CRYPTDISKSDDIR_MODE]=700
+	[[ -z "${conf[FIFO]}" ]] && conf[FIFO]="${conf[CRYPTDISKSDDIR]}/${MYNAME}.queue"
+	[[ -z "${conf[FIFO_MODE]}" ]] && conf[FIFO_MODE]=600
+	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="${CONFDIR}/crypttab"
+	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
+	[[ -z "${conf[START_TIMEOUT]}" ]] && conf[START_TIMEOUT]=5
+	[[ -z "${conf[LOCK_TIMEOUT]}" ]] && conf[LOCK_TIMEOUT]=5
+	[[ -z "${conf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]=3
+	[[ -z "${conf[QUEUE_TIMEOUT]}" ]] && conf[QUEUE_TIMEOUT]=2
+	[[ -z "${conf[KEYLIFE]}" ]] && conf[KEYLIFE]=10
+	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
+	[[ -z "${conf[FWDIR]}" ]] && conf[FWDIR]="/sys/firmware/efi/efivars"
+	[[ -z "${conf[FWGUID]}" ]] && conf[FWGUID]="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
+	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${conf[FWDIR]}/UglyLinuxBootCFG-${conf[FWGUID]}"
+	[[ -z "${conf[BOOTCONF]}" ]] && conf[BOOTCONF]="${CONFDIR}/boot.conf"
+	[[ -z "${conf[NET_MIN_RETRIES]}" ]] && conf[NET_MIN_RETRIES]=10
+	[[ -z "${conf[USER_TIEMOUT]}" ]] && conf[USER_TIMEOUT]=10
+	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
+	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
+	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
+
+	# Initialize formatting parameters for console output.
+	RED="\033[91m" GREY="\033[94m" YEL="\033[93m" GRN="\033[92m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\0332J"
+	PR="\033[s" PD="\033[u\033[16C\033[s" PP="\033[u\033[62C\033[s" PT="\033[u\033[19C\033[s" PS="\033[u\033[21C"
+}
+
+# [BEGIN OF LOGGING FUNCTIONS]
+
+trap_term_logwriter()
+{
+	# When the log writer is killed, set the read timeout to 1s (no exit) to allow the writer to parse remaining log messages.
+	logger -p daemon.info "cryptdisksd: ${_myname} terminating"
+	[[ ${conf[LOGLEVEL]} -gt 0 ]] && echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${_myname} terminating" >>${conf[LOGFILE]}
+	_to="-t${conf[QUEUE_TIMEOUT]}"
+}
+
+logwriter()
+{
+	# The log write will parse lines from stdin, sent by various workers. The lines are written to log and sent to syslog.
+	trap 'trap_term_logwriter' SIGINT SIGTERM
+	local _myname="logger (${BASHPID}):"
+
+	# Initialize the log file. Set the correct access rights.
+	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
+	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[LOGDIR]} && chmod 750 ${conf[LOGDIR]}
+	[[ ! -z "$1" ]] && conf[LOGFILE]=${conf[LOGDIR]}/$1
+
+	[[ ${conf[LOGLEVEL]} -gt 0 ]] && echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${_myname} initialized" >>${conf[LOGFILE]}
+	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[LOGFILE]} && chmod 640 ${conf[LOGFILE]}
+
+	# Prepend every line recieved with date and time and write to logfile.
+	local _to="" _lf _line
+	while read ${_to} -r _lf _line; do
+		local _date="$(date '+%d-%m %H:%M:%S.%3N')"
+		if [[ "${_lf}" == "debug" && ${conf[LOGLEVEL]} -ge 1 ]]; then
+			echo "${_date} ${hostname} ${_line}" >>${conf[LOGFILE]}
+		elif [[ "${_lf}" == "debug2" && ${conf[LOGLEVEL]} -ge 3 ]]; then
+			echo "${_date} ${hostname} ${_line}" >>${conf[LOGFILE]}
+		elif [[ ${_lf} == "info" || ${_lf} == "warning" || ${_lf} == "error" ]]; then
+			logger -p daemon.${_lf} "cryptdisksd: ${_line}"
+			[[ ${conf[LOGLEVEL]} -ge 1 ]] && echo "${_date} ${hostname} ${_line}" >>${conf[LOGFILE]}
+		elif [[ ${conf[LOGLEVEL]} -ge 3 ]]; then
+			echo "${_date} ${hostname} ${_lf} ${_line}" >>${conf[LOGFILE]}
+		fi
+	done
+	local _date="$(date '+%d-%m %H:%M:%S.%3N')"
+	logger -p daemon.info "cryptdisksd: ${_myname} terminated"
+	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo "${_date} ${hostname} ${_myname} finished" >>${conf[LOGFILE]}
+	exit 0
+}
+
+do_log()
+{
+	# Send a message to the log writer, or to systemd if that fails.
+	echo "$@" >&6 || echo "$@" >&3
+}
+
+do_timer()
+{
+	# Start a timer for debugging purposes. We will track to the ms.
+	if [[ $# -eq 0 ]]; then
+		# Started with no args, start a timer, echo the start time.
+		echo ${EPOCHREALTIME:0:-3}
+	elif [[ ${1,,} == "date" ]]; then
+		# Output the exact date of the timestamp.
+		local ___date="$(date --date @$2 +%Y-%m-%d.%H:%M:%S)"
+		echo "${___date}"
+	else
+		# Started with start time as args, calculate and echo the time difference.
+		local ___stime=$1
+		local ___etime=${EPOCHREALTIME:0:-3}
+		if [[ -z "${___stime}" ]]; then ___stime=${___etime}; fi
+		# Calculate the difference between start and end time and echo.
+		# to be removed
+		local ___dtime="$(bc <<<"x=${___etime}-${___stime}; if (x<1) print 0; x")"
+		echo "${___dtime}"
+	fi
+}
+
+# [END OF LOGGING FUNCTIONS]
+
+# [BEGIN OF MAIN DAEMON FUNCTIONS]
+
+trap_term_daemon()
+{
+	# Main process received SIGTERM or SIGINT, shutdown reader and logwriter processes.
+	trap 'time_active=$(do_timer ${time_start})' SIGINT SIGTERM
+
+	time_active=$(do_timer ${time_start})
+	systemd-notify STOPPING=1 STATUS="cryptdisksd: terminating"
+	do_log warning "${myname} terminating after ${time_active}s"
+	do_daemon_check_conf
+	for _pid in ${pid_ctrl[@]}; do
+		[[ "$(cat /proc/${pid_ctrl[${_pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_ctrl[${_pid}]}
+	done
+	rm -f ${conf[CRYPTDISKSDDIR]}/*.sock
+	[[ ! -z "${pid_reader}" && "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
+	[[ ! -z "${pid_logwriter}" && "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_logwriter} && do_log debug2 "${myname} killed logwriter (PID: ${pid_reader})"
+	[[ -e "${conf[PIDFILE]}" ]] && rm -f ${conf[PIDFILE]} 
+	if [[ "${starting}" -ne 0 ]]; then
+		do_log error "${_myname} terminated while in startup mode"
+		exit 1
+	else
+		do_log info "${myname} finished"
+	fi
+	systemd-notify STATUS="cryptdisksd: finished"
+	
+	exit 0
+}
+
+trap_hup_daemon()
+{
+	# Received reload request from systemd. Reload the config asap (no active commands/workers). confok, contains status.
+	# 0 - Config is ok.
+	# 1 - Config changed, or SIGHUP received
+	# 2 - Notified reader of reload
+	# When the reader is ready to reload it will notify us and we can reload the config and restart the reader.
+	if [[ ${starting} -eq 0 && ${confok} -eq 0 ]]; then
+		do_log warning "${myname} received SIGHUP, reload config asap"
+		if [[ -z "${waiting_mnt[@]}" ]]; then
+			kill -SIGHUP ${pid_reader} && do_log debug2 "${myname} notified reader (PID: ${pid_reader}) of config reload"
+			confok=2
+		else
+			confok=1
+		fi
+	fi
+}
+
+systemd_daemon()
+{
+	# Here we go, we are started from systemd. We will first process to queue entirely and notify systemd if we're done.
+	# The daemon and queue reader are recursive processes. They will re-enter themselves after processing a command. 
+	# The reader spawns worker processes to get passphrases and the daemon will mount the actual cryptdisks. 
+	# After receiving a command from udev the reader will have to do some atomical procesing, like checking for active
+	# passphrase workers and sending info about crypts to the daemon. The daemon queues all mounts until passphrase is received.
+	# After receiving a passphrase the worker will send it to the daemon, which then mounts the crypts on the respective queueu.
+	# A cleanup will be run every minute. There we will detect if configuration has changed and remove timed out workers and mounts.
+	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
+	trap 'trap_term_daemon' SIGINT SIGTERM
+	trap 'trap_hup_daemon' SIGHUP
+
+	local hostname="$(hostname)" pid_daemon=${BASHPID} myname="daemon (${BASHPID}):" time_start=${EPOCHREALTIME:0:-3}
+	local starting=1 start_status=0 time_active=0.000 cleanup=0.000 systemdconf="" crypttab="" confok=0
+	local pid_logwriter pid_reader fd_reader reader_alive=0 readerr=0 cached_pp=""
+	declare -A active_mnt waiting_mnt pid_ctrl fd_ctrl time_ctrl bootconf
+
+	echo ${pid_daemon} >${conf[PIDFILE]}
+
+	# Close stdin, fd3 to stdout (systemd journald) for reader and worker processes. Redirect stdout and stderr to /dev/null.
+	# If we are running in foreground mode evrything goes to stdout of the user's terminal. And we wish him or her good luck with that.
+	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 3>&1- 1>/dev/null 2>&1
+	[[ ${FOREGROUND} -eq 1 ]] && exec 6>&1 3>&6
+
+	# Start the logwriter.
+	[[ ${FOREGROUND} -ne 1 ]] && do_daemon_start_logwriter
+	do_log info "${myname} initializing"
+
+	# Check if the queue exists first, exit with error if it isn't. It should be there, or something is wrong with socket.
+	if [[ ! -p ${conf[FIFO]} ]]; then
+		do_log error "${myname} queue not found" 
+		systemd-notify --ready --pid=$$
+		systemd-notify STOPPING=1 --pid=$$ --status="cryptdisksd: Queue not Found, Restart cryptdisksd.socket" 
+	   exit 0
+	fi
+
+	# Check if there is a crypttab, log message if there isn't since everything we do is based on it.
+	if [[ ! -f ${conf[CRYPTTAB]} ]]; then
+		touch ${conf[CRYPTTAB]}
+		do_log warning "${myname} crypttab not found" 
+		systemd-notify --pid=$$ --status="cryptdisksd: Crypttab (${conf[CRYPTTAB]}) not Found,"
+	fi
+
+	# Parse and load the configuration, exit if either fails.
+	if ! do_daemon_check_conf; then 
+		do_log error "${myname} failed to load config" 
+		systemd-notify --ready --pid=$$
+		systemd-notify STOPPING=1 --pid=$$ --status="cryptdisksd: Failed to Load Configuration"
+		exit 0
+	fi
+	confok=0
+
+	# Start the reader, it will notify us when it has emptied the queue or other events.
+	# When wait returns exit status <128 we will know the reader has terminated.
+	# The reader and all workers will be started with the following available fds:
+	# 1 (stdout) 2 (stderr) and 6 (for subshells) point to a log writer.
+	# 3 systemd socket to send messages which will be logged by systemd and can be viewed with systemctl status and journalctl -xe
+	# 4 (in) and 5(out) where applicable to the daemon process.
+	systemd-notify --pid=$$ --status="cryptdisksd: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
+	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
+
+	do_daemon_start_reader
+	do_log debug "${myname} started reader (${pid_reader})"
+
+	# The readers and will send us messages about events, we need to keep track of time for (debug) logging and cleanup.
+	# If we are starting up, read time-out is start timeout so cleanup etc will be done only after start
+	# If we are in normal op, keep cleanup timer (60secs). The timeouts will be evaluated every command iteration.
+	while true; do	
+		# Evaluate timeouts and cleanup, and reset status.
+		local read_to status=0
+		do_daemon_timeout
+		
+		#Start reading from the reader message queue.
+		local msg
+		IFS= read ${read_to} -ru ${fd_reader} msg
+		local res=$?
+		
+		# Parse the message into an arry the first element will be reader second the pid of the reader, rest is the message.
+		# If the reader or worker also sends a passphrase, it will be sperated from the rest of the message by a ||.
+		# The seconf | is needed to correctly seperate the passphrase from the rest of thme messge. If it is not used
+		# a pssphrase that has | as it's last character will have the | at the end of the passphrase removed.
+		# Extract an optional passphrase from the message first, so it will not be debug logged when LOGLEVEL < 3.
+		local passphrase
+		IFS='|' read -r msg passphrase <<<"${msg}"
+		passphrase=${passphrase:1}
+
+		declare -a msg_arr
+		IFS=" " read -ra msg_arr <<<"${msg}"
+
+		# Evaluate the exit status of the message queue read and act accordingly.
+		time_active=$(do_timer ${time_start})
+		if [[ ${res} -eq 142 ]]; then 
+			case ${starting} in 
+				1|2|3)
+					# Start timeout reached, notify systemd.
+					starting=0
+					start_status=3
+					do_daemon_notify_systemd
+					;;
+				0)
+					# Queue timeout for cleanup.
+					do_log debug2 "${myname} waking up from slumber"
+					;;
+			esac
+			do_log debug2 "${myname} running since $(do_timer date ${time_start})"
+			continue
+		elif [[ ${res} -gt 128 ]]; then
+			# Should not happen, daemon process received unhandled signal from somewhere.
+			do_log debug "${myname} read result ${res}, may have been trapped"
+			do_daemon_cleanup 
+			continue
+		elif [[ ${res} -ne 0 ]]; then
+			# Reader has terminated unexpectedly or fd has somehow been closed from reader end.
+			if [[ ${readerr} -eq 0 ]]; then 
+				do_log error "${myname} read error ${res} \"${msg}\""
+			elif [[ $((readerr%20)) -eq 0 ]]; then
+				do_daemon_cleanup
+			elif [[ ${readerr} -gt 99 ]]; then
+				do_log error "${myname} too many read errors, terminating"
+				exit 1
+			fi
+			readerr=$((readerr+1))
+			continue
+		fi
+		readerr=0
+		
+		if [[ -z "${msg}" ]]; then
+			# Should not occur, run cleanup if it does, if reader has exited next read will fail, see above.
+			do_log error "${myname} reached EOF on reader, running cleanup"
+			reader_alive=2; do_daemon_cleanup
+			continue
+		fi
+
+		# Process the message sent by the reader.
+		do_log debug "${myname} processing \"${msg}\"" 
+		if [[ "${msg_arr[0],,}" == "reader" && ${msg_arr[1]} -eq ${pid_reader} ]]; then
+			do_daemon_reader
+		else	
+			do_log error "${myname} received invalid message ${msg}"
+		fi
+
+		# Evaluate the start status.
+		if [[ ${starting} -ne 0 ]]; then
+			[[ ${status} -eq 1 ]] && start_status=1
+			[[ ${start_status} -eq 0 && ${status} -eq 2 ]] && start_status=2
+		fi
+
+		# If we are in starting phase 2 check if queue is empty, then we are started.
+		if [[ ${starting} -eq 2 && -z "${!waiting_mnt[@]}" ]]; then
+			starting=0
+			do_daemon_cleanup
+			do_daemon_notify_systemd
+		fi
+	
+		# Done processing, return to waiting. Calculate time spent.
+		do_log debug2 "${myname} running since $(do_timer date ${time_start})"
+	done
+
+	# We should never get here, exit with error if we do.
+	time_active="$(do_timer ${time_start})"
+	do_log error "${myname} terminated unexpectedly after ${time_active}s"
+	systemd-notify --pid=$$ --status="cryptdisksd: Daemon Terminated Unexpectedly After ${time_active}s (PID: ${BASHPID}))"
+	kill -SIGTERM ${BASHPID}
+	exit 1
+}
+
+do_daemon_start_logwriter()
+{
+	# LOGLEVEL 0, log only to syslog (daemon facility). 
+	# LOGLEVEL 1, log to syslog and debug to dedicated logfile.
+	# LOGLEVEL 2 is loglevel 1 with components having dedicated log file.
+	# LOGLEVEL 3, extra debug logging, stdout and stderr of processes also sent to log.
+	# BEWARE PASSPHRASES WILL BE LOGGED ALSO!!!!
+	# LOGLEVEL 4, sames as level 3 with components having dedicated log file.
+	case ${conf[LOGLEVEL]} in
+		0|1) 	exec 6> >(logwriter) ;;
+		2)		exec 6> >(logwriter daemon-${pid_daemon}.log) ;;
+		3)		exec 6> >(logwriter) 1>&6 2>&6 ;;
+		4)		exec 6> >(logwriter daemon-${pid_daemon}.log) 1>&6 2>&6 ;;
+	esac
+	pid_logwriter=$!
+	return 0
+}
+
+do_daemon_start_reader()
+{
+	# Set the group and mode for the rundir and queue.
+	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
+	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
+	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
+	case ${conf[LOGLEVEL]} in
+		0|1|2)	# Start the reader with stdout and stderr redirected to /dev/null (silent).
+				exec {fd_reader}< <(udev_reader 5>&1- 1>/dev/null 2>&1) ;;
+		3|4)	# Start the reader with stdout and stderr redirected to the logwriter.
+				exec {fd_reader}< <(udev_reader 5>&1- 1>&6 2>&1) ;;
+	esac
+	pid_reader=$!
+	return 0
+}
+
+do_daemon_timeout()
+{
+	# If we are starting up, read time-out when initial queue is empty so we can notify parent.
+	# If we are in normal operation, keep cleanup timer (60secs).
+	time_active=$(do_timer ${time_start})
+	
+	# First check if we have a start timeout. If so we are started and will notify systemd.
+	if [[ ${starting} -ne 0 && ${time_active:0:-4} -ge ${conf[START_TIMEOUT]} ]]; then 
+		starting=0
+		start_status=3
+		do_daemon_notify_systemd
+	fi
+
+	# Set the new queue read timeout, we will run a cleanup every conf[CLEANUP_TIMER]. Cleanup will not run before we are started.
+	case ${starting} in
+		0)	# Do a cleanup if the timer is about to expire and set the cleanup flag.
+			if [[ ${time_active:0:-4} -gt $((${cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] || [[ ${res} -eq 142 && ${read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]]; then
+				do_daemon_cleanup
+			fi
+			read_to="-t $(((${conf[CLEANUP_TIMER]}+${conf[QUEUE_TIMEOUT]})-(${time_active:0:-4}%${conf[CLEANUP_TIMER]})))" ;;
+		1|2)# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
+			read_to="-t $(((${conf[START_TIMEOUT]}+${conf[QUEUE_TIMEOUT]})-(${time_active:0:-4}%${conf[START_TIMEOUT]})))" ;;
+	esac
+
+	# Check if the config need to be reloaded and the reader notified.
+	[[ ${starting} -eq 0 && ${confok} -eq 1 && -z ${!waiting_mnt[@]} ]] && kill -SIGHUP ${pid_reader} && confok=2 && do_log debug2 "${myname} notified reader (PID: ${pid_reader}) of config reload"
+	return 0
+}
+
+do_daemon_started()
+{
+	# Process the start status, sent by the reader and our own.
+	[[ ${start_status} -eq 0 && ${msg_arr[3]} -eq 0 ]] && start_status=0
+	[[ ${start_status} -eq 2 || ${msg_arr[3]} -eq 2 ]] && start_status=2
+	[[ ${start_status} -eq 1 || ${msg_arr[3]} -eq 1 ]] && start_status=1
+
+	# Set the new starting status, will need to wait for active workers, or notify systemd we are started
+	if [[ ${starting} -eq 1 ]]; then
+		# We are in inital startup. The reader notifies us the queue is empty and we can go the the next phase.
+		if [[ -z "${!waiting_mnt[@]}" ]]; then
+			# If we also have no mounts waiting, we are started.
+			do_daemon_cleanup
+			starting=0
+		else
+			# If we do have mounts waiting we need to wait until they are finished.
+			starting=2
+			do_log debug "${myname} received queue timeout from reader, waiting mounts for ${!waiting_mnt[@]}"
+		fi
+	else
+		# If we are started or in final phase the reader should not send us a start status anymore.
+		do_log error "${myname} WHAT THE FUCK DID YOU DO!??"
+	fi
+
+	# If it has been established that we are started we will notify systemd about this glorious event.
+	[[ ${starting} -eq 0 ]] && do_daemon_notify_systemd
+	return 0
+}
+
+do_daemon_notify_systemd()
+{
+	# Daemon notify about startup status.
+	systemd-notify --ready --pid=$$
+	if [[ ${start_status} -eq 0 ]]; then
+		do_log info "${myname} startup completed succesfully in ${time_active}s"
+		systemd-notify --pid=$$ --status="cryptdisksd: Startup completed succesfully in ${time_active}s (PID: ${BASHPID})"
+	elif [[ ${start_status} -eq 2 ]]; then
+		do_log warning "${myname} startup completed with warnings in ${time_active}s"
+                 systemd-notify --pid=$$ --status="cryptdisksd: Startup completed with warnings in ${time_active}s (PID: ${BASHPID})"
+	elif [[ ${start_status} -eq 3 ]]; then
+		do_log warning "${myname} startup timed out after ${time_active}s"
+		systemd-notify --pid=$$ --status="cryptdisksd: Startup timed out after ${time_active}s (PID: ${BASHPID})"
+	else
+		do_log warning "${myname} startup completed with errors in ${time_active}s"
+		systemd-notify --pid=$$ --status="cryptdisksd: Startup completed with errors in ${time_active}s (PID: ${BASHPID})"
+	fi
+	return 0
+}
+
+do_daemon_check_conf()
+{
+	# Parse the configuration from firmware and compare it to the config stored in the confdir.
+	# If there are any differences, the configuration in confidir will take precedence and overwrite the firmware.
+	do_log debug "${myname} checking config"
+
+	if [[ -s ${conf[FWBOOTCONF]} && ! -s ${conf[BOOTCONF]} ]]; then
+		# Config in firware, not in confdir, copy fw to confdir.
+		[[ ${confok} -eq 0 ]] && confok=1
+		do_log debug "${myname} copying ${conf[FWBOOTCONF]} config to ${CONFDIR}"
+		cat ${conf[FWBOOTCONF]} | tail -c +5 >${conf[BOOTCONF]} || return 1
+	elif [[ -s ${conf[FWBOOTCONF]} && -s ${conf[BOOTCONF]} ]]; then
+		# Compare the firmware config to confdir.
+		local _diff="$(cat ${conf[FWBOOTCONF]} | tail -c +5 | diff - ${conf[BOOTCONF]})"
+		if [[ ! -z "${_diff}" ]]; then
+			# Configs are different, overwrite firmware config.
+			[[ ${confok} -eq 0 ]] && confok=1
+			do_log warning "${myname} ${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} differ, replacing ${conf[FWBOOTCONF]}"
+			[[ -e ${conf[FWBOOTCONF]} ]] && chattr -i ${conf[FWBOOTCONF]}
+			printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]} || do_log error "${myname} error creating ${conf[FWBOOTCONF]}"
+			efivar -n ${conf[FWGUID]}-UglyLinuxBootCFG -w -f ${conf[BOOTCONF]} 2>&1 || do_log error "${myname} error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
+			chattr +i ${conf[FWBOOTCONF]}
+		else
+			do_log debug2 "${myname} ${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} equal"
+		fi
+	elif [[ ! -s ${conf[FWBOOTCONF]} && -s ${conf[BOOTCONF]} ]]; then
+		# No fwconfig store confdir.
+		[[ ${confok} -eq 0 ]] && confok=1
+		do_log debug "${myname} no firmware config, copying from ${conf[BOOTCONF]}"
+		[[ -e ${conf[FWBOOTCONF]} ]] && chattr -i ${conf[FWBOOTCONF]}
+		printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]} || do_log error "${myname} error creating ${conf[FWBOOTCONF]}"
+		efivar -n ${conf[FWGUID]}-UglyLinuxBootCFG -w -f ${conf[BOOTCONF]} || do_log error "${myname} error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
+		chattr +i ${conf[FWBOOTCONF]}
+	else
+		# No bootconf at all.
+		do_log warning "${myname} no boot config found"
+		bootconf[BOOTSERVERS]=""
+	fi
+
+	# If we are starting up, now is the time to load the config.	
+	if [[ ${starting} -eq 1 ]]; then 
+		if ! do_daemon_reload_conf; then 
+			do_log error "${myname} error loading config, terminating"
+			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
+			exit 1
+		fi
+		# Load the service config into memory, we need to exit and restart if it's changed.
+		[[ -s ${CONF} ]] && systemdconf="$(cat ${CONF} |grep -ve "^\s*#")"
+	fi
+
+	# Check if the service config or crypttab has changed on disk.
+	if [[ ${starting} -eq 0 && ${confok} -eq 0 ]]; then
+		if [[ ! -f ${conf[CRYPTTAB]} ]]; then
+			do_log error "${myname} ${conf[CRYPTTAB]} disappeared, terminating"
+			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
+			exit 2
+		fi
+		if [[ ! -f ${CONF} ]]; then
+		 	do_log error "${myname} ${CONF} disappeared, terminating"
+			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
+			exit 2
+		fi
+		local __diff="$(diff <(cat ${CONF} |grep -ve "^\s*#") - <<<"${systemdconf}")"
+		if [[ ! -z "${__diff}" ]]; then
+			do_log error "${myname} ${CONF} changed, terminating"
+			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
+			exit 2
+		fi
+		local __diff="$(diff <(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#") - <<<"${crypttab}")"
+		if [[ ! -z "${__diff}" ]]; then
+			do_log debug "${myname} crypttab changed, reloading"
+			if [[ -z "${!waiting_mnt[@]}" ]]; then 
+				kill -SIGHUP ${pid_reader}  && do_log debug2 "${myname} notified reader (PID: ${pid_reader}) of config reload"
+				confok=2
+			else
+				confok=1
+			fi
+		fi
+	fi
+
+	# Check the bootserver and user keys if present.
+	[[ -z ${bootconf[BOOTSERVERS]} ]] && return
+	local _fwsrvvar="${conf[FWGUID]}-UglyLinux${bootconf[BOOTSERVERKEYS]}"
+	local _fwsrvkey="${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]}"
+	local _srvkey="${CONFDIR}/${bootconf[BOOTSERVERKEYS]}"
+	local _fwusrvar="${conf[FWGUID]}-UglyLinux${bootconf[BOOTUSERKEY]}"
+	local _fwusrkey="${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]}"
+	local _usrkey="${CONFDIR}/${bootconf[BOOTUSERKEY]}"
+	if [[ -s ${_fwsrvkey} && -s ${_srvkey} ]]; then
+		# compare the keys, overwrite if necessary
+		local _diff="$(cat ${_fwsrvkey} | tail -c +5 | diff - ${_srvkey})"
+		if [[ ! -z "${_diff}" ]]; then
+            # Configs are different, overwrite firmware config
+			do_log warning "${myname} ${_fwsrvkey} and ${_srvkey} differ, replacing ${_fwsrvkey}"
+			[[ -e ${_fwsrvkey} ]] && chattr -i ${_fwsrvkey}
+			printf "\x07\x00\x00\x00\x00" >${_fwsrvkey} || do_log error "${myname} error creating ${_fwsrvkey}"
+			efivar -n ${_fwsrvvar} -w -f ${_srvkey} || do_log error "${myname} error copying ${_srvkey} to ${_fwsrvkey}"
+			chattr +i ${_fwsrvkey}
+		else
+			do_log debug2 "${myname} ${_fwsrvkey} and ${_srvkey} equal"
+		fi
+	elif [[ -s ${_fwsrvkey} && ! -s ${_srvkey} ]]; then
+		# Keys in fw not in confdir, copy
+		do_log debug "${myname} copying ${_fwsrvkey} to ${_srvkey}"
+		cat ${_fwsrvkey} | tail -c +5 > ${_srvkey} || return 1
+	elif [[ ! -s ${_fwsrvkey} && -s ${_srvkey} ]]; then
+		# No fwbootkeys, copy from confdir.
+		do_log debug "${myname} no firmware bootserver keys, copying from ${_srvkey}"
+		[[ -e ${_fwsrvkey} ]] && chattr -i ${_fwsrvkey}
+		printf "\x07\x00\x00\x00\x00" >${_fwsrvkey} || do_log error "${myname} error creating ${_fwsrvkey}"
+		efivar -n ${_fwsrvvar} -w -f ${_srvkey} || do_log error "${myname} error copying ${_srvkey} to ${_fwsrvkey}"
+		chattr +i ${_fwsrvkey}
+	else
+		# No bootserverkeys at all
+		do_log error "${myname} no bootserver keys found"
+		bootconf[BOOTSERVERS]=""
+	fi
+
+	# No need to check user key, if server key not present.
+	[[ -z ${bootconf[BOOTSERVERS]} ]] && return
+	if [[ -s ${_fwusrkey} && ! -s ${_usrkey} ]]; then
+		# Key in fw not in confdir, copy
+		do_log debug "${myname} copying ${_fwusrkey} to ${_usrkey}"
+		chattr -i ${_fwusrkey}; chmod 400 ${_fwusrkey}; chattr +i ${_fwusrkey}
+		cat ${_fwusrkey} | tail -c +5 > ${_usrkey} || return 1
+		chmod 400 ${_usrkey}
+	elif [[ -s ${_fwusrkey} && -s ${_usrkey} ]]; then
+		# compare the keys, overwrite if necessary
+		local _diff="$(cat ${_fwusrkey} | tail -c +5 | diff - ${_usrkey})"
+		if [[ ! -z "${_diff}" ]]; then
+			# Configs are different, overwrite firmware config
+			do_log warning "${myname} ${_fwusrkey} and ${_usrkey} differ, replacing ${_fwusrkey}"
+			[[ -e ${_fwusrkey} ]] && chattr -i ${_fwusrkey}
+			printf "\x07\x00\x00\x00\x00" >${_fwusrkey} || do_log error "${myname} error creating ${_fwusrkey}"
+			efivar -n ${_fwusrvar} -w -f ${_usrkey} || do_log error "${myname} error copying ${_usrkey} to ${_fwusrkey}"
+			chattr -i ${_fwusrkey}; chmod 400 ${_fwusrkey}; chattr +i ${_fwusrkey}
+		else
+			do_log debug2 "${myname} ${_fwusrkey} and ${_usrkey} equal"
+			chattr -i ${_fwusrkey}; chmod 400 ${_fwusrkey}; chattr +i ${_fwusrkey}
+			chmod 400 ${_usrkey}
+		fi
+	elif [[ ! -s ${_fwusrkey} && -s ${_usrkey} ]]; then
+		# No fwbootuserkey, copy from confdir
+		do_log debug "${myname} no firmware bootuser key, copying from ${_usrkey}"
+		[[ -e ${_fwusrkey} ]] && chattr -i ${_fwusrkey}
+		printf "\x07\x00\x00\x00\x00" >${_fwusrkey} || do_log error "${myname} error creating ${_fwusrkey}"
+		efivar -n ${_fwusrvar} -w -f ${_usrkey} || do_log error "${myname} error copying ${_usrkey} to ${_fwusrkey}"
+		chattr -i ${_fwusrkey}; chmod 400 ${_fwusrkey}; chattr +i ${_fwusrkey}
+	else
+		# No bootuserkeys at all
+		bootconf[BOOTSERVERS]=""
+	fi
+	return 0
+}
+
+do_daemon_reload_conf()
+{
+	do_log debug "${myname} loading configuration"
+
+	# Load the crypttab into memory.
+	crypttab="$(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#")" 
+
+	# Source the boot config if necessary.
+	local __var __val
+	for __var in ${!bootconf[@]}; do
+		unset bootconf[${__var}]
+	done || return 1
+	if [[ -s ${conf[BOOTCONF]} ]]; then
+		while IFS="=" read -r __var __val; do
+			[[ ! -z "${__val}" ]] && bootconf[${__var^^}]="${__val}"
+	   	done <<<"$(cat ${conf[BOOTCONF]} |grep -ve "^\s*#")"
+	fi || return 1
+	return 0
+}
+
+do_daemon_cleanup()
+{
+	# Readers should not ever exit, the is an error / bug. Restart the reader
+	local _time_start=${EPOCHREALTIME:0:-3}
+	cleanup=$(do_timer ${time_start})
+	do_log debug "${myname} cleanup starting at ${time_active}"
+
+	# Ping systemd.
+	systemd-notify WATCHDOG=1 WATCHDOG_USEC=$(((2*conf[CLEANUP_TIMER])*1000000))
+
+	# Check if the log writer is still active, restart it and the reader if necessary.
+	[[ "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -0 ${pid_logwriter}
+	local _logwriter_running=$?
+	if [[ ${FOREGROUND} -ne 1 && ${_logwriter_running} -ne 0 ]]; then
+		do_log error "${myname} logwriter (PID: ${pid_logwriter}) terminated after ${time_active}s, restarting"
+		systemd-notify "cryptdisksd: logwriter (PID: ${pid_logwriter}) terminated after ${time_active}s, restarting"
+		[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader}"
+		[[ -e /proc/self/fd/${fd_reader} ]] && exec {fd_reader}>&-
+		do_daemon_start_logwriter
+	fi
+
+	# Remove too long outstanding mounts.
+	local _pp _add_crypt _add_dev _add_time
+	for _pp in ${!waiting_mnt[@]}; do
+		local _waiting_mnt=""
+		while IFS=" " read -r _add_crypt _add_dev _add_time; do
+			local __add_time=$(do_timer ${_add_time})
+			if [[ ${__add_time:0:-4} -ge $((conf[PP_TIMEOUT]+conf[QUEUE_TIMEOUT])) ]]; then
+				do_log debug "${myname} cleanup removed mount ${_add_dev} for ${_add_crypt} after timeout"
+			else
+				_waiting_mnt+=$'\n'"${_add_crypt} ${_add_dev} ${_add_time}"
+			fi
+		done <<<"${waiting_mnt[${_pp}]}"
+		waiting_mnt[${_pp}]="${_waiting_mnt:1}"
+	done
+	
+	# Kill too long running control conections.
+	local _pid _time
+	for _pid in ${!pid_ctrl[@]}; do
+		_time=$(do_timer ${time_ctrl[${_pid}]})
+		if [[ ${_time:0:-4} -ge $((conf[PP_TIMEOUT]+conf[QUEUE_TIMEOUT])) ]]; then 
+			do_log debug "${myname} cleanup killed control worker (PID: ${pid_ctrl[${_pid}]})"
+			[[ ! -z "${pid_ctrl[${_pid}]}" && "$(cat /proc/${pid_ctrl[${_pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_ctrl[${_pid}]} && do_log debug2 "${myname} killed ${pid_ctrl[${_pid}]}"
+			exec {pid_ctrl[${_pid}]}>&-; unset pid_ctrl[${_pid}] fd_ctrl[${_pid}] time_ctrl[${_pid}]
+		fi
+	done
+	[[ -z ${!pid_ctrl[@]} ]] && rm -f ${conf[CRYPTDISKSDDIR]}/*.sock
+
+	# Check the config.
+	do_daemon_check_conf
+	if [[ ${starting} -eq 0 && ${confok} -ne 0 ]]; then
+		# Config has changed, needs to be reloaded.
+		if [[ -z "${!waiting_mnt[@]}" ]]; then
+			# No active workers, restart reader
+			[[ ${confok} -eq 1 && -z "${!waiting_mnt[@]}" ]] && kill -SIGHUP ${pid_reader} && confok=2 && do_log debug2 "${myname} notified reader (PID: ${pid_reader}) of config reload"
+		else
+			# Still mounts waiting, reader can only be restarted when idle
+			do_log debug "${myname} config reload, waiting for mounts to finish"
+		fi
+	fi
+
+	# Check if the reader is still alive and restart it if necessary.	
+	[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -0 ${pid_reader}
+	local _reader_running=$?
+	if [[ ${reader_alive} -eq 2 ]]; then
+		# No ping received in 2 cleanups, kill reader and restart.
+		do_log error "${myname} still not received ping from reader (PID: ${pid_reader}), restarting reader"
+		_reader_running=1
+	elif [[ ${reader_alive} -eq 1 ]]; then
+		do_log warning "${myname} have not received ping from reader (PID: ${pid_reader})"
+		reader_alive=2
+	else
+		reader_alive=1
+	fi
+	local _tab_crypt=""
+	if [[ ${_reader_running} -ne 0 ]]; then
+		[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader}"
+		[[ -e /proc/self/fd/${fd_reader} ]] && exec {fd_reader}>&-
+		[[ ${confok} -ne 2 ]] && do_log error "${myname} reader (PID: ${pid_reader}) terminated after ${time_active}s"
+		systemd-notify --pid=$$ --status="cryptdisksd: reader (PID: ${pid_reader}) terminated after ${time_active}s"
+		if [[ ${confok} -ne 0 ]]; then
+			if ! do_daemon_reload_conf; then 
+				do_log error "${myname} error reloading config, terminating"
+				[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader}"
+				exit 1
+			fi
+		fi
+		confok=0
+		do_daemon_start_reader
+		reader_alive=0
+		# Check if any crpyts have been removed from the crypttab and try to remove then. Then trigger udev to add new devices.
+		# We will set a list with all crypts in the crypttab and will check that list against active mounts later.
+		_tab_crypt="$(tr "\t" " " <<<"${crypttab}" |cut -d" " -f1)"
+	fi
+
+	# Check the active crypts and add to active list if not already present.
+	local _crypt __crypt_arr _dev _pp _time __crypt
+	local _mnt_crypt="$(dmsetup ls --target crypt |cut -f1)"
+	for _crypt in ${_mnt_crypt}; do
+		if [[ -z "${active_mnt[${_crypt}]}" ]]; then
+			do_xcrypt_fromtab myname "${_crypt}"
+			if [[ ! -z "${__crypt_arr[0]}" ]]; then
+				_dev="${__crypt_arr[1]}"
+				_pp="$(do_eval_pp "${__crypt_arr[2]}")"
+				active_mnt[${_crypt}]="${_dev} ${_pp} ${EPOCHREALTIME:0:-3}"
+			else
+				_dev=/dev/"$(dmsetup deps ${_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()")"
+				_pp="-"
+				active_mnt[${_crypt}]="${_dev} - ${EPOCHREALTIME:0:-3}"
+			fi
+			do_log debug "${myname} found ${_dev} as ${_crypt} passphrase ${_pp} adding to active list"
+		fi
+	done
+
+	# Check for removed crypts and remove the from active list.
+	for _crypt in ${!active_mnt[@]}; do
+		for __crypt in ${_mnt_crypt}; do
+			[[ "${_crypt}" == "${__crypt}" ]] && continue 2
+		done
+		IFS=" " read -r _dev _pp _time <<<"${active_mnt[${_crypt}]}"
+		do_log warning "${myname} ${_dev} as ${_crypt} passphrase ${_pp} mounted since $(do_timer date ${_time}) dissapeared"
+		unset active_mnt[${_crypt}]
+	done
+
+	# If we have reloaded look up any managed crypts removed from crypttab and try to unmount them.
+	if [[ ! -z "${_tab_crypt}" ]]; then
+		for _crypt in ${!active_mnt[@]}; do
+			IFS=" " read -r _dev _pp _time <<<"${active_mnt[${_crypt}]}"
+			[[ "${_pp}" == "-" ]] && continue
+			for __crypt in ${_tab_crypt}; do
+				[[ "${_crypt}" == "${__crypt}" ]] && continue 2
+			done
+			do_log warning "${myname} ${_dev} as ${_crypt} passphrase ${_pp} mounted since $(do_timer date ${_time}) removed from crypttab"
+			do_daemon_unmount_crypt "${_crypt}"
+		done
+
+		# Trigger udev to mount any new devices on the crypttab not already mounted.
+		do_log debug "${myname} triggering udev"
+		udevadm trigger -s block -c change
+	fi
+
+	do_log debug2 "${myname} cleanup took $(do_timer ${_time_start})s, cached passphrases: ${cached_pp}- active mounts: ${!active_mnt[@]}"
+	return 0
+}
+
+# [END OF MAIN DAEMON FUNCTIONS]
+
+# [BEGIN OF DAEMON CONTROL FUNCTIONS]
+
+do_daemon_notify()
+{
+    local _pid_ctrl=${msg_arr[3]} _cmd="${msg_arr[4],,}"; local _sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${_pid_ctrl}.sock"
+    local _myname="daemon-notify (${BASHPID}):" _time_start=${EPOCHREALTIME:0:-3}
+    do_log debug "${_myname} processing \"${msg_arr[@]:4}\""
+
+    # Process a command received fro a control sub-process and norify about the reault.
+    case ${_cmd} in
+        add)
+            local _add_crypt=${msg_arr[5]} _add_dev=${msg_arr[6]} _add_pp=${msg_arr[7]} _add_time=${EPOCHREALTIME:0:-3}
+            do_daemon_mount_crypt && echo "OK" >&${fd_ctrl[${_pid_ctrl}]} || echo "FAIL" >&${fd_ctrl[${_pid_ctrl}]}
+            local __passphrase="${passphrase}" __add_pp="${_add_pp}"; do_cache_pp daemon && cached_pp+="${_add_pp} "
+            do_log debug "${myname} active mounts: ${!active_mnt[@]}" ;;
+        del)
+            local _del_crypt=${msg_arr[5]}
+            do_daemon_unmount_crypt "${_del_crypt}" && echo "OK" >&${fd_ctrl[${_pid_ctrl}]} || echo "FAIL" >&${fd_ctrl[${_pid_ctrl}]}
+            do_log debug "${myname} active mounts: ${!active_mnt[@]}" ;;
+        *)
+            do_log debug "${_myname} received invalid notify command \"${msg_arr[@]:2}\"" ;;
+    esac
+    do_log debug2 "${_myname} processing \"${msg_arr[@]:4}\" took $(do_timer ${_time_start})s"
+    return 0
+}
+
+do_daemon_control()
+{
+	# Daemon received control command from cryptdisksd command line.
+	local _pid_ctrl=${msg_arr[3]} _cmd="${msg_arr[4],,}"; local _sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${_pid_ctrl}.sock"
+	local _myname="daemon-control (${BASHPID}):" _time_start=${EPOCHREALTIME:0:-3}
+	do_log debug "${_myname} processing \"${msg_arr[@]:4}\""
+
+	# Set the FD redirections as per the loglevel.	
+	case ${conf[LOGLEVEL]} in
+		0|1|3)	local _fd_r="1>/dev/null 2>&1" ;;
+		2|4)	local _fd_r="1>&6 2>&1" ;;
+	esac
+
+	# Process the command received and start the according control worker process.
+	case ${_cmd} in
+		finished)
+			do_log debug "${_myname} control connection (PID: ${pid_ctrl[${_pid_ctrl}]}) finished"
+			exec {fd_ctrl[${_pid_ctrl}]}>&-; unset pid_ctrl[${_pid_ctrl}] fd_ctrl[${_pid_ctrl}] time_ctrl[${_pid_ctrl}]
+			[[ -e ${_sock_ctrl} ]] && rm -f ${_sock_ctrl}
+			;;
+		add|del|put|rmkey|status|smart|erase)
+			exec {fd_ctrl[${_pid_ctrl}]}> >(daemon_control_${_cmd} "${_fd_r}") 
+			pid_ctrl[${_pid_ctrl}]=$!; time_ctrl[${_pid_ctrl}]=${EPOCHREALTIME:0:-3} 
+			;;
+		*)
+			do_log debug "${_myname} invalid control command \"${msg_arr[@]:4}\""
+			;;
+	esac
+	
+	do_log debug2 "${_myname} processing \"${msg_arr[@]:4}\" took $(do_timer ${_time_start})s"
+	return 0
+}
+
+trap_term_systemd_daemon_cmd()
+{
+	[[ ! -z "${__socat_PID}" && "$(cat /proc/${__socat_PID}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__socat_PID} && do_log debug2 "${__myname} killed socat coproc"
+	[[ -e ${_sock_ctrl} ]] && rm -f ${_sock_ctrl}
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} terminating after $(do_timer ${__time_start})s"
+	exit 0
+}
+
+daemon_control_status()
+{
+	# Connect to control socket and blurt status in some form of a pretty fashion.
+	local __myname __time_start __confirm=0 __crypttab=0 __socat __passphrase="" __crypt_arr
+	do_control_init "status" "Status Report" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+
+	# Output the status to the coproc, which will transfer it to stdout of the requestor. First al active mounts.
+	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PP}PASSPHRASE${PT}ACTIVE SINCE${PS}STATUS${NOR}" >&${__socat[1]}
+	local __crypt __dev __pp __time __status __storageprefix="storage"
+	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}"
+	for __crypt in ${!active_mnt[@]}; do
+		__status=""
+		IFS=" " read -r __dev __pp __time <<<"${active_mnt[${__crypt}]}"
+		if [[ "${__pp}" == "-" ]]; then
+			if [[ "${__crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ ]]; then
+				__status="${GRN}Online (M)"
+				if [[ -n "${bootconf[STORAGEPP]}" ]]; then
+					__pp="$(do_eval_pp "${bootconf[STORAGEPP]}")"
+				else
+					__pp="system:master"
+				fi
+			else
+				__status="${YEL}Online (U)"
+			fi
+		else
+			__status="${GRN}Online (M)"
+		fi
+		__time=$(do_timer date ${__time}); __dev=${__dev##*/}
+		echo -e "\r${PR}${__crypt}${PD}${__dev}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}" >&${__socat[1]}
+	done
+
+	# Output all unmounted and waiting crypts.
+	local __tab_crypt="$(tr "\t" " " <<<"${crypttab}" |cut -d" " -f1)" ___crypt ____crypt __crypt_arr
+	for __crypt in ${__tab_crypt}; do
+		__status=""
+		for ___crypt in ${!active_mnt[@]}; do
+			[[ "${__crypt}" == "${___crypt}" ]] && continue 2
+		done
+		for __pp in ${!waiting_mnt[@]}; do
+			while IFS=" " read -r ____crypt __dev __time; do 
+				if [[ "${__crypt}" == "${____crypt}" ]]; then
+					__status="${YEL}Waiting"
+					__time=$(do_timer date ${__time})
+					break 2
+				fi
+			done <<<"${waiting_mnt[${__pp}]}"
+		done
+		if [[ ! "${__status}" == "${YEL}Waiting" ]]; then
+			__status="${RED}Offline"
+			__time="-"
+		fi
+		do_xcrypt_fromtab __myname "${__crypt}"; __dev=${__crypt_arr[1]##*/}; __pp="$(do_eval_pp "${__crypt_arr[2]}")"
+		echo -e "\r${PR}${__crypt}${PD}${__dev}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}" >&${__socat[1]}
+	done
+	echo >&${__socat[1]}
+
+	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
+		# Output cached passphrases.
+		echo -e "\rCached Passphrases: ${cached_pp}" >&${__socat[1]}
+	fi
+	if [[ ${conf[LOGLEVEL]} -ge 3 ]]; then
+		# Output passphrases.
+		echo -e "\r\n${PR}${GREY}${BOLD}PASSPHRASE${PS}VALUE${NOR}" >&${__socat[1]}
+		for __pp in ${cached_pp}; do
+			local __key="$(keyctl request user "${__pp}")"; local __passphrase="$(keyctl print "${__key}")"
+			echo -e "\r${PR}${__pp}${PS}\"${__passphrase}\"${NOR}" >&${__socat[1]}
+		done
+	fi
+
+	echo -e "\r\n${UL}${myname} Running Since $(do_timer date ${time_start}) ($(do_timer ${time_start})s)${NOR}\r\n" >&${__socat[1]}
+
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+daemon_control_smart()
+{
+	# Display SMART Information for Device
+	local __smartall=0 __smarttest=0 __crypt_arr __add_dev __add_crypt __myname
+	do_control_init "smart" "Do S.M.A.R.T." || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+	do_xcrypt_fromtab __myname "${msg_arr[5]}" || { echo -e "\r${RED}${BOLD}${msg_arr[5]} not Found in Crypttab.${NOR}\r" >&${__socat[1]}; return 1; }
+	__add_crypt="${__crypt_arr[0]}"; __add_dev="${__crypt_arr[1]}"
+	do_find_dev || { echo -e "\r${RED}${BOLD}Device ${__add_dev} not Found in ${conf[BLOCKDEVSDIRS]}.${NOR}\r" >&${__socat[1]}; return 1; }
+
+	if [[ ${__smartall} -eq 1 ]]; then
+		smartctl --all ${__add_dev} >&${__socat[1]} 2>&1
+	else
+		smartctl -A  ${__add_dev} >&${__socat[1]} 2>&1
+	fi
+	
+	if [[ ${__smarttest} -eq 1 ]]; then
+		dmsetup info "${__add_crypt}" >/dev/null 2>&1 && { echo -e "\r${RED}${BOLD}${msg_arr[5]} Still Active.${NOR}\r" >&${__socat[1]}; return 1; }
+		smartctl -t long ${__add_dev} >&${__socat[1]} 2>&1
+	fi
+
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+daemon_control_erase()
+{
+	# Secure Erase Device.
+	local __crypt_arr __add_dev __add_crypt __myname __res
+	do_control_init "erase" "Secure Erase" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+	do_xcrypt_fromtab __myname "${msg_arr[5]}" || { echo -e "\r${RED}${BOLD}${msg_arr[5]} not Found in Crypttab.${NOR}\r" >&${__socat[1]}; return 1; }
+	__add_crypt="${__crypt_arr[0]}"; __add_dev="${__crypt_arr[1]}"
+	do_find_dev || { echo -e "\r${RED}${BOLD}Device ${__add_dev} not Found in ${conf[BLOCKDEVSDIRS]}.${NOR}\r" >&${__socat[1]}; exit 1; }
+
+	dmsetup info "${__add_crypt}" >/dev/null 2>&1 && { echo -e "\r${RED}${BOLD}${msg_arr[5]} Still Active.${NOR}\r" >&${__socat[1]}; exit 1; }
+
+	echo -ne "${RED}${BOLD}This Will Wipe all Data on ${__add_dev}, Are You Sure (y/N)? " >&${__socat[1]}
+	IFS= read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} __res
+	echo -e "${NOR}${BOLD}${__res}${NOR}\r" >&${__socat[1]}
+
+	if [[ "${__res,,}" == "y" ]]; then
+		echo -e "${RED}${BOLD}Secure Erasing ${__add_dev} ${YEL}password: $(hostname)${NOR}\r" >&${__socat[1]}
+		hdparm --security-set-pass "$(hostname)" ${__add_dev}
+		hdparm --security-erase-enhanced "$(hostname)" ${__add_dev} &
+	fi
+
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+daemon_control_put()
+{
+	# Put the passphrase to the boot servers.
+	local __myname __time_start __confirm=0 __socat __passphrase="" __add_pp="$(do_eval_pp "${msg_arr[5]}")" __res="" __add_crypt="-" __add_dev="-"
+	do_control_init "put" "Putting Key" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+
+	if do_control_read_passphrase; then
+		do_put_key &
+		echo -e "\r${BOLD}${GRN}Putting ${__add_pp} Key to Boot Servers.${NOR}\r" >&${__socat[1]}
+	else
+		echo -e "\r${BOLD}${RED}No Passphrase Received, Bye Bye.${NOR}\r" >&${__socat[1]}
+	fi
+
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+daemon_control_rmkey()
+{
+	# Remove the key file for the passphrase.
+	local __myname __time_start __confirm=0 __socat __passphrase="" __add_pp="$(do_eval_pp "${msg_arr[5]}")" __res=""
+	do_control_init "rmkey" "Removing Key File" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+	
+	local __keyfile="${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}"
+	[[ ! -e ${__keyfile} ]] && { echo -e "\r${BOLD}${RED}${__keyfile} Does not Exist.${NOR}\r" >&${__socat[1]}; exit 1; }
+	
+	if chattr -i ${__keyfile} && rm -f ${__keyfile}; then
+		echo -e "\r${BOLD}${GRN}Removed ${__keyfile}.${NOR}\r" >&${__socat[1]}
+		exit 0
+	else
+		echo -e "\r${BOLD}${RED}Failed to Remove ${__keyfile}.${NOR}\r" >&${__socat[1]}
+		exit 1
+	fi
+
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+daemon_control_del()
+{
+	# Remove and delete crypt from crypttab if requested.
+	local __myname __time_start __confirm=0 __crypttab=0 __socat __passphrase="" 
+	local __crypt_arr __del_crypt __del_dev __del_pp __del_time __res=""
+	do_control_init "del" "Removing Crypt" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+
+	do_control_del_crypt; local __r=$?; [[ ${__r} -ne 0 ]] && do_log debug "${__myname} failed to process \"${msg_arr[@]:4}\""
+	if [[ ${__r} -eq 2 ]]; then
+		exit 0
+	elif [[ ${__crypttab} -eq 1 && ( ${__r} -eq 1 || ${__confirm} -eq 1 ) ]]; then
+		echo -ne "\r${BOLD}Continue Removing ${__del_crypt} from Crypttab (Y/n)?${NOR}" >&${__socat[1]}
+		IFS= read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} __res
+		echo -e "${BOLD}${__res}${NOR}\r" >&${__socat[1]}
+	fi
+	if [[ ${__crypttab} -eq 1 && ( "${__res,,}" == "y" || "${__res}" == $'\r' || -z "${__res}" ) ]]; then
+		sed -i "/^${__del_crypt}\\s/D" ${conf[CRYPTTAB]}
+		kill -SIGHUP ${pid_reader}
+		echo -e "\r${BOLD}${GRN}Removed ${__del_dev} as ${__del_crypt} from Crypttab${NOR}\r" >&${__socat[1]}
+	fi
+
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+daemon_control_add()
+{
+	# Add the crypt received on the cryptdiskd command line and to crypttab if request.
+	local __myname __time_start __confirm=0 __crypttab=0 __socat __passphrase="" __crypt_arr
+	do_control_init "add" "Adding Crypt" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
+	
+	local __add_crypt __add_dev __add_pp __res=""
+	if [[ ${__crypttab} -eq 0 ]]; then
+		do_control_add_crypt || do_log debug "${__myname} failed to process \"${msg_arr[@]:4}\""
+	else
+		do_control_add_crypttab || do_log debug "${__myname} failed to process \"${msg_arr[@]:4}\""
+	fi
+	
+	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+}
+
+do_control_init()
+{
+	# Initialize the control worker and connect to the requestor socket.
+	trap 'trap_term_systemd_daemon_cmd' SIGINT SIGTERM 
+	__myname="daemon-$1 (${BASHPID}:${_pid_ctrl}):" __time_start=${EPOCHREALTIME:0:-3}
+	
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter daemon-$1-${BASHPID}.log)
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 4 ]] && exec 6> >(logwriter daemon-$1-${BASHPID}.log) 1>&6 2>&1
+
+	# Open a connection to the listening socket. Check if it exists first.
+	[[ ! -S ${_sock_ctrl} ]] && { do_log error "${__myname} ${_sock_ctrl} is not a socket, pocket rocket or a locket"; return 1; }
+	do_log debug "${__myname} connecting to ${_sock_ctrl}"
+	coproc __socat { socat - UNIX-CONNECT:${_sock_ctrl}; }
+	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo -e "\r${__myname} Connected for $2.\r" >&${__socat[1]}
+
+	# Check the command line, it should contain crypt, device and passphrase and two options (confirm / crypttab) for add or del.
+	[[ "${_cmd}" == "put" ]] && { __confirm=${msg_arr[$((${#msg_arr[@]}-1))]}; return 0; }
+	[[ "${_cmd}" == "smart" ]] && { __smartall=${msg_arr[$((${#msg_arr[@]}-2))]} __smarttest=${msg_arr[$((${#msg_arr[@]}-1))]}; return 0; }
+	[[ ! "${_cmd}" =~ ^(add|del)$ ]] && return 0
+	__confirm=${msg_arr[$((${#msg_arr[@]}-2))]} __crypttab=${msg_arr[$((${#msg_arr[@]}-1))]} 
+}
+
+do_control_del_crypt()
+{
+	# Check if the specified device is on the crypttab. If it's not we can continue removing, but not from tab (__t).
+	local ___res="" ___t=0; if ! do_xcrypt_fromtab __myname "${msg_arr[5]}"; then
+		echo -ne "\r${RED}${BOLD}${msg_arr[5]} not on Crypttab, Continue Removing (y/N)? ${NOR}" >&${__socat[1]}
+		IFS= read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} ___res
+		echo -e "${BOLD}${___res}${NOR}\r" >&${__socat[1]}
+		[[ ! "${___res,,}" == "y" || -z "${___res,,}" || "${___res,,}" == $'\r' ]] && return 2
+		__del_crypt="${msg_arr[5]}" __del_dev="-" __del_pp="-"
+	else
+		__t=1 __del_crypt="${__crypt_arr[0]}" __del_dev="${__crypt_arr[1]}" __del_pp="${__crypt_arr[2]}"
+	fi
+
+	# Check if the crypt is active and/or on the active mount list.
+	if ! dmsetup info "${__del_crypt}" >/dev/null 2>&1; then 
+		echo -e "\r${RED}${BOLD}${__del_crypt} not Active.${NOR}\r" >&${__socat[1]}
+	   	[[ ${__t} -eq 1 ]] && return 1 || return 2
+	fi
+	if [[ -z ${active_mnt[${__del_crypt}]} ]]; then
+		echo -e "\r${BOLD}${YEL}${__del_crypt} is not on Active Mount List.${NOR}\r" >&${__socat[1]}
+	else
+		IFS=" " read -r __del_dev __del_pp __del_time <<<"${active_mnt[${__del_crypt}]}"
+	fi
+	
+	# Notify the daemon to remove the crypt and await the outcome.
+	if do_control_notify_daemon "${__del_crypt}"; then
+		echo -e "\r${BOLD}${GRN}Removed ${__del_dev##*/} as ${__del_crypt} Using ${__del_pp} Passphrase, Active Since $(do_timer date ${__del_time})${NOR}\r" >&${__socat[1]}
+		[[ ${__t} -eq 1 ]] && return 0 || return 2
+	else
+		echo -e "\r${BOLD}${RED}Failed to Remove ${__del_dev##*/} as ${__del_crypt} Using ${__del_pp} Passphrase${NOR}\r" >&${__socat[1]}
+		[[ ${__t} -eq 1 ]] && return 1 || return 2
+	fi
+}
+
+do_control_add_crypt()
+{
+	# If the device should not be added to the crypttab it should be on the crypttab.
+	do_xcrypt_fromtab __myname "${msg_arr[5]}" || { echo -e "\r${RED}${BOLD}${msg_arr[5]} not Found in Crypttab.${NOR}\r" >&${__socat[1]}; return 1; }
+	
+	# Check if the crypt is already active, and check if the device is present.
+	__add_crypt="${__crypt_arr[0]}" __add_dev="${__crypt_arr[1]}" __add_pp="$(do_eval_pp ${__crypt_arr[2]})"
+	dmsetup info "${__add_crypt}" >/dev/null 2>&1 && { echo -e "\r${RED}${BOLD}${msg_arr[5]} Already Active.${NOR}\r" >&${__socat[1]}; return 1; }
+	do_find_dev || { echo -e "\r${RED}${BOLD}Device ${__add_dev} not Found in ${conf[BLOCKDEVSDIRS]}.${NOR}\r" >&${__socat[1]}; return 1; }
+	
+	# Get the passphrase and notify the daemon or exit if no passphrase received.
+	if do_control_read_passphrase; then
+		if do_control_notify_daemon "${__add_crypt} ${__add_dev} ${__add_pp}||${__passphrase}"; then
+			echo -e "\r${BOLD}${GRN}Mounted ${__add_dev} as ${__add_crypt} Using ${__add_pp} Passphrase${NOR}\r" >&${__socat[1]}
+			return 0
+		else
+			echo -e "\r${BOLD}${RED}Failed to Mount ${__add_dev} as ${__add_crypt} Using ${__add_pp} Passphrase${NOR}\r" >&${__socat[1]}
+			return 1
+		fi
+	else
+		echo -e "\r${BOLD}${RED}No Passphrase Received, Bye Bye.${NOR}\r"
+		return 1
+	fi
+}
+
+do_control_add_crypttab()
+{
+	# Crypt should be added to crypttab. We should have a crypt, a dev and a passphrase name to use.
+	__add_crypt="${msg_arr[5]}" __add_dev="${msg_arr[6]}" __add_pp="$(do_eval_pp "${msg_arr[7]}")"
+	
+	# Check if the crypt or device are already on the crypttab, error exit if so.
+	if do_xcrypt_fromtab __myname "${msg_arr[5]}" || do_xcrypt_fromtab __myname "${msg_arr[6]}"; then
+		echo -e "\r${RED}${BOLD}${msg_arr[5]} or ${msg_arr[6]} Already on Crypttab.${NOR}\r" >&${__socat[1]}
+		return 1
+	fi
+
+	# Check which parameter is crypt and wich is dev. Lookup dev in blockdevsdirs, only one should match.
+	if ! do_find_dev; then
+		# No match found for first parameter, try the second if still no match, error exit
+		__add_crypt="${msg_arr[6]}" __add_dev="${msg_arr[5]}"
+		do_find_dev || { echo -e "\r${RED}${BOLD}Neither ${__add_crypt} or ${__add_dev} Is a Valid Block Device in \"${conf[BLOCKDEVSDIRS]}\" Bye Bye.${NOR}\r" >&${__socat[1]}; return 1; }
+	else
+	# First parameter is a valid block device, check second, if also a match error exit.
+		local __t="${__add_dev}"
+ 		__add_crypt="${msg_arr[6]}" __add_dev="${msg_arr[5]}"
+	   do_find_dev && { echo -e "\r${RED}${BOLD}Both ${__add_crypt} and ${__add_dev} Are Valid Block Devices in \"${conf[BLOCKDEVSDIRS]}\" Bye Bye.${NOR}\r" >&${__socat[1]}; return 1; }
+	   __add_crypt="${msg_arr[5]}" __add_dev="${__t}"
+	fi
+
+	# Check if the crypt is already active and ask to continue with adding to crypttab if so.
+	if dmsetup info "${__add_crypt}" >/dev/null 2>&1; then
+		if [[ ${__confirm} -eq 1 ]]; then
+			local __add=1 __res=""
+			echo -ne "\r${RED}${BOLD}${msg_arr[5]} Already Active, Add to Crypttab? (Y/n)${NOR}\r" >&${__socat[1]}
+			IFS= read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} __res
+			echo -e "${BOLD}${__res}${NOR}\r" >&${__socat[1]}
+		fi
+	fi
+
+	# Get the passphrase and notify the daemon, after response, add to crypttab.
+	if [[ ${__add} -eq 1 ]] || do_control_read_passphrase; then
+		if [[ ${__add} -eq 0 ]]; then
+			do_control_notify_daemon "${__add_crypt} ${__add_dev} ${__add_pp}||${__passphrase}"; local __r=$?
+			if [[ ${__r} -eq 0 ]]; then
+				echo -e "\r${BOLD}${GRN}Mounted ${__add_dev} as ${__add_crypt} Using ${__add_pp} Passphrase${NOR}\r" >&${__socat[1]}
+			else
+				echo -e "\r${BOLD}${RED}Failed to Mount ${__add_dev} as ${__add_crypt} Using ${__add_pp} Passphrase${NOR}\r" >&${__socat[1]}
+			fi
+		fi
+		# If the crypt failed to mount ask for confirmation to still add it to crypttab.
+		if [[ ( ${__r} -ne 0 || ${__confirm} -eq 1 ) && ${__add} -eq 0 ]]; then
+			echo -ne "\r${BOLD}Add ${__add_dev} as ${__add_crypt} Passphrase ${__add_pp} to Crypttab (Y/n)?${NOR}" >&${__socat[1]}
+			IFS= read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} __res
+			echo -e "${BOLD}${___res}${NOR}\r" >&${__socat[1]}
+		fi
+		if [[ "${__res,,}" == "y" || "${__res}" == $'\r' || -z "${__res}" ]]; then
+			# Add the crypt to the crypttab and send reload signal to daemon.
+			echo -e "${__add_crypt}\t${__add_dev##*/}\t${__add_pp}" >> ${conf[CRYPTTAB]}
+			echo -e "\r${BOLD}${GRN}Added ${__add_dev} as ${__add_crypt} Passphrase ${__add_pp} to Crypttab${NOR}\r" >&${__socat[1]}
+			kill -SIGHUP ${pid_daemon}
+		fi
+		return 0
+	else
+		echo -e "\r${BOLD}${RED}No Passphrase Received, Bye Bye.${NOR}\r"
+		return 1
+	fi
+}
+
+do_control_read_passphrase()
+{
+	# Ask to get passphrase from network, if not cached, or query the user for the passphrase.
+	local ___key="$(keyctl request user "${__add_pp}")" ___res="" ___fd_ppwrk ___srv
+	if [[ -n "${___key}" ]]; then
+		# Passphrase is still cached, use it and notify the daemon about the crypt.
+		__passphrase="$(keyctl print "${___key}")"
+		echo -e "\r${BOLD}${GREEN}Found Cached ${__add_pp} Passphrase for ${__add_crypt}${NOR}\r" >&${__socat[1]}
+		return 0
+	fi
+
+	# If confirm option is speciefied ask to retreive passphrase from boot servers.
+	if [[ ${__confirm} -eq 1 ]]; then
+		echo -ne "\r${BOLD}${__add_pp} Passphrase Not Cached, Get Passphrase from Boot Servers (Y/n)?${NOR}" >&${__socat[1]}
+		IFS= read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} ___res
+		echo -e "${BOLD}${___res}${NOR}\r" >&${__socat[1]}
+	fi
+
+	# Get passphrase from bootservers, we can use the passphrase ssh worker for this.
+	if [[ "${___res,,}" == "y" || "${___res}" == $'\r' || -z "${___res}" ]]; then
+		echo -e "\r${BOLD}Getting Passphrase from Boot Servers: ${NOR}${YEL}${bootconf[BOOTSERVERS]}${NOR}\r" >&${__socat[1]}
+		[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {___fd_ppwrk}< <(ppwrk_net_passphrase 4>&1- 1>/dev/null 2>&1)
+		[[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {___fd_ppwrk}< <(ppwrk_net_passphrase 4>&1- 1>&6 2>&1)
+		IFS="|" read -t${conf[USER_TIMEOUT]} -ru ${___fd_ppwrk} ___srv __passphrase
+		__passphrase="${__passphrase:1}"
+		if [[ ! -z "${__passphrase}" && $(do_check_passphrase)$? -ne 1 ]]; then
+			echo -e "\r${BOLD}${GRN}Got ${__add_pp} Passphrase for ${__add_crypt} from ${___srv}${NOR}\r" >&${__socat[1]}
+			return 0
+		else
+			echo -e "\r${RED}${BOLD}Failed to Get ${__add_pp} Passphrase for ${__add_crypt} from Boot Servers${NOR}\r" >&${__socat[1]}
+		fi
+	fi
+
+	# Query the user for the passphrase.
+	echo -ne "\r${BOLD}Enter ${__add_pp} passphrase: ${NOR}" >&${__socat[1]}
+	until do_control_ask_passphrase; do
+		case $? in
+			1)
+				echo -ne "\r${BOLD}Incorrect ${__add_pp} Passphrase, Retry: ${NOR}" >&${__socat[1]}
+				;;
+			2)
+				echo -ne "\r${BOLD}Creating Keyfile, Confirm ${__add_pp} Passphrase: ${NOR}" >&${__socat[1]}
+				__passphrase=""; do_control_ask_passphrase rmkey && break || echo -ne "\r${BOLD}Passphrases do not Match. Enter ${__add_pp} Passphrase: ${NOR}" >&${__socat[1]}
+				;;
+			3)
+				echo -e "${BOLD}${RED}TIMEOUT${NOR}\r" >&${__socat[1]}
+				return 1
+				;;
+		esac
+		__passphrase=""
+	done
+
+	# We will have a passphrase by now.
+	return 0
+}
+
+do_control_ask_passphrase()
+{
+	local REPLY="" DEL="$(printf "\x7F")"
+	until [[ "${REPLY}" == $'\r' ]]; do
+	   	read -t${conf[USER_TIMEOUT]} -rsn1 -u ${__socat[0]} REPLY
+		[[ "$?" -gt 128 ]] && return 3; [[ -z "${REPLY}" ]] && exit 1
+		if [[ "${REPLY}" == "${DEL}" ]]; then
+			if [[ "${#__passphrase}" -ne 0 ]]; then
+				echo -ne "\b \b" >&${__socat[1]}
+				__passphrase="${__passphrase::-1}"
+			fi
+			continue
+		fi
+		[[ ! "${REPLY}" == $'\r' ]] && __passphrase+="${REPLY}" && echo -n "*" >&${__socat[1]}
+	done
+	echo -e "\r" >&${__socat[1]}
+	return $(do_check_passphrase $1)$?
+}
+
+do_control_notify_daemon()
+{
+	# Notify the daemon to mount the crypt and relay status.
+	echo "notify ${_pid_ctrl} ${_cmd} $@" >${conf[FIFO]}
+
+	[[ ! -z ${__passphrase} && ! -z ${__add_pp} ]] && do_put_key & 
+	local __res; IFS= read -t${conf[USER_TIMEOUT]} -r __res
+	# Check response from daemon and report status of mount.
+	[[ "${__res,,}" == "ok" ]] && return 0 || return 1
+}
+
+# [END OF DAEMON CONTROL FUNCTIONS]
+
+# [BEGIN OF DAEMON READER FUNCTIONS]
+
+do_daemon_reader()
+{
+	# Main daemon process received meesage from reader or passphrase worker.
+	local _time_start=${EPOCHREALTIME:0:-3}
+	time_active=$(do_timer ${time_start})
+
+	case ${msg_arr[2]} in
+		started|passphrase|control|notify) do_daemon_${msg_arr[2]} ;;
+		active)		reader_alive=0; do_log debug "${myname} reader (PID: ${pid_reader}) ping received" ;;
+		remove)		do_daemon_unmount_crypt "${msg_arr[3]}" ;;
+		add)		do_daemon_add_crypt "${msg_arr[3]}" "${msg_arr[4]}" "${msg_arr[5]}" ;;
+		cached)		cached_pp+="${msg_arr[3]} " ;;
+		reload) 	[[ ${confok} -eq 0 ]] && do_log debug "${myname} received reload request from reader while config is ok";
+					[[ -e /proc/self/fd/${fd_reader} ]] && exec {fd_reader}>&-; do_daemon_cleanup ;;
+		*)			do_log debug "${myname} received invalid message from reader \"${msg_arr[@]}\"" ;;
+	esac
+
+	do_log debug2 "${myname} processing \"${msg}\" took $(do_timer ${_time_start})s total, waiting mounts for ${!waiting_mnt[@]}"
+	return 0
+}
+
+do_daemon_add_crypt()
+{
+	# Received new crypt to mount from reader. If passphrase is given mount if not put on wait list.
+	local _add_crypt="$1" _add_dev="$2" _add_pp="$3"
+	do_log debug "${myname} received ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} from reader"
+
+	if [[ ! -z "${passphrase}" ]]; then
+		# Passphrase received with crypt, mount immediately.
+		do_log debug2 "${myname} received ${_add_pp} passphrase \"${passphrase}\" from reader"
+		local _add_time=${EPOCHREALTIME:0:-3}
+		do_daemon_mount_crypt
+		do_log debug "${myname} active mounts: ${!active_mnt[@]}"
+		return
+	fi
+
+	# No passphrase received with crypt, add to waiting list
+	if [[ -z ${waiting_mnt[${_add_pp}]} ]]; then
+		# If the list is empty, add it.
+		waiting_mnt[${_add_pp}]="${_add_crypt} ${_add_dev} ${EPOCHREALTIME:0:-3}"
+	else
+		# If the list is not empty go over it to see if there is a duplicate.
+		local _waiting_mnt="" _wait_crypt _wait_dev _wait_time
+		while IFS=" " read -r _wait_crypt _wait_dev _wait_time; do
+			if [[ "${_add_crypt}" == "${_wait_crypt}" ]]; then
+				do_log warning "${myname} ${_add_crypt} already on waiting list, replacing"
+			else
+				_waiting_mnt+=$'\n'"${_wait_crypt} ${_wait_dev} ${_wait_time}"
+			fi
+		done <<<"${waiting_mnt[${_add_pp}]}"
+		waiting_mnt[${_add_pp}]="${_waiting_mnt}"$'\n'"${_add_crypt} ${_add_dev} ${EPOCHREALTIME:0:-3}"
+		waiting_mnt[${_add_pp}]="${waiting_mnt[${_add_pp}]:1}"
+	fi
+	do_log debug "${myname} added ${_add_crypt} to waiting list for ${_add_pp} \""${waiting_mnt[${_add_pp}]}"\""
+	return 0
+}
+
+do_daemon_passphrase()
+{
+	# Received passphrase from worker. Mount the corresponding crypts.
+	local _add_pp="${msg_arr[3]}"
+
+	# Extract the passphrase from the message. It will be everything between "" at the end of the message. 
+	do_log debug2 "${myname} received ${_add_pp} passphrase \"${passphrase}\" from reader"
+
+	# Parse the watining mounts for the passphrase and mount the crypts. Or empty queue if passphrase empty (timeout).
+	local _add_crypt _add_dev _add_time
+	if [[ ! -z "${waiting_mnt[${_add_pp}]}" ]]; then
+		while IFS=" " read -r _add_crypt _add_dev _add_time; do
+			if [[ ! -z "${passphrase}" ]]; then 
+				_add_time=${EPOCHREALTIME:0:-3}; do_daemon_mount_crypt; do_log debug "${myname} active mounts: ${!active_mnt[@]}"
+			else
+				do_log debug "${myname} removing mount ${_add_dev} as ${_add_crypt} because of empty passphrase (timeeout)"
+			fi
+		done <<<"${waiting_mnt[${_add_pp}]}"
+		unset waiting_mnt[${_add_pp}]
+	else
+		do_log warning "${myname} no waiting mounts for ${_add_pp} passphrase"
+	fi
+	return 0
+}
+
+do_daemon_mount_crypt()
+{
+	do_log debug "${myname} mounting ${_add_dev} as ${_add_crypt} with ${_add_pp} passphrase"
+
+	# First check if the crypt is already mounted. If so, check if it's on the active list and add if not.	
+	if dmsetup info "${_add_crypt}" >/dev/null 2>&1; then
+		if [[ -z "${active_mnt[${_add_crypt}]}" ]]; then
+			active_mnt[${_add_crypt}]="${_add_dev} ${_add_pp} ${_add_time}"
+			do_log debug "${myname} added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} to active list"
+			return 0
+		else
+			local __add_dev __add_pp __add_time
+			IFS=" " read -r __add_dev __add_pp __add_time <<< "${active_mnt[${_add_crypt}]}"
+			do_log debug "${myname} ${_add_dev} already active as ${_add_crypt} since $(do_timer date ${__add_time})"
+			return 1
+		fi
+	else
+		if cryptsetup open --type plain "${_add_dev}" "${_add_crypt}" <<<"${passphrase}"; then
+			# Mounted, add to active list.
+			do_log info "${myname} mounted ${_add_dev} as ${_add_crypt} passphrase ${_dd_pp}"
+			do_log debug2 "${myname} mounting ${_add_dev} as ${_add_crypt} passphrase \"${passphrase}\" took $(do_timer ${_add_time})s"
+			active_mnt[${_add_crypt}]="${_add_dev} ${_add_pp} ${_add_time}"
+			return 0
+		else
+			do_log error "${myname} error mounting ${_add_dev} as ${_add_crypt} after $(do_timer ${_add_time})s"
+			status=1
+			return 1
+		fi
+	fi
+}
+
+do_daemon_unmount_crypt()
+{
+	local __del_crypt="$1" __time_start=${EPOCHREALTIME:0:-3}
+	if dmsetup info "${__del_crypt}" >/dev/null 2>&1; then
+		local __del_dev __del_pp _del_time 
+		IFS=" " read -r __del_dev __del_pp __del_time <<<"${active_mnt[${__del_crypt}]}"
+		if kpartx -d /dev/mapper/${__del_crypt} && cryptsetup remove "${__del_crypt}"; then
+			do_log info "${myname} removed ${__del_dev} as ${__del_crypt} passphrase ${__del_pp} mounted since $(do_timer date ${__del_time})"
+			do_log debug2 "${myname} removing ${__del_crypt} took $(do_timer ${__time_start})s"
+			unset active_mnt[${__del_crypt}]
+			return 0
+		else
+			do_log warning "${myname} failed to remove ${__del_dev} as ${__del_crypt} passphrase ${__del_pp} mounted since $(do_timer date ${__del_time})"
+			status=2; return 2
+		fi
+	else
+		do_log debug "${myname} crypt ${__del_crypt} not present, skipping"
+		unset active_mnt[${__del_crypt}]
+		return 0
+	fi
+}
+
+# [END OF DAEMON READER FUNCTIONS]
+
+# [BEGIN OF DAEMON & READER SHARED FUNCTIONS]
+
+do_xcrypt_fromtab()
+{
+	# Extract the line for the device received in the udev command from the crypttab into __crypt_arr array.
+	# Element 1 = cryptdisk name
+	# Element 2 = cryptdisk block device
+	# Element 3 = passphrase
+	local ___i; for ((___i=2;___i<=$#;___i++)); do
+		__crypt_arr=($(grep -iE "(^|\s)${!___i}\s" <<<"${crypttab}")) 
+		if [[ "${#__crypt_arr[@]}" -eq 0 ]]; then
+			do_log debug "${!1} device ${!___i} not found in crypttab"
+		elif [[ "${#__crypt_arr[@]}" -ne 3 ]]; then
+			do_log warning "${!1} incorrect crypttab entry ${__crypt_arr[@]}"
+			_status=2
+		else
+			return 0
+		fi
+	done
+	return 1
+}
+
+do_eval_pp()
+{
+	# Evaluate the passphrase and prepend cryptdisks: or make system:master. 
+  	if [[ ${1,,} =~ ^(1|master|system|system:master)$ ]]; then
+   		echo "system:master"
+	elif [[ ! ${1,,} =~ ^cryptdisks: ]]; then
+		echo "cryptdisks:${1,,}"
+	else 
+		echo "${1,,}"
+	fi
+}
+
+do_find_dev()
+{
+	local __blockdevdir; for __blockdevdir in ${conf[BLOCKDEVSDIRS]}; do
+		if [[ ! -b ${__blockdevdir}/${__add_dev} ]]; then
+			do_log debug2 "${__myname} ${__blockdevdir}/${__add_dev} not a valid block device"
+		else
+			do_log debug "${__myname} found ${__blockdevdir}/${__add_dev} for ${__add_crypt}"
+			__add_dev="${__blockdevdir}/${__add_dev}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+do_check_passphrase()
+{
+	# Check the received passphrase against the stored key in firmware. Write key if it doesn't exist.
+	if [ -s ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} ]; then
+		if  $(cat ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} | tail -c +5 | openssl aes-256-cbc -d -salt -pbkdf2 -in - -out /dev/null -k "${__passphrase}"); then
+			do_log debug "${__myname} passphrase check ok"
+			return 0
+		else
+			do_log debug "${__myname} passphrase check fail"
+			if [[ "$1" == "rmkey" ]]; then 
+				chattr -i ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} 
+				rm -f ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}
+			fi
+		return 1
+		fi
+	else
+		do_write_keyfile &
+		do_log debug "${__myname} passphrase not checked"
+		return 2
+	fi
+	return 1
+}
+
+do_write_keyfile()
+{
+	# Write a keyfile for key received to firmware.
+	printf "\x07\x00\x00\x00\x00" > ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} || do_log error "${__myname} error creating ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}"
+	head -c256 /dev/urandom |openssl aes-256-cbc -e -salt -pbkdf2 -in - -out ${conf[CRYPTDISKSDDIR]}/${__add_pp}.key -k "${__passphrase}" || do_log error "${__myname} error creating ${conf[CRYPTDISKSDDIR]}/${__add_pp}.key"
+	efivar -n ${conf[FWGUID]}-UglyLinux${__add_pp}.key -w -f ${conf[CRYPTDISKSDDIR]}/${__add_pp}.key || do_log error "${__myname} error writing ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}"
+	rm -f ${conf[CRYPTDISKSDDIR]}/${__add_pp}.key
+	do_log debug "${__myname} wrote ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}"
+	return 0
+}
+
+do_cache_pp()
+{
+	# Cache the passphrase.
+	[[ ! -z ${___fd_pp} ]] && exec {___fd_pp}>&-
+	local ___key=""
+	[[ ! -z "${__passphrase}" && "$(keyctl request user "${__add_pp}")" == "" ]] &&	___key="$(keyctl add user "${__add_pp}" "${__passphrase}" @s)"
+	if [[ -z "${___key}" ]]; then
+		do_log warning "${__myname} failed to cache ${__add_pp} passphrase"
+		return 1
+	else
+		do_reader_notify_daemon "cached ${__add_pp}"
+		do_log debug "${__myname} cached ${__add_pp} passphrase indefinitely"
+		return 0
+	fi
+}
+
+trap_term_do_ssh_put_key()
+{
+	[[ ! -z "${____pid_ssh}" && "$(cat /proc/${____pid_ssh}/comm 2>/dev/null)" == "ssh" ]] && kill -SIGTERM ${____pid_ssh}
+	do_log debug2 "${___myname} terminating after $(do_timer ${____time_start})s"
+	exit 0
+}
+
+do_ssh_put_key()
+{
+	trap 'trap_term_do_ssh_put_key' SIGINT SIGTERM
+	____time_start=${EPOCHREALTIME:0:-3}
+	do_log debug "${___myname} putting ${__add_pp} key on ${___i}"
+	[[ ${starting} -ne 0 ]] && until [[ $(systemctl status network-online.target >/dev/null 2>&1)$? -ne 3 ]]; do sleep ${conf[QUEUE_TIMEOUT]} &	wait; done
+	ssh -fi ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${___i} "PUT "${__add_pp}" "${__passphrase}"" &
+	local ____pid_ssh=$!
+	wait
+	do_log debug2 "${___myname} finished after $(do_timer ${____time_start})s"
+	exit $?
+}
+
+do_put_key()
+{
+	# Put the key to the the boot servers one by one and log status.
+	[[ ! -z ${___fd_pp} ]] && exec {___fd_pp}>&-
+	local ___i ___pid_ssh ___fd_ssh ___res ___time_start=${EPOCHREALTIME:0:-3} ___myname="passphrase_put:${__add_pp} (${BASHPID}):"
+	do_log debug "${___myname} putting ${__add_pp} to boot servers"
+	for ___i in ${bootconf[BOOTSERVERS]}; do
+		exec {___fd_ssh}< <(do_ssh_put_key); ___pid_ssh=$!
+		IFS= read -t${conf[PP_TIMEOUT]} -ru ${___fd_ssh} ___res
+		if [[ $? -gt 128 ]]; then
+			do_log warning "${__myname} put ${__add_pp} key on ${___i} for ${bootconf[BOOTUSER]} timeout"
+			[[ "$(cat /proc/${___pid_ssh}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_ssh}
+		elif [[ ! "${___res^^}" == "OK" ]]; then
+			do_log warning "${__myname} put ${__add_pp} key on ${___i} for ${bootconf[BOOTUSER]} failed"
+		else 
+			do_log debug "${__myname} put ${__add_pp} key on ${___i} for ${bootconf[BOOTUSER]} succeeded"
+	   	fi
+	done
+	do_log debug2 "${___myname} finished after $(do_timer ${___time_start})s"
+	exit 0 
+}
+
+# [END OF DAEMON & READER SHARED FUNCTIONS]
+
+# [BEGIN OF UDEV QUEUE READER FUNCTIONS
+
+trap_term_reader()
+{
+	# Reader received SIGTERM or SIGINT. See if we have any workers to kill and remove the queue.
+	trap '_time_active=$(do_timer ${_time_start})' SIGINT SIGTERM
+	_time_active="$(do_timer ${_time_start})"
+	do_log debug2 "${_myname} terminating after ${_time_active}s"
+
+	# Kill all active passphrase workers.
+	local _pp
+	for _pp in ${!_pid_ppwrk[@]}; do
+		[[ ! -z "${_pid_ppwrk[${_pp}]}" && "$(cat /proc/${_pid_ppwrk[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${_pid_ppwrk[${_pp}]} && do_log debug2 "${_myname} killed passphrase worker for ${_pp} (PID:${_pid_ppwrk[${_pp}]})"
+	done
+
+	# If we are in startup we should not be terminated, exit with error. Otherwise exit with current status.
+	if [[ "${starting}" -ne 0 ]]; then
+		do_log error "${_myname} terminated while in startup mode"
+		_status=1
+	fi
+	[[ "$(cat /proc/${_pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -0 ${_pid_logwriter} && do_log debug2 "${_myname} killed logwriter (PID: ${_pid_logwriter})"
+	exit ${_status}
+}
+
+trap_hup_reader()
+{
+	# Received reload request from systemd. Reload the config when not handling command and no active workers.
+	if [[ ${starting} -eq 0 && ${confok} -eq 0 ]]; then
+		do_log warning "${_myname} received SIGHUP, reload config asap"
+		if [[ -z "${_cmd}" ]]; then
+			[[ -z "${!_pid_ppwrk[@]}" ]] && do_reader_notify_daemon "reload" && exit 0 
+			confok=1
+			do_reader_cleanup
+		fi
+		confok=1
+	fi
+}
+
+udev_reader()
+{
+	# The reader process will read commands from the queue. When command is read some atomical stuff needs to be done
+	# At the very least we should check for any running password workers, start worker process and keep track of them all.
+	# Just like the daemon process the reader will run a cleanup timer and do cleanup every conf[CLEANUP_TIMER].
+	trap 'trap_term_reader' SIGINT SIGTERM
+	trap 'trap_hup_reader' SIGHUP
+
+	local _pid_reader=${BASHPID} _myname="reader (${BASHPID}):" _time_start=${EPOCHREALTIME:0:-3} _time_active=0.000
+ 	local _nr_cmds=1 _start_status=0 _cleanup=0.000 _pid_logwriter _key=""
+	declare -A _pid_ppwrk _fd_ppwrk _time_ppwrk _pp_cached
+	
+	do_log info "${_myname} initializing"
+
+	# Start logwriter with dedicated logfile when LOGLEVEL=2 or = 4. When level = 4 redirect out stdout and stderr to the logwriter.
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter reader-${_pid_reader}.log) && _pid_logwriter=$1
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 4 ]] && exec 6> >(logwriter reader-${_pid_reader}.log) 1>&6 2>&1 && _pid_logwriter=$!
+
+	# If we are booting up the master passphrase may be in the user keyring, revoke and cache in session keyring.
+	_key="$(keyctl request user "system:master")"
+	if [[ ! -z "${_key}" && ${starting} -ne 0 && ${_pp_cached[system:master]} -ne 1 ]]; then
+		local __passphrase="$(keyctl print "${_key}")" __add_pp="system:master" __myname="${_myname}"
+		keyctl revoke "${_key}"
+		_pp_cached[system:master]=1
+		do_cache_pp & do_put_key &
+	fi
+	
+	local _fd_fifo; exec {_fd_fifo}<>${conf[FIFO]}
+	while true; do
+		# Before returning to waiting for new command, set the status to 0.
+		local _status=0 _read_to _cmd=""
+
+		# Evaluate process timeouts (always evaluate against daemon start time).
+		do_reader_timeout
+        
+		# Start reading from the queue.
+		IFS= read ${_read_to} -ru ${_fd_fifo} _cmd
+		local _res=$?
+
+		if [[ ${_res} -eq 142 ]]; then
+			# Read timed out. Set the starting status if we are starting up, or run cleanup.
+			# Cleanup will start after conf[START_TIMEOUT] to give all initial workers the chance to finish.
+			case ${starting} in
+				0)	do_log debug2 "${_myname} waking up from slumber" ;;
+				1)	# Initial queue empty, set start status to 0.
+					starting=0
+					do_reader_notify_daemon "started ${_start_status}"
+					do_reader_cleanup ;;
+			esac
+			do_log debug2 "${_myname} running since $(do_timer date ${_time_start})"
+			continue
+		elif [[ ${_res} -gt 128 ]]; then
+			# Should not happen, only if we received signal during read.
+			do_log debug "${_myname} read result ${_res} may have been trapped"
+			[[ ${_cleanup} -eq 0 ]] && do_reader_cleanup
+		elif [[ ${_res} -ne 0 ]]; then
+			do_log error "${__myname} read error, terminating after $(do_timer ${_time_start})s"
+			exit 1
+		fi
+
+		if [[ -z ${_cmd} ]]; then
+			do_log error "${_myname} reached EOF on queue, terminating"
+			exit 1
+		fi
+
+		do_log debug "${_myname} new command received ${_cmd}"
+		do_reader_fifo
+
+		# Done processing, calculate time spent and if we are still staring check against time-out. Evaluate the start status..
+		if [[ ${starting} -ne 0 ]]; then
+			[[ ${_status} -eq 1 ]] && _start_status=1
+			[[ ${_start_status} -eq 0 && ${_status} -eq 2 ]] && _start_status=2
+		fi
+		_nr_cmds=$((_nr_cmds+1))
+		do_log debug2 "${_myname} running since $(do_timer date ${_time_start})"
+	done
+
+	# We should never get here, exit with error if we do.
+	_time_active="$(do_timer ${time_start})"
+	do_log error "${_myname} terminated unexpectedly after ${time_active}s"
+	systemd-notify --pid=$$ --status="cryptdisksd: ${_myname} terminated unexpectedly after ${time_active}s"
+	kill -SIGTERM ${BASHPID}
+}
+
+do_reader_timeout()
+{
+	# If we are starting up, read time-out when initial queue is empty so we can notify parent.
+	# If we are in normal op, keep cleanup timer (60secs).
+	time_active=$(do_timer ${time_start})
+	
+	# Rceived SIGHUP. Do a config reload (restart the reader), when no active workers.
+	[[ ${starting} -eq 0 && ${confok} -eq 1 && -z "${!_pid_ppwrk[@]}" ]] && do_reader_notify_daemon "reload" && exit 0
+
+	# First check if we have a start timeout. If so we are started. Not need notify daemon it will figure it out on its own.
+	if [[ ${starting} -ne 0 && ${time_active:0:-4} -ge ${conf[START_TIMEOUT]} ]]; then 
+		starting=0
+		do_log warning "${_myname} start timeout reached"
+	fi
+
+	# Evaluate the queue read timeout, to see at which point in time we are.
+	case ${starting} in
+		0)	# Evaluate cleanup timer against daemon active time
+			if [[ ${time_active:0:-4} -gt $((${_cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] || [[ ${_res} -eq 142 && ${_read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]]; then
+				do_reader_cleanup
+			fi
+			_read_to="-t $(((${conf[CLEANUP_TIMER]}+${conf[QUEUE_TIMEOUT]})-((${time_active:0:-4}+${conf[CLEANUP_TIMER]}/2)%${conf[CLEANUP_TIMER]})))" ;;
+		1)	# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
+			_read_to="-t ${conf[QUEUE_TIMEOUT]}" ;;
+	esac
+
+	# Check if we need to reload confg, reload when not handling command and no active workers.
+	[[ ${confok} -eq 1 && -z "${_cmd}" ]] && do_reader_cleanup && [[ -z "${!_pid_ppwrk[@]}" ]] && do_reader_notify_daemon "reload" && exit 0
+	return 0
+}
+
+do_reader_fifo()
+{
+	local __myname="${_myname} ${_nr_cmds} -" __time_start="${EPOCHREALTIME:0:-3}"
+	local __time_active=0.000 __msg="" 
+
+	# We have a command to process so start processing. First split up the command into an array.
+	do_log debug "${__myname} processing \"${_cmd}\"" 
+
+	local __cmd_arr=()
+	IFS=' ' read -ra __cmd_arr <<< "${_cmd}" 
+	if [[ $? -ne 0 ]]; then
+		_status=1
+		do_log debug "${__myname} error parsing command \"${_cmd}\""
+		return
+	fi
+	local __cmd="${__cmd_arr[0],,}"
+	
+	# Parse the command, the first element in the array is the command itself, the other elements the arguments to the command.
+	# From UDEV we will receive add and remove commands with one paramter only, the disk.
+	case ${__cmd} in
+		add|change)		do_reader_add_crypt ;;
+		remove)			do_reader_remove_crypt ;;
+		control|notify)		do_reader_control ;;
+		*)			do_log debug "${__myname} received invalid command: \"${_cmd}\"" ;;
+	esac
+	__time_active="$(do_timer ${__time_start})"
+	do_log debug2 "${__myname} processing command \"${_cmd}\" took ${__time_active}s total"
+	return 0
+}
+
+reader_control_shell()
+{
+	# Open a debug shell, will run under root so be careful with this.
+	local __myname __time_start __socat 
+	trap 'trap_term_systemd_daemon_cmd' SIGINT SIGTERM 
+	__myname="reader-shell (${BASHPID}:${__pid_ctrl}):" __time_start=${EPOCHREALTIME:0:-3}
+
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter reader-shell-${BASHPID}.log)
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 4 ]] && exec 6> >(logwriter reader-shell-${BASHPID}.log) 1>&6 2>&1
+	
+	[[ ! conf[DEBUGSHELL] -eq 1 ]] && kill -15 ${__pid_ctrl} && do_log error "${__myname} debug shell not enabled" && exit 1
+
+	# Open a connection to the listening socket. Check if it exists first.
+	TERM=xterm; coproc __socat { socat exec:"bash -i",pty,stderr,setsid,sigint,sane UNIX-CONNECT:${__sock_ctrl}; }
+	do_log warning "${__myname} debug shell started"
+	wait ${__socat_PID}
+}
+
+do_reader_control()
+{
+	case ${__cmd_arr[2]} in
+		status|smart|erase|finished|add|del|put|rmkey) 
+			do_reader_notify_daemon "${__cmd_arr[@]}"
+			;;
+		shell) 
+			local __fd_shell __pid_ctrl="${__cmd_arr[1]}" __sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${__cmd_arr[1]}.sock"
+			exec {__fd_shell}> >(reader_control_shell) 
+			;;
+		*) 
+			do_log debug "${__myname} received invalid control command \"${__cmd_arr[@]:2}\""
+			;;
+	esac
+	return 0
+}
+
+do_reader_add_crypt()
+{
+	# The add command received from UDEV will contain 1 argument, the block device that is added.
+	# At least a mount worker for adding the cryptdisk A passphrase worker process is spawned if there is not already 
+	# one running for the passphrase. We will keep a list of passhrase workers and mount workers using that passphrase.
+
+	# First lookup the device in the crypttab file, if there is no associated cryptdisk exit.
+	local __crypt_arr; do_xcrypt_fromtab __myname ${__cmd_arr[@]:1} || return 
+	
+	# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
+	local __add_crypt="${__crypt_arr[0]}" __add_dev="${__crypt_arr[1]}" __add_pp="$(do_eval_pp "${__crypt_arr[2]}")"
+	if ! do_find_dev; then
+		do_log warning "${__myname} ${__add_dev} not found in ${conf[BLOCKDEVSDIRS]}"
+		_status=2
+		return 2
+	fi
+	if [[ "${__cmd}" == "change" ]] && dmsetup info "${__add_crypt}" >/dev/null 2>&1; then
+		# If the UDEV action is change (reload) we will not bother the daemon with mounts that are still active.
+		do_log debug "${__myname} cryptdisk ${__add_crypt} already present ${1,,}"
+		return
+	fi
+	do_log debug "${__myname} adding ${__add_dev} as ${__add_crypt} using ${__add_pp} passphrase"
+
+	# Check if we have a passphrase worker active and use it if it's still valid.
+	if [[ ! -z "${_pid_ppwrk[${__add_pp}]}" ]]; then
+		do_log debug "${__myname} found passphrase worker (PID: ${_pid_ppwrk[${__add_pp}]} for ${__add_pp}, checking"
+		# To prevent a race where pp worker will notify before us, leading to stale mounts, use a lock on the passphrase.
+		[[ ! -e ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} ]] && touch ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} >/dev/null 2>&1
+		local __fd_pp; exec {__fd_pp}<${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}
+		flock --verbose -w .${conf[LOCK_TIMEOUT]} ${__fd_pp}
+		if do_reader_check_ppwrk; then
+			# Worker is still active and valid, notify the reader about the crypt and continue reading the queue.
+			do_log debug "${__myname} passphrase worker (PID: ${_pid_ppwrk[${__add_pp}]}) for ${__add_pp} still valid"
+			do_reader_notify_daemon	"add ${__add_crypt} ${__add_dev} ${__add_pp}"
+			exec {__fd_pp}>&-
+			return
+		fi
+		exec {__fd_pp}>&-
+	fi
+
+	# No active or killed workers, check keyring for passphrase start new worker if key not in cache.
+	__key="$(keyctl request user "${__add_pp}")"
+	if [[ -n "${__key}" ]]; then
+		# Passphrase is still cached, use it and notify the daemon about the crypt.
+		__passphrase="$(keyctl print "${__key}")"
+		do_log info "${__myname} found cached ${__add_pp} passphrase" 
+		do_reader_notify_daemon "add ${__add_crypt} ${__add_dev} ${__add_pp}||${__passphrase}"
+		# If we are in boot up the passphrase may be in the user keyring, revoke and cache in session keyring.
+		if [[ ${starting} -ne 0 && ${_pp_cached[${__add_pp}]} -ne 1 ]]; then
+			keyctl revoke "${__key}"
+			_pp_cached[${__add_pp}]=1
+			do_cache_pp & do_put_key &
+		fi
+		return 
+	fi
+
+	# No worker and no passphrase cached, start new worker.
+	do_log debug "${__myname} no cached passphrase or active worker for ${__add_pp}, starting"
+	do_reader_notify_daemon	"add ${__add_crypt} ${__add_dev} ${__add_pp}"
+	case ${conf[LOGLEVEL]} in
+		0|1|2)
+			# Start passphrase worker with stdout and stderr redirected to /dev/null (silent). fd 4 will point back to us.
+			exec {_fd_ppwrk[${__add_pp}]}< <(udev_reader_ppwrk 4>&1- 1>dev/null 2>&1)
+			;;
+		3|4)
+			# Start passphrase worker with stdout and stderr redirected to logwriter (fd 6). fd 4 will point back to us.
+			exec {_fd_ppwrk[${__add_pp}]}< <(udev_reader_ppwrk 4>&1- 1>&6 2>&1)
+			;;
+	esac
+	_pid_ppwrk[${__add_pp}]=$!
+	_time_ppwrk[${__add_pp}]=$(do_timer ${time_start})
+	
+	do_log debug2 "${__myname} ${__cmd_arr[0],,} ${__crypt_arr[@]} took $(do_timer ${__time_start})s"
+	return 0
+}
+
+do_reader_check_ppwrk()
+{
+	if IFS= read -t0 -u ${_fd_ppwrk[${__add_pp}]}; then
+		# The worker will send us a message when done, it will notify the daemon of the passphrase itself.
+	   	# So if we can read from the fd the worker had finished or encountered an error.
+		local __msg
+		if ! IFS= read -ru ${_fd_ppwrk[${__add_pp}]} __msg; then
+			do_log warning "${__myname} passphrase worker (PID: ${_pid_ppwrk[${__add_pp}]}) for ${__add_pp} has terminated unexpectedly"
+		else
+			do_log debug "${__myname} passphrase worker (PID: ${_pid_ppwrk[${__add_pp}]}) for ${__add_pp} said \"${__msg}\""
+		fi
+		# Close the fd and kill the worker, we will start a new one.
+		[[ -e /proc/self/fd/${_fd_ppwrk[${__add_pp}]} ]] && exec {_fd_ppwrk[${__add_pp}]}>&-
+		[[ ! -z "${_pid_ppwrk[${__add_pp}]}" && "$(cat /proc/${_pid_ppwrk[${__add_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${_pid_ppwrk[${__add_pp}]} && do_log debug2 "${_myname} killed passphrase worker for ${__add_pp} (PID: ${_pid_ppwrk[${__add_pp}]})"
+		unset _pid_ppwrk[${__add_pp}] _fd_ppwrk[${__add_pp}] _time_ppwrk[${__add_pp}]
+		return 1
+	else
+		do_log debug2 "${__myname} passphrase worker (PID: ${_pid_ppwrk[${__add_pp}]}) for ${__add_pp} fd ${_fd_ppwrk[${__add_pp}]} still open"
+	fi
+	return 0
+}
+
+do_reader_remove_crypt()
+{
+	# Remove the crypt drive. Look up the device received and relay to daemon. 
+	local __cryptarr
+	do_xcrypt_fromtab __myname "${__cmd_arr[@]:1}" || return 1
+	do_reader_notify_daemon "remove ${__crypt_arr[0]}"
+	return 0
+}
+
+do_reader_notify_daemon()
+{
+	local __msg="$@"
+	[[ -z "${__myname}" ]] && local __myname="${_myname}"
+	echo "reader ${_pid_reader} ${__msg}" >&5
+	if [[ ${conf[LOGLEVEL]} -lt 3 ]]; then
+		# Extract optional passphrase from message so it does not get logged when LOGLEVEL < 3.
+		local __passphrase
+		IFS='|' read -r __msg __passphrase <<<"${__msg}"
+	fi
+	do_log debug "${__myname} sent message \"${__msg}\" to daemon (PID: ${pid_daemon})"
+	return 0
+}
+
+do_reader_cleanup()
+{
+	# Reader cleanup routine. Check all the active workers, se if they're still running, terminate after timeout.
+	local __time_start="${EPOCHREALTIME:0:-3}"
+	_cleanup=$(do_timer ${time_start})
+	_time_active=$(do_timer ${_time_start})
+	do_log debug "${_myname} cleanup starting at ${_time_active}"
+
+	# Kill too long running passphrase workers and remove them from the list of active workers.
+	local __pp; for __pp in ${!_pid_ppwrk[@]}; do
+		if [[ ${_time_active:0:-4} -gt $((${_time_ppwrk[${__pp}]:0:-4}+(conf[PP_TIMEOUT]*2))) ]] || IFS= read -t0 -u ${_fd_ppwrk[${__pp}]} && ! IFS= read -ru ${_fd_ppwrk[${__pp}]}; then
+			do_log warning "${_myname} cleanup removed passphrase worker for ${__pp} (PID: ${_pid_ppwrk[${__pp}]})"
+			[[ -e /proc/self/fd/${_fd_ppwrk[${__pp}]} ]] && exec {_fd_ppwrk[${__pp}]}>&-
+			[[ ! -z "${_pid_ppwrk[${__pp}]}" && "$(cat /proc/${_pid_ppwrk[${__pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${_pid_ppwrk[${__pp}]} && do_log debug2 "${_myname} killed passphrase worker for ${__pp} (PID: ${_pid_ppwrk[${__pp}]})"
+			unset _pid_ppwrk[${__pp}]
+			unset _fd_ppwrk[${__pp}]
+			unset _time_ppwrk[${__pp}]
+		fi
+	done
+
+	# If we should reload, check if worker queue is empty and we are not handling command (trapped while in read), and exit.
+	[[ ${confok} -eq 1 && -z "${_cmd}" && -z "${!_pid_ppwrk[@]}" ]] && do_reader_notify_daemon "reload" && exit 0
+
+	# Reset the command counter if nothing is active.
+	[[ -z "${!_pid_ppwrk[@]}" ]] && _nr_cmds=1
+
+	# Notify daemon we are still active.
+	do_reader_notify_daemon "active"
+	
+	do_log debug2 "${_myname} cleanup done in $(do_timer ${__time_start})s, active workers for ${!_pid_ppwrk[@]}"
+	return 0
+}
+
+# [END OF UDEV QUEUE READER FUNCTIONS]
+
+# [BEGIN OF PASSPHRASE WORKER FUNCTIONS]
+
+trap_term_ppwrk()
+{
+	# Kill the workers and exit. First close the fd to the reader so it know we're finisished.
+	[[ ! -z ${__pid_getpp} && "$(cat /proc/${__pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_getpp} && do_log debug2 "${__myname} killed get worker (PID: ${__pid_getpp})"
+	[[ ! -z ${__pid_querypp} && "$(cat /proc/${__pid_querypp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_querypp} && do_log debug2 "${__myname} killed query worker (PID: ${__pid_querypp})"
+	do_log debug2 "${__myname} terminating after $(do_timer ${__time_start})s"
+	exit 0
+}
+
+udev_reader_ppwrk()
+{
+	# We need to get a passphrase. We will start a worker to get the passphrase from the boot servers
+	# and a worker to ask for the passphrase using systemd-ask-password at the same time.
+	# The workers will notify the daemon if they get a passphrase.
+	trap 'trap_term_ppwrk' SIGINT SIGTERM
+	
+	local __pid_ppwrk=${BASHPID} __myname="passphrase:${__add_pp} (${BASHPID}):" __time_start="${EPOCHREALTIME:0:-3}"
+	[[ ${starting} -eq 1 ]] && conf[PP_TIMEOUT]=$((conf[START_TIMEOUT]))
+	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]-conf[QUEUE_TIMEOUT]))
+	local __fd_getpp __pid_getpp __fd_querypp __pid_querypp __passphrase=""
+
+	# Start a logwriter when LOGLEVEL = 2 or 4, redirect our stdout and stderr to that logwiter whenn level = 4.
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter passphrase-${__add_pp}-${__pid_ppwrk}.log 4>&-)
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 4 ]] && exec 6> >(logwriter passphrase-${__add_pp}-${__pid_ppwrk}.log 4>&-) 1>&6 2>&1
+	do_log debug "${__myname} started"
+
+	# If we have a valid bootconf, start the worker to get the passphrase from the boot servers.
+	if [[ ! -z "${bootconf[BOOTSERVERS]}" ]]; then
+		[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {__fd_getpp}< <(ppwrk_get_passphrase 1>/dev/null 2>&1)
+		[[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {__fd_getpp}< <(ppwrk_get_passphrase 1>&6 2>&1)
+		__pid_getpp=$!
+		do_log debug "${__myname} started get passphrase worker (PID: ${__pid_getpp})"
+	fi
+
+	# Start the worker to ask for a passphrase, wait for a few seconds to give the other worker a chance to get the passphrase first.
+	# If we are in start mode (boot) we will wait for the network to be started before bothering the user.
+	[[ ${starting} -ne 0 ]] && until [[ $(systemctl status network-online.target >/dev/null 2>&1)$? -ne 3 ]]; do
+   		IFS= read -t ${conf[QUEUE_TIMEOUT]} -u ${__fd_getpp}; 
+	done
+	[[ ${starting} -eq 0 ]] && IFS= read -t ${conf[QUEUE_TIMEOUT]} -u ${__fd_getpp}
+    [[ ${conf[LOGLEVEL]} -le 2 ]] && exec {__fd_querypp}< <(ppwrk_query_passphrase 1>/dev/null 2>&1)
+    [[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {__fd_querypp}< <(ppwrk_query_passphrase 1>&6 2>&1)
+	__pid_querypp=$!
+	do_log debug "${__myname} started query passphrase worker (PID:${__pid_querypp})"
+
+	# Wait for timeout of query worker. The workers will notify the daemon if they have received a pssphrase.
+	# If they time out read wil return non zero exit status. We should not ever read anything, as the worker closes the fd.
+	# The network worker will kill us if it gets passphrase, only reasons for read exit are finish, time-out or unexepected error.
+	local __time_active=$(do_timer ${__time_start})
+	IFS= read -t$((${conf[PP_TIMEOUT]}-${__time_active:0:-4}-${conf[QUEUE_TIMEOUT]})) -ru ${__fd_querypp}
+	local __res=$?
+
+	# Timeout has been reached. Kill the workers. Send an emtpy passphrase to the daemon.
+	[[ ! -z ${__pid_getpp} && "$(cat /proc/${__pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_getpp} && do_log debug2 "${__myname} killed get worker (PID: ${__pid_getpp})"
+	[[ ! -z ${__pid_querypp} && "$(cat /proc/${__pid_querypp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_querypp} && do_log debug2 "${__myname} killed query worker (PID: ${__pid_querypp})"
+	if [[ ${__res} -gt 128 ]]; then
+		do_log warning "${__myname} timed out after $(do_timer ${__time_start})s"
+		do_reader_notify_daemon "passphrase ${__add_pp}" 
+	elif [[ ${__res} -eq 1 ]]; then
+		do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
+	else 
+		do_log debug2 "${__myname} read passphrase \"${__passphrase}\" error after $(do_timer ${__time_start})s"
+	fi
+
+	do_log debug2 "${__myname} took $(do_timer ${__time_start})s total"
+}
+
+trap_term_ppwrk_get_passphrase()
+{
+	[[ ! -z "${___pid_netpp}" && "$(cat /proc/${__pid_netpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_netpp} && do_log debug2 "${__myname} killed net worker (PID: ${___pid_netpp})"
+	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
+	exit 0
+}
+
+ppwrk_get_passphrase()
+{
+	# Get the passphrase from the bootservers. Notify the reader if a passphrase is returned. Keep trying until timeout.
+	trap 'trap_term_ppwrk_get_passphrase' SIGINT SIGTERM
+	local __myname="passphrase_get:${__add_pp} (${BASHPID}):"
+	local ___time_start="${EPOCHREALTIME:0:-3}"
+	local ___time_active=0.000
+	do_log debug "${__myname} start getting passphrase from bootservers"
+
+	while [[ ${___time_active:0:-4} -le $((conf[PP_TIMEOUT]-(conf[PP_TIMEOUT]/conf[NET_MIN_RETRIES]))) ]]; do
+		local ___fd_netpp ___pid_netpp ___srv
+		[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {___fd_netpp}< <(ppwrk_net_passphrase 4>&1- 5>&- 1>/dev/null 2>&1)
+		[[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {___fd_netpp}< <(ppwrk_net_passphrase 4>&1- 5>&- 1>&6 2>&1)
+		___pid_netpp=$!
+		IFS='|' read -r -t $((conf[PP_TIMEOUT]/conf[NET_MIN_RETRIES])) -u ${___fd_netpp} ___srv __passphrase
+			__passphrase="${__passphrase:1}"
+			local ___res=$?
+			case ${___res} in
+				1|142)	# Timeout or all worker finished. Kill worker and restart.
+					do_log debug2 "${__myname} timeout or workers finished after $(do_timer ${___time_start})s" ;;
+				0)		# Should have received a passphrase, check it.
+					if [[ -n "${__passphrase}" && $(do_check_passphrase)$? -ne 1 ]]; then
+						# Correct passphrase send it to reader.
+						do_log info "${__myname} get and check passphrase from ${___srv} for ${bootconf[BOOTUSER]} succeeded after $(do_timer ${___time_start})s"
+						[[ ! -z ${___pid_netpp} && "$(cat /proc/${___pid_netpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_netpp} && do_log debug2 "${__myname} killed net worker (PID: ${___pid_netpp})"
+						[[ ! -e ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} ]] && touch ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} >/dev/null 2>&1
+						local ___fd_pp;	exec {___fd_pp}<${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}
+						flock --verbose -w .${conf[LOCK_TIMEOUT]} ${___fd_pp}
+						do_reader_notify_daemon "passphrase ${__add_pp}||${__passphrase}"
+						do_put_key & do_cache_pp &
+						echo "${__myname} done" >&4
+						[[ ! -z ${__pid_ppwrk} && "$(cat /proc/${__pid_ppwrk}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_ppwrk} && do_log debug2 "${__myname} killed passphrase worker for ${__add_pp} (PID: ${__pid_ppwrk})"
+						exit 0
+					else
+						# Incorrect passphrase, restart worker
+						do_log warning "${__myname} get ${__add_pp} passphrase for ${bootconf[BOOTUSER]} failed check"
+				        __passphrase=""
+					fi ;;
+			esac
+			exec {___fd_netpp}>&-
+			[[ ! -z ${___pid_netpp} && "$(cat /proc/${___pid_netpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_netpp} && do_log debug2 "${__myname} killed net worker (PID: ${___pid_netpp})"
+			sleep ${conf[QUEUE_TIMEOUT]} & wait
+		___time_active=$(do_timer ${___time_start})
+	done	
+	
+	do_log error "${__myname} timeout after $(do_timer ${___time_start})s"
+	exit 1
+}
+
+trap_term_ppwrk_net_passphrase()
+{
+	local ____srv
+	for ____srv in ${!___pid_bootserver[@]}; do
+		[[ "$(cat /proc/${___pid_bootserver[${____srv}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_bootserver[${____srv}]} && do_log debug2 "${__myname} killed ssh worker (PID: ${___pid_bootserver[${____srv}]})"
+	done
+	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
+	exit 0
+}
+
+ppwrk_net_passphrase()
+{
+	trap 'trap_term_ppwrk_net_passphrase' SIGINT SIGTERM
+	local __myname="passphrase_net:${__add_pp} (${BASHPID}):" ___time_start="${EPOCHREALTIME:0:-3}" ___srv
+	declare -A ___fd_bootserver ___pid_bootserver
+
+	# Walk through the bootservers, and start a worker per server, they will relay the passphrase to the get worker.
+	do_log debug "${__myname} getting passphrase from ${bootconf[BOOTSERVERS]}"
+	for ___srv in ${bootconf[BOOTSERVERS]}; do
+		[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {___fd_bootserver[${___srv}]}< <(ppwrk_ssh_passphrase 1>&4 2>/dev/null)
+		[[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {___fd_bootserver[${___srv}]}< <(ppwrk_ssh_passphrase 1>&4 2>&6)
+		___pid_bootserver[${___srv}]=$!
+	done
+	
+	# Wait for the passphrase workers to finish, with read as the workers have not been started with job control (fd insted of &).
+	local ___fd
+	for ___fd in ${___fd_bootserver[@]}; do
+		IFS= read -u ${___fd}
+		exec {___fd}>&-
+	done
+	do_log debug2 "${__myname} finished after $(do_timer ${___time_start})s"
+}
+
+trap_term_ppwrk_ssh_passphrase()
+{
+	[[ ! -z "${____pid_dossh}" && "$(cat /proc/${____pid_dossh}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${____pid_dossh} && do_log debug2 "${__myname} killed dossh worker (PID: ${____pid_dossh})"
+	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
+	exit 0
+}
+
+ppwrk_ssh_passphrase()
+{
+	trap 'trap_term_ppwrk_ssh_passphrase' SIGINT SIGTERM
+	local __myname="passphrase_ssh:${__add_pp}:${___srv} (${BASHPID}):"
+	local ____time_start=${EPOCHREALTIME:0:-3}
+	local ____fd_dossh ____pid_dossh ____passphrase=""
+	
+	do_log debug "${__myname} getting passphrase from ${___srv}"
+	[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {____fd_dossh}< <(do_ppwrk_ssh_passphrase 2>/dev/null)
+	[[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {____fd_dossh}< <(do_ppwrk_ssh_passphrase 2>&6)
+	____pid_dossh=$!
+	IFS= read -ru ${____fd_dossh} ____passphrase
+	if [[ $? -eq 0 && ! -z "${____passphrase}" ]]; then
+		echo "${___srv}||${____passphrase}"
+		do_log debug2 "${__myname} getting ${__add_pp} passphrase \"${____passphrase}\" from ${___srv} succeeded"
+	else
+		do_log debug "${__myname} getting passphrase from ${___srv} failed"
+	fi
+	do_log debug2 "${__myname} finished after $(do_timer ${____time_start})s"
+}
+
+trap_term_do_ppwrk_ssh_passphrase()
+{
+	[[ ! -z "${____pid_ssh}" && "$(cat /proc/${____pid_ssh}/comm 2>/dev/null)" == "ssh" ]] && kill -SIGTERM ${____pid_ssh} && do_log debug2 "${__myname} killed ssh (PID: ${____pid_ssh})"
+	do_log debug2 "${__myname} terminating after $(do_timer ${____time_start})s"
+	exit 0
+}
+
+do_ppwrk_ssh_passphrase()
+{
+	local __myname="passphrase_dossh:${__add_pp}:${___srv} (${BASHPID}):"
+	trap 'trap_term_do_ppwrk_ssh_passphrase' SIGINT SIGTERM
+	do_log debug "${__myname} start getting ${__add_pp} passphrase from ${___srv}"
+	ssh -fi ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${___srv} "GET "${__add_pp}"" &
+	local ____pid_ssh=$!
+	wait ${____pid_ssh}
+	do_log debug2 "${__myname} finished after $(do_timer ${____time_start})s"
+	exit 0
+}
+
+trap_term_ppwrk_ask_passphrase()
+{
+	[[ ! -z "${____pid_askpp}" && "$(cat /proc/${____pid_askpp}/comm 2>/dev/null)" == "systemd-ask-pas" ]] && kill -SIGTERM ${____pid_askpp} && do_log debug2 "${__myname} killed systemd-ask-password (PID: ${____pid_askpp})"
+	do_log debug2 "${__myname} terminating after $(do_timer ${____time_start})s"
+	exit 0
+}
+
+ppwrk_ask_passphrase()
+{
+	# Ask for a passphrase in the background, record the pid so we can kill it if necessary.
+	trap 'trap_term_ppwrk_ask_passphrase' SIGINT SIGTERM
+
+	local __myname="passhrase_ask:${__add_pp} (${BASHPID}):"
+	do_log debug "${__myname} start asking for ${__add_pp} passphrase"
+	local ____time_start=${EPOCHREALTIME:0:-3}
+	systemd-ask-password --timeout=${____to} --id=${__add_pp} "$1" &
+	local ____pid_askpp=$!
+	wait ${____pid_askpp}
+	do_log debug2 "${__myname} finished after $(do_timer ${____time_start})s"
+	exit 0
+}
+
+trap_term_ppwrk_query_passphrase()
+{
+	# Close the fd to the reader, we don't need it and should not keep it.
+	[[ ! -z "${___pid_askpp}" && "$(cat /proc/${___pid_askpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_askpp} && do_log debug2 "${__myname} killed ask worker (PID: ${___pid_askpp})"
+	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
+	exit 0
+}
+
+ppwrk_query_passphrase()
+{
+	# Ask for a pssphrase input by user through systemd-ask-password
+	trap 'trap_term_ppwrk_query_passphrase' SIGINT SIGTERM
+	local __myname="passphrase_query:${__add_pp} (${BASHPID}):"
+	local ___time_start="${EPOCHREALTIME:0:-3}"
+	local ___pid_askpp
+	do_log debug "${__myname} query for ${__add_pp} passphrase started"
+
+	do_ppwrk_ask_passphrase "Enter ${__add_pp} Passphrase: "	
+
+	# Received a passphrase from the user check it against key stored in firmware.
+	local ___ppchk=$(do_check_passphrase)$?
+	if [[ ${___ppchk} -eq 2 ]]; then
+		# Key not present in firmware, ask for confirmation from the user.
+		local ___passphrase="${__passphrase}"
+		do_ppwrk_ask_passphrase "Created key file. Confirm ${__add_pp} Passphrase: "
+		# If the passphrase does not match, enter a loop until it does and wirte the keyfile if ok.
+		until [[ "${___passphrase}" == "${__passphrase}" ]]; do
+			do_ppwrk_ask_passphrase "Passphrases do not Match. Enter ${__add_pp} Passphrase: "
+			___passphrase="${__passphrase}"; do_check_passphrase rmkey
+			do_ppwrk_ask_passphrase "Confirm ${__add_pp} Passphrase: "
+			[[ "${___passphrase}" == "${__passphrase}" ]] && do_write_keyfile &
+		done
+		do_log debug "${__myname} received passphrase after $(do_timer ${___time_start})s"
+
+	elif [[ ${___ppchk} -eq 1 ]]; then
+		# Passphrase entered does not match stored key, keep asking until it does.
+		until [[ ${___ppchk} -eq 0 ]]; do
+			do_log debug2 "${__myname} query passphrase check failed"
+			do_ppwrk_ask_passphrase "Incorrect Passphrase. Enter ${__add_pp} Passphrase: "
+			___ppchk=$(do_ppwrk_passphrase)$?
+		done
+		do_log debug "${__myname} received passphrase after $(do_timer ${___time_start})s"
+
+	elif [[ ${___ppchk} -eq 0 ]]; then
+		# Passphrase received is ok.
+		do_log debug "${__myname} received passphrase after $(do_timer ${___time_start})s"
+	fi
+ 
+ 	# Notify the reader, so it knows passphrase worker has finished, and notify the daemon.
+	[[ ! -e ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} ]] && touch ${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]} >/dev/null 2>&1
+	local ___fd_pp;	exec {___fd_pp}<${conf[FWDIR]}/UglyLinux${__add_pp}.key-${conf[FWGUID]}
+	flock --verbose -w .${conf[LOCK_TIMEOUT]} ${___fd_pp}
+	do_reader_notify_daemon "passphrase ${__add_pp}||${__passphrase}"
+	do_cache_pp &
+	# Put key to bootservers in the background.
+	[[ ! -z "${bootconf[BOOTSERVERS]}" && ! -z "${__passphrase}" ]] && do_put_key & 
+	echo "${__myname} done" >&4
+	
+	# Kill the main passphrase worker process.
+	[[ ! -z ${__pid_ppwrk} && "$(cat /proc/${__pid_ppwrk}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_ppwrk} && do_log debug2 "${__myname} killed passphrase worker for ${__add_pp} (PID: ${__pid_ppwrk})"
+	[[ ! -z ${__pid_getpp} && "$(cat /proc/${__pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_getpp} && do_log debug2 "${__myname} killed get worker (PID: ${__pid_getpp})"
+
+	do_log debug2 "${__myname} took $(do_timer ${___time_start})s total"
+	exit 0
+}
+
+do_ppwrk_ask_passphrase()
+{
+	# Query for the passphrase in the background, record pid so we can kill if passphrase is received from server.
+	__time_active=$(do_timer ${__time_start})
+	local ____fd_askpp ____to=$((conf[PP_TIMEOUT]-${__time_active:0:-4}))
+
+	if [[ ${____to} -lt 10 ]]; then
+		do_log debug "${__myname} timeout after $(do_timer ${___time_start})s"
+		exit 1
+	fi
+	[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {____fd_askpp}< <(ppwrk_ask_passphrase "$1" 4>&- 5>&- 2>/dev/null)
+	[[ ${conf[LOGLEVEL]} -gt 2 ]] && exec {____fd_askpp}< <(ppwrk_ask_passphrase "$1" 4>&- 5>&- 2>&6)
+	___pid_askpp=$!; wait ${___pid_askpp}
+	if [[ $? -eq 0 ]]; then
+		IFS= read -ru ${____fd_askpp} __passphrase
+	else
+		do_log debug "${__myname} timeout after $(do_timer ${___time_start})s"
+		exit 1
+	fi
+
+	exec {____fd_askpp}>&-
+	return 0
+}
+
+# [END OF PASSPHRASE WORKER FUNCTIONS]
+
+# [START OF UDEV PROCESSING FUNCTIONS]
+
+do_udev_queue()
+{
+	# Put the udev action on the queue.
+	[[ -z "${conf[FIFO]}" ]] && conf[FIFO]=/run/${MYNAME}/${MYNAME}.queue
+	local _fifo
+	if [[ $# -ne 0 ]]; then
+		echo "$@" >${conf[FIFO]} 
+	fi
+	return $?
+}
+
+do_cryptdisksd_udev()
+{
+	# Parse the udev command line and prepare the message to be put on the queue. Udev can only be run by root.
+	if [[ ${UID} -ne 0 || -z "${ACTION}" ]]; then
+		echo "${MYNAME} udev queue can only be started from udev"
+		exit 1
+	fi
+
+	# Prepare the message, first check if there is a confdir specified on command line, or load from systemd if not so.
+	local __msg="${ACTION}" __res=1 __command=udev __args=$#
+	if [[ -z "${CONFDIR}" ]]; then
+		local _t="$(grep -ie "^CONFDIR=\/" /etc/systemd/${MYNAME}.conf)"
+		CONFDIR="${_t##*=}"
+	fi
+	shift
+	
+	# Enter a loop to check if any of the arguments specified is a command, error exit if so, add parameter to message if ok.
+	while [[ ! -z "$1" ]]; do
+		do_parse_opt $@; __res=$?
+		if [[ ${__res} -eq 0 ]]; then
+			__msg+=" $1"
+			shift
+		else
+			logger -p daemon.error "${MYNAME} cannot name crypt or dev \"$1\""
+			shift
+		fi
+	done
+
+	# Put the message (if any) on the queue.
+	if [[ ! "${__msg}" == "${ACTION}" ]]; then 
+		do_udev_queue ${__msg}
+	fi
+}
+
+# [END OF UDEV PROCESSING FUNCTIONS]
+
+# [START OF INTERACTIVE CONTROL FUNCTIONS]
+
+do_echo_use()
+{
+	[[ -z "${conf[RUNDIR]}" ]] && { do_init_conf || echo -e "${RED}${MYNAME}, Error Loading Configuration from ${CONFDIR}${NOR}"; }
+	echo -e "${GREY}${BOLD}${MYNAME} (Encrypted Block Device Manager)${NOR}\n"
+	case $1 in
+		status)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tDisplays Status of Encrypted Block Devices"
+			echo -e "\t\t\t\tCommand Has no Options or Arguments\n"
+			;;
+		stop)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tStops the Encrypted Device Manager"
+			echo -e "\t\t\t\tCommand Has no Options or Arguments\n"
+			;;
+		reload)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tReloads the Configuration of the Encrypted Device Manager"
+			echo -e "\t\t\t\tCommand Has no Options or Arguments\n"
+			;;
+		add)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tAdd an Encrypted Block Device to the Manager\n"
+			echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hc ] { crypt | device } || { -p passphrase crypt device }${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
+			echo -e "\t${BOLD}-p {passphrase}${NOR}\tUse {passphrase} for Crypt\n\n"
+			echo -e "The $1 Command Can Be Used it Two Ways.\nThe First ( ${BOLD}[ -c ] { crypt | device }${NOR} ) Will Add a Crypt or Device Which is Already on the Crypttab"
+			echo -e "The Second ( ${BOLD}[ -c ] { -p passphrase crypt device }${NOR} ) Will Add a crypt (and Corresponding Backing Device) to the Crypttab\nThe Option '${BOLD}-p passphrase${NOR}' Must Be Specified in the Second Case\n"
+			echo -e "The Options and Arguments Can Be Specified in any Order"
+			echo -e "${BOLD}${UL}${MYNAME} $1 -p passphrase crypt device${NOR}\tand\t${BOLD}${UL}${MYNAME} $1 crypt -c\n${MYNAME} $1 crypt -c device -p passphrase${NOR}\tand\t${BOLD}${UL}${MYNAME} $1 device -p passphrase crypt -c${NOR}"
+			echo -e "Are All Valid $1 Command Specifications\n"			
+			echo -e "The ${MYNAME} Will Look for Block Devices in \"${BOLD}${conf[BLOCKDEVSDIRS]}${NOR}\"\n"
+			;;
+		del)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tRemove an Encrypted Block Device from the Manager\n"
+			echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -htc ] { crypt | device }${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
+			echo -e "\t${BOLD}-t${NOR}\t\tRemove the crypt (and Corresponding Backing Device) from the Crypttab\n\n"
+			echo -e "The Options and Arguments Can Be Specified in any Order\n"
+			;;
+		put)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tPut Key File to Boot Servers\n"
+			echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hc ] passphrase${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions\n"
+			;;
+		rmkey)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tRemove Key File from Firmware\n"
+			echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hc ] passphrase${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions\n"
+			;;
+		smart)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tShow S.M.A.R.T. Information for Backing Device\n"
+			echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -ha ] {crypt | device }${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			echo -e "\t${BOLD}-a${NOR}\t\tShow all S.M.A.R.T. information (Only Atrributes Otherwise)"
+			echo -e "\t${BOLD}-t${NOR}\t\tRun S.M.A.R.T. Long Self Test on Device\n"
+			;;
+		erase)
+			echo -e "${BOLD}${MYNAME} $1${NOR}\t\tSecure Erase Device\n"
+			echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -h ] {crypt | device }${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			;;
+		*)
+			echo -e " Usage:\n\t${BOLD}${MYNAME} { [ -hdf ] ${UL}COMMAND ...${NOR} }\n"
+			echo -e "\tEncrypted Block Devices Manager, Command Line Requires at Least one Option or Command"
+			echo -e "\tMultiple Commands May Be Specified in Order, Commands Can Have Multiple Options and Arguments"
+			echo -e "\tAll Commands Options and Arguments Are cAsE iNSensItiVe, except for ${UL}Device Names${NOR}\n"
+			echo -e "\tUse ${UL}${BOLD}${MYNAME} command -h${NOR} To Display Help for That Command${NOR}\n\n"
+			echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
+			echo -e "\t${BOLD}-d${NOR}\t\tSet Configuration Directory (${BOLD}${UL}Default: /etc/${MYNAME:0:-1}.d${NOR})"
+			echo -e "\t${BOLD}-f${NOR}\t\tRun in Foreground (Debug) Mode. Can Only be Started by root."
+			echo -e "\n\n Commands:\n\t${BOLD}status${NOR}\t\tDisplays Status of Encrypted Block Device Manager"
+			echo -e "\t${BOLD}smart${NOR}\t\tDisplay S.M.A.R.T. Status of Encrypted Block Device" 
+			echo -e "\t${BOLD}erase${NOR}\t\tSecure Erase Encrypted Block Device" 
+			echo -e "\t${BOLD}stop${NOR}\t\tStop the Encrypted Device Manager" 
+			echo -e "\t${BOLD}reload${NOR}\t\tReload the Configuration of the Encrypted Device Manager" 
+			echo -e "\t${BOLD}add${NOR}\t\tAdd Encrypted Block Device to Manager" 
+			echo -e "\t${BOLD}del${NOR}\t\tDelete Encrypted Block Device from Manager" 
+			echo -e "\t${BOLD}put${NOR}\t\tPut Keyfile (Passphrase) to Boot Servers" 
+			echo -e "\t${BOLD}rmkey${NOR}\t\tRemove Keyfile (Passphrase) from Firmware\n" 
+			;;
+	esac
+	exit 127
+}
+
+do_parse_opt()
+{
+	# Parse command line options (-h -d -f). Function is run from main cli to parse as first options given.
+	# Function can also run from the parse cmds function, it that case only -d option can be valid.
+	local __opt; OPTIND=1; getopts :fFd:D:hHcCaAp:P:tT __opt
+	__opt="${__opt,,}"; case ${__opt} in
+		h|:) # if -h is specified as a command line option echo usage for the command running if run from parse cmds.
+			do_echo_use "${__command}"
+			;;
+		a) # Option for smart --all
+			[[ ${_cmd} -eq 0 || ! "${__command,,}" =~ ^(smart)$ ]] && do_echo_use "${__command}"
+			__smartall=1
+			return 1
+			;;
+		c) # Option to ask for confirmation for non critical actions.
+			[[ ${_cmd} -eq 0 || ! "${__command,,}" =~ ^(add|del|put|rmkey)$ ]] && do_echo_use "${__command}"
+			[[  ${__confirm} -eq 1 ]] && do_echo_use "${__command}"
+			__confirm=1
+			return 1
+			;;
+		p) # Option to specify a passphrase name for the new crypt to be added to the crypttab.
+			[[ ${_cmd} -eq 0 || ! "${__command,,}" == "add" ]] && do_echo_use "${__command}"
+			[[  ${__crypttab} -eq 1 ]] && do_echo_use "${__command}"
+			__crypttab=1
+			__add_pp="${OPTARG}"
+			return $((OPTIND-1))
+			;;
+		t) # Option remove crypt from crypttap for del command. Or Run smart self test.
+			[[ ${_cmd} -eq 0 || ! "${__command,,}" =~ ^(del|smart)$ ]] && do_echo_use "${__command}"
+			if [[ "${__command}" == "del" ]]; then
+				[[  ${__crypttab} -eq 1 ]] && do_echo_use "${__command}"
+				__crypttab=1
+				return 1
+			elif [[ "${__command}" == "smart" ]]; then
+				[[  ${__smarttest} -eq 1 ]] && do_echo_use "${__command}"
+				__smarttest=1
+				return 1
+			fi
+			;;
+		d) # Set configuration directory. If no dir specified echo usage. Option is only valid for global, not for command.
+			[[ ${_cmd} -eq 1 ]] && do_echo_use "${__command}"
+			[[ ! -d ${OPTARG} ]] && echo "Configuration Directory ${OPTARG} Does not Exist"
+			[[ ! -d ${OPTARG} || ${_conf} -ne 0 ]] && do_echo_use "${__command}"
+			_conf=1
+			CONFDIR=${OPTARG}
+			# Shift the parameters and check if more arguments specified, continue with processing options if so.
+			[[ $# -ge ${OPTIND} ]] && return $((OPTIND-1))
+			shift $((OPTIND-1))
+			;;
+		f) # Set the flag that we should run in foreground mode. 
+			[[ ${_cmd} -eq 1 || ${FOREGROUND} -eq 1 ]] && do_echo_use "${__command}"
+			FOREGROUND=1
+			# If there are more options continue parsing. -f can only be followed by -d.
+			shift
+			[[ ! -z "$1" ]] && return 1
+			;;
+		?) # If run from parse cmds function, we need to check if the option specified matches a known command.
+		   # If that is the case we have reached the end of the current command and can start processing the next.
+			if [[ ${_cmd} -eq 1 ]]; then
+				if [[ ! -z "$1" ]]; then 
+					if ! do_parse_cmd check $1; then
+						___next_cmd=1
+					else
+						shift
+					fi
+				else
+					# If there are no more arguments set to process next command, which will be none.
+					___next_cmd=1
+				fi
+			fi
+			;;
+	esac
+
+	# All options are evaluated or confdir specified, initialize the configuration.
+	if [[ ( ${_cmd} -eq 0 && ( ${_conf} -eq 1 || -z "$1" ) ) || ( ${_cmd} -eq 1 && ${_conf} -eq 0 ) ]]; then
+		if ! do_init_conf; then
+			echo "Error loading configuration from ${CONFDIR}"; exit 1
+		else
+			_conf=1
+		fi
+	fi
+
+	# If foreground mode was requested execute. Echo command usage if specified in wrong place.
+	if [[ ${FOREGROUND} -eq 1 ]]; then
+		# If -f is not first option specified, it must be last (after -d) and no more options can be present.
+		[[ ${_nr} -gt 1 && ! -z "$1" ]] && do_echo_use "${__command}"
+		# Start in debug/foreground mode.
+		if [[ ${UID} -ne 0 && $# -le 1 ]]; then
+			echo "cryptdisksd daemon foreground can only be started as root"; exit 1
+		fi
+		echo "loglevel=${conf[LOGLEVEL]}"
+		systemd_daemon
+		exit $?
+	fi
+
+	# Return 1 if next command is found, 0 otherwise.
+	[[ ${___next_cmd} -eq 1 ]] && return 1
+	return 0
+}
+
+do_parse_cmd()
+{
+	# Parse the commands specified on the command line, one by one. If called with check, then return 1 on match.
+	# This is to let the parse opt function know a match for a new command has been found.
+	local __command="${1,,}"; if [[ "${__command}" == "check" ]]; then shift; __command="${1,,}"; local __check=1; fi
+	case ${__command} in
+		udev) [[ ${__check} -eq 1 ]] && return 1; do_cmd_parseopt $@; do_cryptdisksd_udev $@; return $#	;;
+		stop) [[ ${__check} -eq 1 ]] && return 1; do_cmd_parseopt $@; /bin/kill -SIGTERM $(cat ${conf[PIDFILE]}); return $#	;;
+		reload)	[[ ${__check} -eq 1 ]] && return 1; do_cmd_parseopt $@; /bin/kill -SIGHUP $(cat ${conf[PIDFILE]}); return 1	;;
+		status|shell|add|del|put|rmkey|smart|erase) [[ ${__check} -eq 1 ]] && return 1; do_cryptdisksd_cmd $@; return $? ;;
+		*) [[ ${__check} -ne 1 ]] && do_echo_use "${__command}"; return 0 ;;
+	esac
+	return 0
+}
+
+do_cmd_parseopt()
+{
+	# If there are more arguments to process, check for command options or or for a new command to be processed.
+	local ___next_cmd=0 ___res ___s=0
+	shift; while [[ ${___next_cmd} -eq 0 ]]; do
+		do_parse_opt $@; ___res=$? 
+		if [[ ${___res} -eq 0 ]]; then
+			__msg+="$1 "
+			shift
+			___s=$((___s+1))
+		else
+			shift ${___res}
+			___s=$((___s+___res))
+		fi
+	done
+	return ${___s}
+}
+
+trap_term_cryptdisksd_cmd()
+{
+	# Kill socat coproc if still active and remove the socket if still present. Restore stdin to the tty.
+	[[ ! -z "${__pid_socat}" && "$(cat /proc/${__pid_socat}/comm 2>/dev/null)" == "socat" ]] && kill -SIGTERM ${__pid_socat} && [[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rKilled ${__pid_socat}"
+	[[ -e ${conf[CRYPTDISKSDDIR]}/${__sock} ]] && rm -f ${conf[CRYPTDISKSDDIR]}/${__sock} && echo -e "\rRemoved ${conf[CRYPTDISKSDDIR]}/${__sock}\r\n"
+	exec 0<&${stdin}-; stty sane; echo -e "${NOR}"
+	exit 255
+}
+
+do_cryptdisksd_cmd()
+{
+	# Request status from daemon. Detach stdin and assign it to socat coproc, which will attach it to daemon stdout.
+	if ! systemctl status ${MYNAME} >/dev/null 2>&1; then echo "${MYNAME} not Running"; exit 1; fi
+	trap 'trap_term_cryptdisksd_cmd' SIGINT SIGTERM
+	
+	# Parse the options to the command and store the nr. of paramters to shift in __s.
+	local __crypttab=0 __confirm=0 __smartall=0 __smarttest=0 __add_pp="" __msg="$1 " __stty_opt=""
+	do_cmd_parseopt $@; local __s=$?
+	local __sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock __pid_socat
+
+	case ${__command} in
+		add)
+			if [[ ${__crypttab} -eq 1 ]]; then
+				[[ $(wc -w <<<"${__msg}") -ne 3 ]] && do_echo_use "${__command}"
+			else
+				[[ $(wc -w <<<"${__msg}") -ne 2 ]] && do_echo_use "${__command}"
+			fi
+			__msg+="${__add_pp} ${__confirm} ${__crypttab}"
+			__stty_opt="raw -echo isig"
+			;;
+		del)
+			[[ $(wc -w <<<"${__msg}") -ne 2 ]] && do_echo_use "${__command}"
+			__msg+="${__confirm} ${__crypttab}"
+			__stty_opt="raw -echo isig"
+			;;
+		status)
+			[[ $(wc -w <<<"${__msg}") -ne 1 ]] && do_echo_use "${__command}"
+			__stty_opt="raw -echo isig"
+			;;
+		smart)
+			[[ $(wc -w <<<"${__msg}") -ne 2 ]] && do_echo_use "${__command}"
+			__msg+="${__smartall} ${__smarttest}"
+			__stty_opt="-echo isig"
+			;;
+		shell)
+			[[ $(wc -w <<<"${__msg}") -ne 1 ]] && do_echo_use "${__command}"
+			__stty_opt="raw -echo -isig"
+			;;
+		*)
+			[[ $(wc -w <<<"${__msg}") -ne 2 ]] && do_echo_use "${__command}"
+			__msg+="${__confirm}"
+			__stty_opt="raw -echo isig"
+			;;
+	esac
+
+	# Set tty options, redirect STDIN
+	stty ${__stty_opt}; local stdin; exec {stdin}<&0-
+
+	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "Requesting \"$@\" from ${MYNAME}\r"
+
+	# Start socat in background and attach stdin, listen on a socket in RUNDIR. 
+	# The daemon will spawn a worker which will connect and start interactive session.
+	socat -t1 - UNIX-LISTEN:${__sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- &
+	__pid_socat=$!
+
+	# Notify the daemon to connect to the socket and wait until it's finished. Then restore stdin and exit.
+	sleep .05; echo "control ${BASHPID} ${__msg}" >${conf[FIFO]}; wait ${__pid_socat}
+
+	# Restore stdin, remove socket and exit.
+	exec 0<&${stdin}-; stty sane
+	[[ -e ${__sock} ]] && rm -f ${__sock}
+
+	[[ ${conf[LOGLEVEL]} -gt 3 ]] && echo "Done requesting \"$@\" from ${MYNAME}"
+	return ${__s}
+}
+
+# [END OF INTERACTIVE CONTROL FUNCTIONS]
+
+# [BEGIN OF EXECUTION FUNCTIONS]
+
+do_systemd_start()
+{
+	# Check if we are started from systemd (PID 1).
+	[[ ! "${UID}" -eq 0 || ! ${PPID} -eq 1 ]] && do_echo_use
+
+	do_init_conf || exit 1
+
+	# Link the session to the user key. So all functions etc have access to it for storing and retreiving cached passphrases.
+	keyctl link @us @s
+
+	systemd_daemon
+}
+
+do_cryptdisksd_cli()
+{
+	local _i=0 _nr=$# _cmd=0 _conf=0
+	# Enter a loop to evaluate all command line options and commands specified.
+	while true; do
+		local _i=$((_i+1)) _res 
+		# Parse options, the return code will be the nr of parameters to shift or 0 if all options parsed.
+		# Continue with processing commands fase if all options parsed.
+		if [[ ${_cmd} -eq 0 ]]; then 
+			do_parse_opt $@
+			_res=$?; shift ${_res}; [[ ${_res} -ne 0 ]] && continue
+		fi
+		# Command line options are parsed, evaluate and execute commands specified. Return code will be nr of arguments to shift.
+		# If after shifting there are no more commands to process we can exit.
+		_cmd=1; do_parse_cmd $@
+		_res=$?; shift ${_res}; [[ -z "$1" ]] && return 0
+	done
+}
+
+MYNAME="$(basename $0)"; FOREGROUND=0; PATH=/bin:/usr/bin:/sbin:/usr/sbin
+[[ ! -z "${LC_NUMERIC}" ]] && unset LC_NUMERIC
+
+# Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
+if [[ $# -eq 0 ]]; then
+	# No command line options specified. check if we're started from systemd, start daemon if so.
+	do_systemd_start
+	exit 1
+else
+	# Command line options present, run in interactive mode.
+	do_cryptdisksd_cli $@
+	# Exit if there are no more commands to execute.
+	exit $?
+fi
+
+# [END OF EXECUTION FUNCTIONS]
+
+# We should never get here, error exit if we do.
+echo "${MYNAME} Reached End of the Line, Bye Bye"
+exit 1
