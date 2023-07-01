@@ -463,8 +463,8 @@ do_daemon_check_conf()
 		cat ${conf[FWBOOTCONF]} | tail -c +5 >${conf[BOOTCONF]} || return 1
 	elif [[ -s ${conf[FWBOOTCONF]} && -s ${conf[BOOTCONF]} ]]; then
 		# Compare the firmware config to confdir.
-		local _diff="$(cat ${conf[FWBOOTCONF]} | tail -c +5 | diff - ${conf[BOOTCONF]})"
-		if [[ ! -z "${_diff}" ]]; then
+		local __diff="$(cat ${conf[FWBOOTCONF]} | tail -c +5)"
+		if ! diff -q <(echo "$conf[BOOTCONF]}") <(echo "${__diff}") >/dev/null; then
 			# Configs are different, overwrite firmware config.
 			[[ ${confok} -eq 0 ]] && confok=1
 			do_log warning "${myname} ${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} differ, replacing ${conf[FWBOOTCONF]}"
@@ -512,17 +512,17 @@ do_daemon_check_conf()
 			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
 			exit 2
 		fi
-		local __diff="$(diff <(cat ${CONF} |grep -ve "^\s*#") - <<<"${systemdconf}")"
-		if [[ ! -z "${__diff}" ]]; then
-			do_log error "${myname} ${CONF} changed, terminating"
+		local __diff="$(cat ${CONF} |grep -ve "^\s*#")"
+		if ! diff -q <(echo "${__diff}") <(echo "${systemdconf}") >/dev/null; then
+			do_log error "${myname} ${CONF} changed, restarting"
 			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
 			exit 2
 		fi
-		local __diff="$(diff <(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#") - <<<"${crypttab}")"
-		if [[ ! -z "${__diff}" ]]; then
+		local __diff="$(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#")"
+		if ! diff -q <(echo "${__diff}") <(echo "${crypttab}") >/dev/null; then
 			do_log debug "${myname} crypttab changed, reloading"
 			if [[ -z "${!waiting_mnt[@]}" ]]; then 
-				kill -SIGHUP ${pid_reader}  && do_log debug2 "${myname} notified reader (PID: ${pid_reader}) of config reload"
+				kill -SIGHUP ${pid_reader} && do_log debug2 "${myname} notified reader (PID: ${pid_reader}) of config reload"
 				confok=2
 			else
 				confok=1
@@ -540,9 +540,9 @@ do_daemon_check_conf()
 	local _usrkey="${CONFDIR}/${bootconf[BOOTUSERKEY]}"
 	if [[ -s ${_fwsrvkey} && -s ${_srvkey} ]]; then
 		# compare the keys, overwrite if necessary
-		local _diff="$(cat ${_fwsrvkey} | tail -c +5 | diff - ${_srvkey})"
-		if [[ ! -z "${_diff}" ]]; then
-            # Configs are different, overwrite firmware config
+		local _diff="$(cat ${_fwsrvkey} | tail -c +5)"
+		if ! diff -q <(echo "${_diff}") <(echo "(${_srvkey}") >/dev/null; then
+			# Configs are different, overwrite firmware config
 			do_log warning "${myname} ${_fwsrvkey} and ${_srvkey} differ, replacing ${_fwsrvkey}"
 			[[ -e ${_fwsrvkey} ]] && chattr -i ${_fwsrvkey}
 			printf "\x07\x00\x00\x00\x00" >${_fwsrvkey} || do_log error "${myname} error creating ${_fwsrvkey}"
@@ -578,8 +578,8 @@ do_daemon_check_conf()
 		chmod 400 ${_usrkey}
 	elif [[ -s ${_fwusrkey} && -s ${_usrkey} ]]; then
 		# compare the keys, overwrite if necessary
-		local _diff="$(cat ${_fwusrkey} | tail -c +5 | diff - ${_usrkey})"
-		if [[ ! -z "${_diff}" ]]; then
+		local _diff="$(cat ${_fwusrkey} | tail -c +5)"
+		if ! diff -q <(echo "${_diff}") <(echo "${_usrkey}") >/dev/null; then
 			# Configs are different, overwrite firmware config
 			do_log warning "${myname} ${_fwusrkey} and ${_usrkey} differ, replacing ${_fwusrkey}"
 			[[ -e ${_fwusrkey} ]] && chattr -i ${_fwusrkey}
@@ -722,7 +722,7 @@ do_daemon_cleanup()
 
 	# Check the active crypts and add to active list if not already present.
 	local _crypt __crypt_arr _dev _pp _time __crypt
-	local _mnt_crypt="$(dmsetup ls --target crypt |cut -f1)"
+	local _mnt_crypt="$(dmsetup ls --target crypt |cut -f1 |grep -vi "No devices found")"
 	for _crypt in ${_mnt_crypt}; do
 		if [[ -z "${active_mnt[${_crypt}]}" ]]; then
 			do_xcrypt_fromtab myname "${_crypt}"
@@ -2197,7 +2197,7 @@ ppwrk_query_passphrase()
 		until [[ ${___ppchk} -eq 0 ]]; do
 			do_log debug2 "${__myname} query passphrase check failed"
 			do_ppwrk_ask_passphrase "Incorrect Passphrase. Enter ${__add_pp} Passphrase: "
-			___ppchk=$(do_ppwrk_passphrase)$?
+			___ppchk=$(do_check_passphrase)$?
 		done
 		do_log debug "${__myname} received passphrase after $(do_timer ${___time_start})s"
 
