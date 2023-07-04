@@ -464,7 +464,8 @@ do_daemon_check_conf()
 	elif [[ -s ${conf[FWBOOTCONF]} && -s ${conf[BOOTCONF]} ]]; then
 		# Compare the firmware config to confdir.
 		local __diff="$(cat ${conf[FWBOOTCONF]} | tail -c +5)"
-		if ! diff -q <(echo "$conf[BOOTCONF]}") <(echo "${__diff}") >/dev/null; then
+		local __diff1="$(cat ${conf[BOOTCONF]}"
+		if ! diff -q <(echo "${__diff}") <(echo "${__diff1}") >/dev/null; then
 			# Configs are different, overwrite firmware config.
 			[[ ${confok} -eq 0 ]] && confok=1
 			do_log warning "${myname} ${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} differ, replacing ${conf[FWBOOTCONF]}"
@@ -541,7 +542,8 @@ do_daemon_check_conf()
 	if [[ -s ${_fwsrvkey} && -s ${_srvkey} ]]; then
 		# compare the keys, overwrite if necessary
 		local _diff="$(cat ${_fwsrvkey} | tail -c +5)"
-		if ! diff -q <(echo "${_diff}") <(echo "(${_srvkey}") >/dev/null; then
+		local _diff1="$(cat ${_srvkey})"
+		if ! diff -q <(echo "${_diff}") <(echo "${_diff1}") >/dev/null; then
 			# Configs are different, overwrite firmware config
 			do_log warning "${myname} ${_fwsrvkey} and ${_srvkey} differ, replacing ${_fwsrvkey}"
 			[[ -e ${_fwsrvkey} ]] && chattr -i ${_fwsrvkey}
@@ -579,7 +581,8 @@ do_daemon_check_conf()
 	elif [[ -s ${_fwusrkey} && -s ${_usrkey} ]]; then
 		# compare the keys, overwrite if necessary
 		local _diff="$(cat ${_fwusrkey} | tail -c +5)"
-		if ! diff -q <(echo "${_diff}") <(echo "${_usrkey}") >/dev/null; then
+		local _diff1="$(cat ${_usrkey})"
+		if ! diff -q <(echo "${_diff}") <(echo "${_diff1}") >/dev/null; then
 			# Configs are different, overwrite firmware config
 			do_log warning "${myname} ${_fwusrkey} and ${_usrkey} differ, replacing ${_fwusrkey}"
 			[[ -e ${_fwusrkey} ]] && chattr -i ${_fwusrkey}
