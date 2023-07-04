@@ -1,0 +1,17 @@
+SUBSYSTEM!="block", GOTO="cryptdisksd_end"
+KERNEL=="md*", GOTO="cryptdisksd_md"
+KERNEL=="nvme*", GOTO="cryptdisksd_nvme"
+KERNEL!="sd*|vd*", GOTO="cryptdisksd_end"
+
+ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev $env{ID_BUS}-$env{ID_SERIAL} wwn-$env{ID_WWN_WITH_EXTENSION}",GOTO="cryptdisksd_end"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev $env{ID_BUS}-$env{ID_SERIAL}-part%n wwn-$env{ID_WWN_WITH_EXTENSION}-part%n",GOTO="cryptdisksd_end"
+
+LABEL="cryptdisksd_md"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev md-uuid-$env{MD_UUID} md-name-$env{MD_NAME}",GOTO="cryptdisksd_end"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev md-uuid-$env{MD_UUID}-part%n md-name-$env{MD_NAME}-part%n",GOTO="cryptdisksd_end"
+
+LABEL="cryptdisksd_nvme"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev nvme-$env{ID_SERIAL} nvme-$env{ID_WWN}",GOTO="cryptdisksd_end"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev nvme-$env{ID_SERIAL}-part%n nvme-$env{ID_WWN}-part%n",GOTO="cryptdisksd_end"
+
+LABEL="cryptdisksd_end"
