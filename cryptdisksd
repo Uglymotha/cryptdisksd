@@ -464,7 +464,7 @@ do_daemon_check_conf()
 	elif [[ -s ${conf[FWBOOTCONF]} && -s ${conf[BOOTCONF]} ]]; then
 		# Compare the firmware config to confdir.
 		local __diff="$(cat ${conf[FWBOOTCONF]} | tail -c +5)"
-		local __diff1="$(cat ${conf[BOOTCONF]}"
+		local __diff1="$(cat ${conf[BOOTCONF]})"
 		if ! diff -q <(echo "${__diff}") <(echo "${__diff1}") >/dev/null; then
 			# Configs are different, overwrite firmware config.
 			[[ ${confok} -eq 0 ]] && confok=1
