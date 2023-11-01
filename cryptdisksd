@@ -1711,7 +1711,6 @@ udev_reader()
 	# We should never get here, exit with error if we do.
 	_time_active="$(do_timer ${time_start})"
 	do_log error "${_myname} terminated unexpectedly after ${time_active}s"
-	systemd-notify --pid=$$ --status="cryptdisksd: ${_myname} terminated unexpectedly after ${time_active}s"
 	kill -SIGTERM ${BASHPID}
 }
 
