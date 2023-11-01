@@ -1392,8 +1392,8 @@ do_daemon_mount_crypt()
 
 	# First check if the crypt is already mounted. If so, check if it's on the active list and add if not.	
 	if dmsetup info "${_add_crypt}" >/dev/null 2>&1; then
+		[[ "$(lsblk -rD /dev/mapper/${_add_crypt} |head -n2 |tail -n1 |cut -d " " -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
 		if [[ -z "${active_mnt[${_add_crypt}]}" ]]; then
-			[[ "$(lsblk -rD /dev/mapper/${_add_crypt} |head -n2 |tail -n1 |cut -d " " -f3)" == "0B" ]] && _add_trim=0
 			active_mnt[${_add_crypt}]="${_add_dev} ${_add_pp} ${_add_trim} ${_add_time}"
 			do_log debug "${myname} added ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} passphrase ${_add_pp} to active list"
 			return 0
@@ -1406,7 +1406,7 @@ do_daemon_mount_crypt()
 	else
 		if [[ "$(lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d " " -f3)" == "0B" ]]; then
 		       	_add_trim=0
-			do_log info "${myname} Requested TRIM for ${add_crypt} but device ${_add_dev} does not support it"
+			do_log info "${myname} requested TRIM for ${add_crypt} but device ${_add_dev} does not support it"
 		fi
 		if cryptsetup open --type plain $([[ ${_add_trim} -eq 1 ]] && echo "--allow-discards") "${_add_dev}" "${_add_crypt}" <<<"${passphrase}"; then
 			# Mounted, add to active list.
