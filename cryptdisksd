@@ -53,17 +53,21 @@ do_init_conf()
 
 trap_term_logwriter()
 {
+	trap 'logger -p daemon.warning  "cryptdisksd: ${_myname} unclean finish after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
+
 	# When the log writer is killed, set the read timeout to 1s (no exit) to allow the writer to parse remaining log messages.
+	local _date="$(date '+%d-%m %H:%M:%S.%3N')"
 	logger -p daemon.info "cryptdisksd: ${_myname} terminating"
 	[[ ${conf[LOGLEVEL]} -gt 0 ]] && echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${_myname} terminating" >>${conf[LOGFILE]}
-	_to="-t${conf[QUEUE_TIMEOUT]}"
+	exit 0
 }
 
 logwriter()
 {
-	# The log write will parse lines from stdin, sent by various workers. The lines are written to log and sent to syslog.
 	trap 'trap_term_logwriter' SIGINT SIGTERM
-	local _myname="logger (${BASHPID}):"
+
+	# The log write will parse lines from stdin, sent by various workers. The lines are written to log and sent to syslog.
+	local _myname="logger (${BASHPID}):" _time_start=${EPOCHREALTIME:0:-3}
 
 	# Initialize the log file. Set the correct access rights.
 	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
@@ -74,8 +78,9 @@ logwriter()
 	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[LOGFILE]} && chmod 640 ${conf[LOGFILE]}
 
 	# Prepend every line recieved with date and time and write to logfile.
-	local _to="" _lf _line
-	while read ${_to} -r _lf _line; do
+	local _lf _line
+	while read -r _lf _line; do
+		[[ $? -ne 0 ]] && exit 1
 		local _date="$(date '+%d-%m %H:%M:%S.%3N')"
 		if [[ "${_lf}" == "debug" && ${conf[LOGLEVEL]} -ge 1 ]]; then
 			echo "${_date} ${hostname} ${_line}" >>${conf[LOGFILE]}
@@ -88,10 +93,6 @@ logwriter()
 			echo "${_date} ${hostname} ${_lf} ${_line}" >>${conf[LOGFILE]}
 		fi
 	done
-	local _date="$(date '+%d-%m %H:%M:%S.%3N')"
-	logger -p daemon.info "cryptdisksd: ${_myname} terminated"
-	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo "${_date} ${hostname} ${_myname} finished" >>${conf[LOGFILE]}
-	exit 0
 }
 
 do_log()
@@ -128,27 +129,29 @@ do_timer()
 
 trap_term_daemon()
 {
-	# Main process received SIGTERM or SIGINT, shutdown reader and logwriter processes.
-	trap 'time_active=$(do_timer ${time_start})' SIGINT SIGTERM
+	trap 'systemd-notify --pid=$$ --status="cryptdisksd: unclean finish after $(do_timer ${time_start})s"; exit 1' SIGINT SIGTERM
 
-	time_active=$(do_timer ${time_start})
-	systemd-notify STOPPING=1 STATUS="cryptdisksd: terminating"
+	# Main process received SIGTERM or SIGINT, shutdown reader and logwriter processes.
+	systemd-notify --pid=$$ --stopping --status="cryptdisksd: terminating"
 	do_log warning "${myname} terminating after ${time_active}s"
 	do_daemon_check_conf
 	for _pid in ${pid_ctrl[@]}; do
-		[[ "$(cat /proc/${pid_ctrl[${_pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_ctrl[${_pid}]}
+		if [[ "$(cat /proc/${pid_ctrl[${_pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+			kill -SIGTERM ${pid_ctrl[${_pid}]}
+			wait ${pid_ctrl[${_pid}]}
+			do_log debu2 "${myname} killed control process (PID: ${pid_ctrl[${_pid}]})"
+		fi
 	done
-	rm -f ${conf[CRYPTDISKSDDIR]}/*.sock
-	[[ ! -z "${pid_reader}" && "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
-	[[ ! -z "${pid_logwriter}" && "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_logwriter} && do_log debug2 "${myname} killed logwriter (PID: ${pid_reader})"
-	[[ -e "${conf[PIDFILE]}" ]] && rm -f ${conf[PIDFILE]} 
-	if [[ "${starting}" -ne 0 ]]; then
-		do_log error "${_myname} terminated while in startup mode"
-		exit 1
-	else
-		do_log info "${myname} finished"
+	if [[ ! -z "${pid_reader}" && "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${pid_reader}
+		wait ${pid_reader}
 	fi
-	systemd-notify STATUS="cryptdisksd: finished"
+	if [[ ! -z "${pid_logwriter}" && "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${pid_logwriter}
+		wait ${pid_logwriter}
+	fi
+	rm -f ${conf[PIDFILE]} ${conf[CRYPTDISKSDDIR]}/*.sock
+	systemd-notify --pid=$$ --status="cryptdisksd: finished after $(do_timer ${time_start})s"
 	
 	exit 0
 }
@@ -173,6 +176,9 @@ trap_hup_daemon()
 
 systemd_daemon()
 {
+	trap 'trap_term_daemon' SIGINT SIGTERM
+	trap 'trap_hup_daemon' SIGHUP
+
 	# Here we go, we are started from systemd. We will first process to queue entirely and notify systemd if we're done.
 	# The daemon and queue reader are recursive processes. They will re-enter themselves after processing a command. 
 	# The reader spawns worker processes to get passphrases and the daemon will mount the actual cryptdisks. 
@@ -181,8 +187,6 @@ systemd_daemon()
 	# After receiving a passphrase the worker will send it to the daemon, which then mounts the crypts on the respective queueu.
 	# A cleanup will be run every minute. There we will detect if configuration has changed and remove timed out workers and mounts.
 	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
-	trap 'trap_term_daemon' SIGINT SIGTERM
-	trap 'trap_hup_daemon' SIGHUP
 
 	local hostname="$(hostname)" pid_daemon=${BASHPID} myname="daemon (${BASHPID}):" time_start=${EPOCHREALTIME:0:-3}
 	local starting=1 start_status=0 time_active=0.000 cleanup=0.000 systemdconf="" crypttab="" confok=0
@@ -364,9 +368,9 @@ do_daemon_start_reader()
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
 	case ${conf[LOGLEVEL]} in
 		0|1|2)	# Start the reader with stdout and stderr redirected to /dev/null (silent).
-				exec {fd_reader}< <(udev_reader 5>&1- 1>/dev/null 2>&1) ;;
+				exec {fd_reader}< <(udev_reader 5>&1- 1>/dev/null 2>&1);;
 		3|4)	# Start the reader with stdout and stderr redirected to the logwriter.
-				exec {fd_reader}< <(udev_reader 5>&1- 1>&6 2>&1) ;;
+				exec {fd_reader}< <(udev_reader 5>&1- 1>&6 2>&1);;
 	esac
 	pid_reader=$!
 	return 0
@@ -842,9 +846,16 @@ do_daemon_control()
 
 trap_term_systemd_daemon_cmd()
 {
-	[[ ! -z "${__socat_PID}" && "$(cat /proc/${__socat_PID}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__socat_PID} && do_log debug2 "${__myname} killed socat coproc"
-	[[ -e ${_sock_ctrl} ]] && rm -f ${_sock_ctrl}
+	trap 'do_log warning "${__myname} unclean exit after ${__time_start})s"; exit 1' SIGINT SIGTERM
+
+	if [[ ! -z "${__socat_PID}" && "$(cat /proc/${__socat_PID}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${__socat_PID}
+		wait ${__socat_PID}
+		do_log debug2 "${__myname} killed socat coproc (PID; ${__socat_PID})"
+	fi
+	rm -f ${_sock_ctrl}
 	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
+
 	do_log debug2 "${__myname} terminating after $(do_timer ${__time_start})s"
 	exit 0
 }
@@ -856,7 +867,7 @@ daemon_control_status()
 	do_control_init "status" "Status Report" || { do_log debug2 "${__myname} failed initialize, terminating"; exit 1; }
 
 	# Output the status to the coproc, which will transfer it to stdout of the requestor. First al active mounts.
-	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}ACTIVE SINCE${PS}STATUS${NOR}" >&${__socat[1]}
+	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}ACTIVE SINCE${PS}STATUS${NOR}\r" >&${__socat[1]}
 	local __crypt __dev __pp __trim __time __status __storageprefix="storage"
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}"
 	for __crypt in ${!active_mnt[@]}; do
@@ -878,7 +889,7 @@ daemon_control_status()
 			__status="${GRN}Online (M)"
 		fi
 		__time=$(do_timer date ${__time}); __dev=${__dev##*/}
-		echo -e "\r${PR}${__crypt}${PD}${__dev}${PE}${__trim}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}" >&${__socat[1]}
+		echo -e "${PR}${__crypt}${PD}${__dev}${PE}${__trim}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}\r" >&${__socat[1]}
 	done
 
 	# Output all unmounted and waiting crypts.
@@ -905,24 +916,26 @@ daemon_control_status()
 		__dev=${__crypt_arr[1]##*/}
 	       	__pp="$(do_eval_pp "${__crypt_arr[2]}")"
 		[[ "${__crypt_arr[3]}" == "1" ]] && __trim="On" || __trim="Off"
-		echo -e "\r${PR}${__crypt}${PD}${__dev}${PE}${__trim}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}" >&${__socat[1]}
+		echo -e "${PR}${__crypt}${PD}${__dev}${PE}${__trim}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}\r" >&${__socat[1]}
 	done
 	echo >&${__socat[1]}
 
 	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
 		# Output cached passphrases.
-		echo -e "\rCached Passphrases: ${cached_pp}" >&${__socat[1]}
+		echo -e "${PR}${GREY}${BOLD}Cached Passphrases:${PS}${NOR}${cached_pp}\r\n" >&${__socat[1]}
 	fi
 	if [[ ${conf[LOGLEVEL]} -ge 3 ]]; then
 		# Output passphrases.
-		echo -e "\r\n${PR}${GREY}${BOLD}PASSPHRASE${PS}VALUE${NOR}" >&${__socat[1]}
+		echo -e "${PR}${GREY}${BOLD}PASSPHRASE${PS}VALUE${NOR}\r" >&${__socat[1]}
 		for __pp in ${cached_pp}; do
-			local __key="$(keyctl request user "${__pp}")"; local __passphrase="$(keyctl print "${__key}")"
-			echo -e "\r${PR}${__pp}${PS}\"${__passphrase}\"${NOR}" >&${__socat[1]}
+			local __key="$(keyctl request user "${__pp}")" 
+			local __passphrase="$(keyctl print "${__key}")"
+			echo -e "${PR}${__pp}${PS}\"${__passphrase}\"${NOR}\r" >&${__socat[1]}
 		done
+		echo >&${__socat[1]}
 	fi
 
-	echo -e "\r\n${UL}${myname} Running Since $(do_timer date ${time_start}) ($(do_timer ${time_start})s)${NOR}\r\n" >&${__socat[1]}
+	echo -e "${UL}${myname} Running Since $(do_timer date ${time_start}) ($(do_timer ${time_start})s)${NOR}\r" >&${__socat[1]}
 
 	echo "control ${_pid_ctrl} finished" >${conf[FIFO]}
 	do_log debug2 "${__myname} finished after $(do_timer ${__time_start})s"
@@ -1059,8 +1072,9 @@ daemon_control_add()
 
 do_control_init()
 {
+	trap 'trap_term_systemd_daemon_cmd' SIGINT SIGTERM
+
 	# Initialize the control worker and connect to the requestor socket.
-	trap 'trap_term_systemd_daemon_cmd' SIGINT SIGTERM 
 	__myname="daemon-$1 (${BASHPID}:${_pid_ctrl}):" __time_start=${EPOCHREALTIME:0:-3}
 	
 	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter daemon-$1-${BASHPID}.log)
@@ -1070,7 +1084,7 @@ do_control_init()
 	[[ ! -S ${_sock_ctrl} ]] && { do_log error "${__myname} ${_sock_ctrl} is not a socket, pocket rocket or a locket"; return 1; }
 	do_log debug "${__myname} connecting to ${_sock_ctrl}"
 	coproc __socat { socat - UNIX-CONNECT:${_sock_ctrl}; }
-	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo -e "\r${__myname} Connected for $2.\r" >&${__socat[1]}
+	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo -e "\r${__myname} Connected for $2.\r\n" >&${__socat[1]}
 
 	# Check the command line, it should contain crypt, device and passphrase and two options (confirm / crypttab) for add or del.
 	[[ "${_cmd}" == "put" ]] && { __confirm=${msg_arr[$((${#msg_arr[@]}-1))]}; return 0; }
@@ -1551,7 +1565,14 @@ do_cache_pp()
 
 trap_term_do_ssh_put_key()
 {
-	[[ ! -z "${____pid_ssh}" && "$(cat /proc/${____pid_ssh}/comm 2>/dev/null)" == "ssh" ]] && kill -SIGTERM ${____pid_ssh}
+	trap 'do_log warning "${___myname} unclean exit after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
+
+	if [[ ! -z "${____pid_ssh}" && "$(cat /proc/${____pid_ssh}/comm 2>/dev/null)" == "ssh" ]]; then
+		kill -SIGTERM ${____pid_ssh}
+		wait ${____pid_ssh}
+		do_log debug2 "${___myname} killed ssh (PID: ${____pid_ssh})"
+	fi
+
 	do_log debug2 "${___myname} terminating after $(do_timer ${____time_start})s"
 	exit 0
 }
@@ -1559,14 +1580,21 @@ trap_term_do_ssh_put_key()
 do_ssh_put_key()
 {
 	trap 'trap_term_do_ssh_put_key' SIGINT SIGTERM
-	____time_start=${EPOCHREALTIME:0:-3}
+
 	do_log debug "${___myname} putting ${__add_pp} key on ${___i}"
-	[[ ${starting} -ne 0 ]] && until [[ $(systemctl status network-online.target >/dev/null 2>&1)$? -ne 3 ]]; do sleep ${conf[QUEUE_TIMEOUT]} &	wait; done
+	____time_start=${EPOCHREALTIME:0:-3}
+	if [[ ${starting} -ne 0 ]]; then
+		until [[ $(systemctl status network-online.target >/dev/null 2>&1)$? -ne 3 ]]; do
+			sleep ${conf[QUEUE_TIMEOUT]} &
+			wait
+		done
+	fi
 	ssh -fi ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${___i} "PUT "${__add_pp}" "${__passphrase}"" &
-	local ____pid_ssh=$!
-	wait
+	local ____pid_ssh=$! ____res
+	wait && ____res=$?
+
 	do_log debug2 "${___myname} finished after $(do_timer ${____time_start})s"
-	exit $?
+	exit ____res
 }
 
 do_put_key()
@@ -1597,15 +1625,20 @@ do_put_key()
 
 trap_term_reader()
 {
+	trap 'do_log warning "${_myname} unclean exit after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
+
 	# Reader received SIGTERM or SIGINT. See if we have any workers to kill and remove the queue.
-	trap '_time_active=$(do_timer ${_time_start})' SIGINT SIGTERM
 	_time_active="$(do_timer ${_time_start})"
 	do_log debug2 "${_myname} terminating after ${_time_active}s"
 
 	# Kill all active passphrase workers.
 	local _pp
 	for _pp in ${!_pid_ppwrk[@]}; do
-		[[ ! -z "${_pid_ppwrk[${_pp}]}" && "$(cat /proc/${_pid_ppwrk[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${_pid_ppwrk[${_pp}]} && do_log debug2 "${_myname} killed passphrase worker for ${_pp} (PID:${_pid_ppwrk[${_pp}]})"
+		if [[ ! -z "${_pid_ppwrk[${_pp}]}" && "$(cat /proc/${_pid_ppwrk[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+			kill -SIGTERM ${_pid_ppwrk[${_pp}]}
+			wait ${_pid_ppwrk[${_pp}]}
+			do_log debug2 "${_myname} killed passphrase worker for ${_pp} (PID: ${_pid_ppwrk[${_pp}]})"
+		fi
 	done
 
 	# If we are in startup we should not be terminated, exit with error. Otherwise exit with current status.
@@ -1613,7 +1646,10 @@ trap_term_reader()
 		do_log error "${_myname} terminated while in startup mode"
 		_status=1
 	fi
-	[[ "$(cat /proc/${_pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -0 ${_pid_logwriter} && do_log debug2 "${_myname} killed logwriter (PID: ${_pid_logwriter})"
+	if [[ "$(cat /proc/${_pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${_pid_logwriter}
+		wait ${_pid_logwriter}
+	fi
 	exit ${_status}
 }
 
@@ -1633,12 +1669,12 @@ trap_hup_reader()
 
 udev_reader()
 {
-	# The reader process will read commands from the queue. When command is read some atomical stuff needs to be done
-	# At the very least we should check for any running password workers, start worker process and keep track of them all.
-	# Just like the daemon process the reader will run a cleanup timer and do cleanup every conf[CLEANUP_TIMER].
 	trap 'trap_term_reader' SIGINT SIGTERM
 	trap 'trap_hup_reader' SIGHUP
 
+	# The reader process will read commands from the queue. When command is read some atomical stuff needs to be done
+	# At the very least we should check for any running password workers, start worker process and keep track of them all.
+	# Just like the daemon process the reader will run a cleanup timer and do cleanup every conf[CLEANUP_TIMER].
 	local _pid_reader=${BASHPID} _myname="reader (${BASHPID}):" _time_start=${EPOCHREALTIME:0:-3} _time_active=0.000
  	local _nr_cmds=1 _start_status=0 _cleanup=0.000 _pid_logwriter _key=""
 	declare -A _pid_ppwrk _fd_ppwrk _time_ppwrk _pp_cached
@@ -1781,9 +1817,10 @@ do_reader_fifo()
 
 reader_control_shell()
 {
+	trap 'trap_term_systemd_daemon_cmd' SIGINT SIGTERM 
+
 	# Open a debug shell, will run under root so be careful with this.
 	local __myname __time_start __socat 
-	trap 'trap_term_systemd_daemon_cmd' SIGINT SIGTERM 
 	__myname="reader-shell (${BASHPID}:${__pid_ctrl}):" __time_start=${EPOCHREALTIME:0:-3}
 
 	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter reader-shell-${BASHPID}.log)
@@ -1974,28 +2011,43 @@ do_reader_cleanup()
 
 trap_term_ppwrk()
 {
-	# Kill the workers and exit. First close the fd to the reader so it know we're finisished.
-	[[ ! -z ${__pid_getpp} && "$(cat /proc/${__pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_getpp} && do_log debug2 "${__myname} killed get worker (PID: ${__pid_getpp})"
-	[[ ! -z ${__pid_querypp} && "$(cat /proc/${__pid_querypp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${__pid_querypp} && do_log debug2 "${__myname} killed query worker (PID: ${__pid_querypp})"
+	trap 'do_log warning "${__myname unclean exit after $(do_timer ${__time_start})s"; exit 1' SIGINT SIGTERM
+
+	# Kill the workers and exit.
 	do_log debug2 "${__myname} terminating after $(do_timer ${__time_start})s"
+	if [[ ! -z ${__pid_getpp} && "$(cat /proc/${__pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${__pid_getpp}
+		wait ${__pid_getpp}
+		do_log debug2 "${__myname} killed get worker (PID: ${__pid_getpp})"
+	fi
+	if [[ ! -z ${__pid_querypp} && "$(cat /proc/${__pid_querypp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${__pid_querypp}
+		wait ${__pid_querypp}
+		do_log debug2 "${__myname} killed query worker (PID: ${__pid_querypp})"
+	fi
+	if [[ ! -z "${__pid_logwriter}" && "$(cat /proc/${__pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${__pid_logwriter}
+		wait ${__pid_logwriter}
+	fi
+
 	exit 0
 }
 
 udev_reader_ppwrk()
 {
+	trap 'trap_term_ppwrk' SIGINT SIGTERM
+
 	# We need to get a passphrase. We will start a worker to get the passphrase from the boot servers
 	# and a worker to ask for the passphrase using systemd-ask-password at the same time.
 	# The workers will notify the daemon if they get a passphrase.
-	trap 'trap_term_ppwrk' SIGINT SIGTERM
-	
-	local __pid_ppwrk=${BASHPID} __myname="passphrase:${__add_pp} (${BASHPID}):" __time_start="${EPOCHREALTIME:0:-3}"
+	local __pid_ppwrk=${BASHPID} __myname="passphrase:${__add_pp} (${BASHPID}):" __time_start="${EPOCHREALTIME:0:-3}" __pid_logwriter
 	[[ ${starting} -eq 1 ]] && conf[PP_TIMEOUT]=$((conf[START_TIMEOUT]))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]-conf[QUEUE_TIMEOUT]))
 	local __fd_getpp __pid_getpp __fd_querypp __pid_querypp __passphrase=""
 
 	# Start a logwriter when LOGLEVEL = 2 or 4, redirect our stdout and stderr to that logwiter whenn level = 4.
-	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter passphrase-${__add_pp}-${__pid_ppwrk}.log 4>&-)
-	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 4 ]] && exec 6> >(logwriter passphrase-${__add_pp}-${__pid_ppwrk}.log 4>&-) 1>&6 2>&1
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 2 ]] && exec 6> >(logwriter passphrase-${__add_pp}-${__pid_ppwrk}.log 4>&-) && __pid_logwriter=$!
+	[[ ${FOREGROUND} -ne 1 && ${conf[LOGLEVEL]} -eq 4 ]] && exec 6> >(logwriter passphrase-${__add_pp}-${__pid_ppwrk}.log 4>&-) 1>&6 2>&1 && __pid_logwriter=$!
 	do_log debug "${__myname} started"
 
 	# If we have a valid bootconf, start the worker to get the passphrase from the boot servers.
@@ -2041,15 +2093,22 @@ udev_reader_ppwrk()
 
 trap_term_ppwrk_get_passphrase()
 {
-	[[ ! -z "${___pid_netpp}" && "$(cat /proc/${__pid_netpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_netpp} && do_log debug2 "${__myname} killed net worker (PID: ${___pid_netpp})"
+	trap '${__myname} unclean finish after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
+
+	if [[ ! -z "${___pid_netpp}" && "$(cat /proc/${___pid_netpp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${___pid_netpp}
+		wait ${___pid_netpp}
+		do_log debug2 "${__myname} killed net worker (PID: ${___pid_netpp})"
+	fi
 	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
 	exit 0
 }
 
 ppwrk_get_passphrase()
 {
-	# Get the passphrase from the bootservers. Notify the reader if a passphrase is returned. Keep trying until timeout.
 	trap 'trap_term_ppwrk_get_passphrase' SIGINT SIGTERM
+
+	# Get the passphrase from the bootservers. Notify the reader if a passphrase is returned. Keep trying until timeout.
 	local __myname="passphrase_get:${__add_pp} (${BASHPID}):"
 	local ___time_start="${EPOCHREALTIME:0:-3}"
 	local ___time_active=0.000
@@ -2097,9 +2156,15 @@ ppwrk_get_passphrase()
 
 trap_term_ppwrk_net_passphrase()
 {
+	trap 'do_log warning ${__myname} unclean finish after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
+
 	local ____srv
 	for ____srv in ${!___pid_bootserver[@]}; do
-		[[ "$(cat /proc/${___pid_bootserver[${____srv}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_bootserver[${____srv}]} && do_log debug2 "${__myname} killed ssh worker (PID: ${___pid_bootserver[${____srv}]})"
+		if [[ "$(cat /proc/${___pid_bootserver[${____srv}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+			kill -SIGTERM ${___pid_bootserver[${____srv}]}
+			wait ${___pid_bootserver[${____srv}]}
+			do_log debug2 "${__myname} killed ssh worker (PID: ${___pid_bootserver[${____srv}]})"
+		fi
 	done
 	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
 	exit 0
@@ -2108,6 +2173,7 @@ trap_term_ppwrk_net_passphrase()
 ppwrk_net_passphrase()
 {
 	trap 'trap_term_ppwrk_net_passphrase' SIGINT SIGTERM
+
 	local __myname="passphrase_net:${__add_pp} (${BASHPID}):" ___time_start="${EPOCHREALTIME:0:-3}" ___srv
 	declare -A ___fd_bootserver ___pid_bootserver
 
@@ -2130,7 +2196,13 @@ ppwrk_net_passphrase()
 
 trap_term_ppwrk_ssh_passphrase()
 {
-	[[ ! -z "${____pid_dossh}" && "$(cat /proc/${____pid_dossh}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${____pid_dossh} && do_log debug2 "${__myname} killed dossh worker (PID: ${____pid_dossh})"
+	trap 'do_log warning "${__myname} unclean finish after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
+
+	if [[ ! -z "${____pid_dossh}" && "$(cat /proc/${____pid_dossh}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${____pid_dossh}
+		wait ${____pid_dossh}
+		do_log debug2 "${__myname} killed dossh worker (PID: ${____pid_dossh})"
+	fi
 	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
 	exit 0
 }
@@ -2138,6 +2210,7 @@ trap_term_ppwrk_ssh_passphrase()
 ppwrk_ssh_passphrase()
 {
 	trap 'trap_term_ppwrk_ssh_passphrase' SIGINT SIGTERM
+
 	local __myname="passphrase_ssh:${__add_pp}:${___srv} (${BASHPID}):"
 	local ____time_start=${EPOCHREALTIME:0:-3}
 	local ____fd_dossh ____pid_dossh ____passphrase=""
@@ -2158,15 +2231,22 @@ ppwrk_ssh_passphrase()
 
 trap_term_do_ppwrk_ssh_passphrase()
 {
-	[[ ! -z "${____pid_ssh}" && "$(cat /proc/${____pid_ssh}/comm 2>/dev/null)" == "ssh" ]] && kill -SIGTERM ${____pid_ssh} && do_log debug2 "${__myname} killed ssh (PID: ${____pid_ssh})"
+	trap 'do_log warning "${__myname} unclean finish after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
+
+	if [[ ! -z "${____pid_ssh}" && "$(cat /proc/${____pid_ssh}/comm 2>/dev/null)" == "ssh" ]]; then
+		kill -SIGTERM ${____pid_ssh}
+		wait ${____pid_ssh}
+		do_log debug2 "${__myname} killed ssh (PID: ${____pid_ssh})"
+	fi
 	do_log debug2 "${__myname} terminating after $(do_timer ${____time_start})s"
 	exit 0
 }
 
 do_ppwrk_ssh_passphrase()
 {
-	local __myname="passphrase_dossh:${__add_pp}:${___srv} (${BASHPID}):"
 	trap 'trap_term_do_ppwrk_ssh_passphrase' SIGINT SIGTERM
+
+	local __myname="passphrase_dossh:${__add_pp}:${___srv} (${BASHPID}):"
 	do_log debug "${__myname} start getting ${__add_pp} passphrase from ${___srv}"
 	ssh -fi ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${___srv} "GET "${__add_pp}"" &
 	local ____pid_ssh=$!
@@ -2177,16 +2257,22 @@ do_ppwrk_ssh_passphrase()
 
 trap_term_ppwrk_ask_passphrase()
 {
-	[[ ! -z "${____pid_askpp}" && "$(cat /proc/${____pid_askpp}/comm 2>/dev/null)" == "systemd-ask-pas" ]] && kill -SIGTERM ${____pid_askpp} && do_log debug2 "${__myname} killed systemd-ask-password (PID: ${____pid_askpp})"
+	trap 'do_log warning "${__myname} unclean finish after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
+
+	if [[ ! -z "${____pid_askpp}" && "$(cat /proc/${____pid_askpp}/comm 2>/dev/null)" == "systemd-ask-pas" ]]; then
+		kill -SIGTERM ${____pid_askpp}
+		wait ${____pid_askpp}
+		do_log debug2 "${__myname} killed systemd-ask-password (PID: ${____pid_askpp})"
+	fi
 	do_log debug2 "${__myname} terminating after $(do_timer ${____time_start})s"
 	exit 0
 }
 
 ppwrk_ask_passphrase()
 {
-	# Ask for a passphrase in the background, record the pid so we can kill it if necessary.
 	trap 'trap_term_ppwrk_ask_passphrase' SIGINT SIGTERM
 
+	# Ask for a passphrase in the background, record the pid so we can kill it if necessary.
 	local __myname="passhrase_ask:${__add_pp} (${BASHPID}):"
 	do_log debug "${__myname} start asking for ${__add_pp} passphrase"
 	local ____time_start=${EPOCHREALTIME:0:-3}
@@ -2199,16 +2285,23 @@ ppwrk_ask_passphrase()
 
 trap_term_ppwrk_query_passphrase()
 {
+	trap 'do_log warning "${__myname} unclean finish after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
+
 	# Close the fd to the reader, we don't need it and should not keep it.
-	[[ ! -z "${___pid_askpp}" && "$(cat /proc/${___pid_askpp}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${___pid_askpp} && do_log debug2 "${__myname} killed ask worker (PID: ${___pid_askpp})"
+	if [[ ! -z "${___pid_askpp}" && "$(cat /proc/${___pid_askpp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${___pid_askpp}
+		wait ${___pid_askpp}
+		do_log debug2 "${__myname} killed ask worker (PID: ${___pid_askpp})"
+	fi
 	do_log debug2 "${__myname} terminating after $(do_timer ${___time_start})s"
 	exit 0
 }
 
 ppwrk_query_passphrase()
 {
-	# Ask for a pssphrase input by user through systemd-ask-password
 	trap 'trap_term_ppwrk_query_passphrase' SIGINT SIGTERM
+
+	# Ask for a pssphrase input by user through systemd-ask-password
 	local __myname="passphrase_query:${__add_pp} (${BASHPID}):"
 	local ___time_start="${EPOCHREALTIME:0:-3}"
 	local ___pid_askpp
@@ -2568,18 +2661,30 @@ do_cmd_parseopt()
 
 trap_term_cryptdisksd_cmd()
 {
+	trap 'echo "${RED}${MYNAME} unclean finish${NOR}"; exit 1' SIGINT SIGTERM
+
 	# Kill socat coproc if still active and remove the socket if still present. Restore stdin to the tty.
-	[[ ! -z "${__pid_socat}" && "$(cat /proc/${__pid_socat}/comm 2>/dev/null)" == "socat" ]] && kill -SIGTERM ${__pid_socat} && [[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rKilled ${__pid_socat}"
-	[[ -e ${conf[CRYPTDISKSDDIR]}/${__sock} ]] && rm -f ${conf[CRYPTDISKSDDIR]}/${__sock} && echo -e "\rRemoved ${conf[CRYPTDISKSDDIR]}/${__sock}\r\n"
-	exec 0<&${stdin}-; stty sane; echo -e "${NOR}"
-	exit 255
+	if [[ ! -z "${__pid_socat}" && "$(cat /proc/${__pid_socat}/comm 2>/dev/null)" == "socat" ]]; then
+		kill -SIGTERM ${__pid_socat}
+		[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rKilled ${__pid_socat}"
+	fi
+	if [[ -e ${conf[CRYPTDISKSDDIR]}/${__sock} ]]; then
+		rm -f ${conf[CRYPTDISKSDDIR]}/${__sock}
+		echo -e "\rRemoved ${conf[CRYPTDISKSDDIR]}/${__sock}\r\n"
+	fi
+	exec 0<&${stdin}-; stty sane; echo -e "${NOR}\n"
+	exit 1
 }
 
 do_cryptdisksd_cmd()
 {
-	# Request status from daemon. Detach stdin and assign it to socat coproc, which will attach it to daemon stdout.
-	if ! systemctl status ${MYNAME} >/dev/null 2>&1; then echo "${MYNAME} not Running"; exit 1; fi
 	trap 'trap_term_cryptdisksd_cmd' SIGINT SIGTERM
+
+	# Request status from daemon. Detach stdin and assign it to socat coproc, which will attach it to daemon stdout.
+	if ! systemctl status ${MYNAME} >/dev/null 2>&1; then
+		echo "${MYNAME} not Running"
+		exit 1
+	fi
 	
 	# Parse the options to the command and store the nr. of paramters to shift in __s.
 	local __crypttab=0 __confirm=0 __smartall=0 __smarttest=0 __add_pp="" __add_trim=0 __msg="$1 " __stty_opt=""
@@ -2622,7 +2727,9 @@ do_cryptdisksd_cmd()
 	esac
 
 	# Set tty options, redirect STDIN
-	stty ${__stty_opt}; local stdin; exec {stdin}<&0-
+	stty ${__stty_opt}
+	local stdin
+	exec {stdin}<&0-
 
 	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "Requesting \"$@\" from ${MYNAME}\r"
 
@@ -2632,10 +2739,13 @@ do_cryptdisksd_cmd()
 	__pid_socat=$!
 
 	# Notify the daemon to connect to the socket and wait until it's finished. Then restore stdin and exit.
-	sleep .05; echo "control ${BASHPID} ${__msg}" >${conf[FIFO]}; wait ${__pid_socat}
+	sleep .05
+	echo "control ${BASHPID} ${__msg}" >${conf[FIFO]}
+	wait ${__pid_socat}
 
 	# Restore stdin, remove socket and exit.
-	exec 0<&${stdin}-; stty sane
+	exec 0<&${stdin}-
+	stty sane
 	[[ -e ${__sock} ]] && rm -f ${__sock}
 
 	[[ ${conf[LOGLEVEL]} -gt 3 ]] && echo "Done requesting \"$@\" from ${MYNAME}"
@@ -2669,16 +2779,20 @@ do_cryptdisksd_cli()
 		# Continue with processing commands fase if all options parsed.
 		if [[ ${_cmd} -eq 0 ]]; then 
 			do_parse_opt $@
-			_res=$?; shift ${_res}; [[ ${_res} -ne 0 ]] && continue
+			_res=$?
+			shift ${_res}
+			[[ ${_res} -ne 0 ]] && continue
 		fi
 		# Command line options are parsed, evaluate and execute commands specified. Return code will be nr of arguments to shift.
 		# If after shifting there are no more commands to process we can exit.
 		_cmd=1; do_parse_cmd $@
-		_res=$?; shift ${_res}; [[ -z "$1" ]] && return 0
+		_res=$?
+		shift ${_res}
+		[[ -z "$1" ]] && return 0
 	done
 }
 
-MYNAME="$(basename $0)"; FOREGROUND=0; PATH=/bin:/usr/bin:/sbin:/usr/sbin
+MYNAME="$(basename $0)"; FOREGROUND=0; PATH=/bin:/sbin
 [[ ! -z "${LC_NUMERIC}" ]] && unset LC_NUMERIC
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
