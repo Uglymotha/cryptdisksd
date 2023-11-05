@@ -2143,13 +2143,13 @@ ppwrk_get_passphrase()
 {
 	trap 'trap_term_ppwrk_get_passphrase' SIGINT SIGTERM
 
-	local ___myname="passphrase-get:${__add_pp} (${BASHPID}):" ___time_start="${EPOCHREALTIME:0:-3}"  ___passphrase ___fd_querypp ___pid_querypp ___res=""
-	declare -A ___fd_bootserver __pid_bootserver
+	local ___myname="passphrase-get:${__add_pp} (${BASHPID}):" ___time_start="${EPOCHREALTIME:0:-3}"  ___passphrase ___fd_querypp ___pid_querypp ___res="" ___srv
+	declare -A ___fd_bootserver ___pid_bootserver
 	do_log debug "${___myname} started getting ${__add_pp} passphrase"
 
 	while [[ -z "${___res}" ]]; do
 		# Walk through the bootservers and start a worker per server, relay the passphrase to the main worker which will guard the timeout.
-		if [[ ${conf[NET_ONLINE]} -ne 1 || "${___net_status##*: }" =~ online|partial ]]; then 
+		if [[ ${conf[NET_ONLINE]} -ne 1 || "${__net_status##*: }" =~ online|partial ]]; then 
 			do_log debug "${__myname} getting passphrase from ${bootconf[BOOTSERVERS]}"
 			for ___srv in ${bootconf[BOOTSERVERS]}; do if [[ -z "${___pid_bootserver[${___srv}]}" ]]; then
 				[[ ${conf[LOGLEVEL]} -le 2 ]] && exec {___fd_bootserver[${___srv}]}< <(ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${___srv} "GET "${__add_pp}"" 4>&- 5>&1 2>/dev/null)
