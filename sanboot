@@ -1,82 +1,61 @@
 #!/bin/bash
-set +a
-
-# Check passphrase against stored key file
-do_check_passphrase()
+## local copy of echo to the requestor.
+send()
 {
-   if openssl aes-256-cbc -d -salt -in ~/keys/$1.key -out /dev/null -k "$2" >/dev/null 2>&1; then
-      echo "OK"
-   else
-      echo "NOK"
-   fi
+    echo "$@" >&${out}
 }
 
-# Request passphrase from keyring
-get_passphrase()
-{
-	local __key=""
-	local __passphrase=""
-	__key=$(keyctl request user ${OBJ} 2>/dev/null)
-	if [ -n "${__key}" ] ; then
-        	__passphrase="$(keyctl print ${__key} 2>/dev/null)"
-		if [[ $(do_check_passphrase "${OBJ}" "${__passphrase}") == "OK" ]]; then
-		        logger "Sanboot for ${USER} (${SSH_CLIENT}): Found Passphrase ${OBJ}."
-		else
-			__passphrase=""
-			keytcl revoke ${__key} 2>/dev/null
-			rm -f ~/keys/${OBJ}.key
-		        logger -p user.error "Sanboot for ${USER} (${SSH_CLIENT}): Passphrase ${OBJ} does not match stored key file. Revoking"
-		fi
-	else
-	        __passphrase=""
-        	logger -p user.error "Sanboot for ${USER} (${SSH_CLIENT}): Did not Find Passphrase ${OBJ}."
-	fi
-	echo "${__passphrase}"
-}
-
-put_passphrase()
-{
-	local __key=""
-	local __passphrase=""
-	local __result=""
-	__passphrase="$(echo ${CMDLINE} |sed "s/^[^ ]*\s*[^ ]*\s*//")"
-	[ ! -d ~/keys ] && mkdir ~/keys
-	if [[ $(do_check_passphrase "${OBJ}" "${__passphrase}") == "OK" ]]; then
-		logger "Sanboot for ${USER} (${SSH_CLIENT}): Recevied Passphrase ${OBJ} Equal to Stored Passphrase, Ignoring."
-		__result="OK"
-	else
-		local __file=$(mktemp)
-		head -c1024 /dev/urandom >${__file}
-		if openssl aes-256-cbc -e -salt -in ${__file} -out ~/keys/$OBJ.key -k "${__passphrase}" 2>/dev/null; then
-			logger "Sanboot for ${USER} (${SSH_CLIENT}): PUT of Passphrase ${OBJ} succeeded."
-		        __result="OK"
-		else
-        		logger -p user.error "Sanboot for ${USER} ($SSH_CLIENT): PUT of Passphrase ${OBJ} failed."
-			__result="NOK"
-		fi
-		rm -f ${__file}
-	fi
-	echo "${__result}"
-}
-
-## Initialize Command Line
-CMDLINE=$2
-CMD="`echo ${CMDLINE} |cut -d " " -f 1`"
-OBJ="`echo ${CMDLINE} |cut -d " " -f 2`"
-SSH_CLIENT="$(echo ${SSH_CLIENT} |cut -d " " -f1)"
+## Initialize Command Line. Redirect stdout, then close stdout and stderr so output does not get garbled by output of commands.
+exec 2>&- {out}>&1- 1>/dev/null 2>&1
+PATH=/bin:/sbin
+CMD="$(cut -d " " -f1 <<< "$2")"
+OBJ="$(cut -d " " -f2 <<< "$2")"
+PASS="$(cut -d " " -f3- <<< "$2")"
+SSH_CLIENT="${SSH_CLIENT%% *}"
 
 keyctl link @us @s
+[ ! -d ~/keys ] && mkdir ~/keys
 [ ! -f ~/.hushlogin ] && touch ~/.hushlogin 
 
 ## Parse Commands
 case ${CMD^^} in
-	GET)
-      		echo "$(get_passphrase)" 
-      		;;
-   	PUT)
-		echo "$(put_passphrase)"
-		;;
+    GET)
+        # Find the key and get the passphrase.
+	    key="$(keyctl request user ${OBJ})"
+       	[[ ! -z "${key}" ]] && passphrase="$(keyctl pipe ${key})"
+    	if [[ -z "${key}" ]] || ! openssl aes-256-cbc -d -salt -pbkdf2 -in ~/keys/${OBJ}.key -out /dev/null -k "${passphrase}"; then
+            if [[ -z "${key}" ]]; then
+               	logger -p user.error "Sanboot for ${USER} (${SSH_CLIENT}): Did not Find Passphrase ${OBJ}."
+            else
+                #The requstor has probably updated the key since it was loaded, revoke it.
+                logger -p user.error "Sanboot for ${USER} (${SSH_CLIENT}): Passphrase ${OBJ} does not match stored key file. Revoking."
+    		    keyctl revoke ${key}
+            fi
+            # Kill the ssh client so that the requestor will get an error.
+            kill -SIGKILL $PPID
+            exit 1
+        fi
+        logger "Sanboot for ${USER} (${SSH_CLIENT}): Found Passphrase ${OBJ}."
+    	send "${passphrase}";;
+    PUT)
+    	if openssl aes-256-cbc -d -salt -pbkdf2 -in ~/keys/${OBJ}.key -out /dev/null -k "${PASS}"; then
+    		logger "Sanboot for ${USER} (${SSH_CLIENT}): Recevied Passphrase ${OBJ} Equal to Stored Passphrase, Ignoring."
+    		send "SAME"
+    	else
+    		if ! head -c1024 /dev/urandom | openssl aes-256-cbc -e -pbkdf2 -salt -in - -out ~/keys/${OBJ}.key -k "${PASS}"; then
+        		logger -p user.error "Sanboot for ${USER} ($SSH_CLIENT): PUT of Passphrase ${OBJ} failed."
+    			send "NOK"
+    		else
+    			logger "Sanboot for ${USER} (${SSH_CLIENT}): PUT of Passphrase ${OBJ} succeeded."
+    		    send "OK"
+    		fi
+    	fi;;
+    DEL)
+        if rm -f ~/keys/${OBJ}.key; then
+            send "OK"
+        else
+            send "NOK"
+        fi;;
 	**)
-		logger -p user.error "Sanboot for ${USER}: Received Incorrect Command from ${SSH_CLIENT}"
-		;;
+		logger -p user.error "Sanboot for ${USER}: Received Incorrect Command from ${SSH_CLIENT}.";;
 esac

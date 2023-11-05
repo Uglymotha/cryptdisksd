@@ -3,50 +3,54 @@
 # Read the Passphrase from Console
 do_read_passphrase()
 {
-   local __key
-   local __passphrase=""
-   __passphrase="$(systemd-ask-password --id=$1 "Enter $1 Password: ")"
-   until openssl aes-256-cbc -d -salt -in ~/keys/$1.key -out /dev/null -k "${__passphrase}" >/dev/null 2>&1; do
-      __passphrase="$(systemd-ask-password --id=$1 "Incorrect Password. Enter $1 Password: ")"
-   done
-   __key=$(keyctl add user "$1" "${__passphrase}" @u)
-   keyctl timeout ${__key} $2
+    local _key="" _passphrase=""
+    _passphrase="$(systemd-ask-password --id=$1 "Enter $1 Password: ")"
+    until openssl aes-256-cbc -d -salt -pbkdf2 -in ~/keys/$1.key -out /dev/null -k "${_passphrase}" >/dev/null 2>&1; do
+        _passphrase="$(systemd-ask-password --id=$1 "Incorrect Password. Enter $1 Password: ")"
+    done
+    _key=$(keyctl padd user "$1" @u <<< "${_passphrase}")
+    keyctl timeout ${_key} $2
+        
 }
 
 # Link the seeion to the User keyring so Keys are available to new login processes
 keyctl link @us @s
 
-[ -f ~/host.conf ] && . ~/host.conf
+[[ -f ~/host.conf ]] && . ~/host.conf
 
 # Ask for timeout
 echo -ne "\033[1mBoot Timeout (m): \033[0m"
 read -rt 30 timeout; 
 until [[ "${timeout}" =~ ^[0-9]+$ ]]; do
-   echo -ne "\033[1mBoot Timeout (m): \033[0m"
-   read -rt 30 timeout;
+    echo -ne "\033[1mBoot Timeout (m): \033[0m"
+    read -rt 30 timeout;
 done
-if [ -z "${timeout}" ]; then  timeout=10; fi
+[[ -z "${timeout}" ]] && timeout=10
 timeout=$((timeout*60))
 
-# Get the stored Keys
+# Get the stored Keys and read passphrases.
 cd ~/keys
-files=*.key
-for f in ${files}; do
-   key=$(echo ${f} |sed 's/\.key$//')
-   do_read_passphrase $key $timeout
+for f in *.key; do
+    key=$(sed 's/\.key$//' <<< "${f}")
+    if [[ "${key}" != "*" ]]; then
+        do_read_passphrase ${key} ${timeout};
+    else
+        echo "No Stored Passphrases for ${USER}"
+        exit 1
+    fi
 done
 
-# Wake-up System
-if [ -f ~/host.conf ] && [ -n $MAC ] && [ -n $INTERFACE ]; then sudo etherwake -i $INTERFACE -b $MAC; fi
+# Wake-up System.
+[[ -n $MAC && -n $INTERFACE ]] && sudo /usr/sbin/etherwake -i $INTERFACE -b $MAC
 
-bg="bg"
-echo -ne "\033[1mFork to Background? (y/n): \033[0m"
-read -t 30 -rn 1 y; echo
+echo -ne "\033[1mFork to Background? (Y/n): \033[0m"
+read -t 30 -rn 1 y
+echo
 
 keyctl list @u
 
 if [[ "${y,,}" == "y" ]] || [[ -z ${y} ]]; then 
-	sleep ${timeout} &
+    sleep ${timeout} &
 else
-	sleep $timeout 
+    sleep ${timeout}
 fi
