@@ -1,0 +1,18 @@
+[Unit]
+Description=Cryptdisks udev FiFo
+After=systemd-journald.service
+Before=systemd-udevd.service
+DefaultDependencies=no
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Socket]
+ListenFIFO=/run/%N/%N.queue
+DirectoryMode=700
+SocketUser=root
+SocketMode=0600
+PipeSize=1M
+ExecStartPre=/bin/rm -rf /run/%N/
+
+[Install]
+WantedBy=sockets.target

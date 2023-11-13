@@ -1,0 +1,15 @@
+[Unit]
+Description=Cryptdisks Daemon
+
+[Service]
+EnvironmentFile=/etc/systemd/cryptdisksd.conf
+ExecStartPre=/bin/bash -c 'if [[ ! -L /root/.bashrc ]]; then /bin/ln -sf /etc/bashrc /root/.bashrc; fi'
+ExecStart=/usr/sbin/cryptdisksd
+KillMode=process
+TimeoutStopSec=15
+ExecReload=/bin/kill -SIGHUP $MAINPID
+Restart=on-failure
+Type=notify
+NotifyAccess=main
+
+[Install]
