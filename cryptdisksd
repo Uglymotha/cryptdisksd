@@ -9,7 +9,7 @@ do_init_conf()
 	[[ ! -d "${CONFDIR}" ]] && return 1
 	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
 	unset conf
-	declare -gA conf bootconf
+	declare -gA conf
 	if [[ -s ${CONF} ]]; then
 		local __var __val
 		while IFS="=" read -r __var __val; do
@@ -40,6 +40,7 @@ do_init_conf()
 	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${conf[FWDIR]}/UglyLinuxBootCFG-${conf[FWGUID]}"
 	[[ -z "${conf[BOOTCONF]}" ]] && conf[BOOTCONF]="${CONFDIR}/boot.conf"
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
+	[[ -z "${conf[NET_RETRIES]}" ]] && conf[NET_RETRIES]=1
 	[[ -z "${conf[USER_TIEMOUT]}" ]] && conf[USER_TIMEOUT]=10
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
@@ -113,14 +114,10 @@ do_timer()
 		echo ${EPOCHREALTIME:0:-3}
 	elif [[ ${1,,} == "date" ]]; then
 		# Output the exact date of the timestamp.
-		local ___date="$(date --date @$2 +%Y-%m-%d.%H:%M:%S)"
-		echo "${___date}"
+		echo "$(date --date @$2 +%Y-%m-%d.%H:%M:%S)"
 	else
 		# Started with start time as args, calculate and echo the time difference.
-		local ___stime=$1
-		local ___etime=${EPOCHREALTIME:0:-3}
-		local ___dtime="$(bc <<<"x=${___etime}-${___stime}; if (x<1) print 0; x")"
-		echo "${___dtime}"
+		echo "$(bc <<<"x=${EPOCHREALTIME:0:-3}-$1; if (x<1) print 0; x")"
 	fi
 }
 
@@ -185,14 +182,13 @@ systemd_daemon()
 	declare -A active_mnt pid_ctrl fd_ctrl time_ctrl cached_pp
 
 	# If we are booting up the master passphrase may be in the user keyring, revoke and cache in session keyring.
-	key="$(keyctl search @u user "system:master" 2>/dev/null)"
-	passphrase="$(keyctl pipe "${key}" 2>/dev/null)"
+	key="$(keyctl search @u user "system:master" 2>/dev/null)"; passphrase="$(keyctl pipe "${key}" 2>/dev/null)"
 	if [[ ! -z "${key}" ]]; then
 		do_log debug "${myname} removed system:master passphrase from user keyring"
 		keyctl revoke "${key}" 2>/dev/null
 		keyctl unlink "${key}" @u 2>/dev/null
-		put_key "system:master" "${passphrase}" & do_cache_pp "system:master" "${passphrase}" "${myname}" && cached_pp[system:master]=1
-		pid_putkey=$!
+		put_key "system:master" "${passphrase}" & pid_putkey=$!
+		do_cache_pp "system:master" "${passphrase}" "${myname}" && cached_pp[system:master]=1
 	fi
 	
 	# The readers and will send us messages about events, we need to keep track of time for (debug) logging and cleanup.
@@ -204,45 +200,29 @@ systemd_daemon()
 	do_log debug "${myname} started reader (PID: ${pid_reader})"
 
 	while true; do	
-		# If we are starting up, read time-out when initial queue is empty so we can notify parent.
-		# If we are in normal operation, keep cleanup timer (60secs).
+		# If we are starting up, read time-out when initial queue is empty so we can notify parent. If we are in normal operation, keep cleanup timer (60secs).
 		do_log debug2 "${myname} running since $(do_timer date ${time_start})"
-		time_active=$(do_timer ${time_start})
+		time_active=$(do_timer ${time_start}) read_to=$([[ ${starting} -eq 0 ]] && echo ${conf[CLEANUP_TIMER]} || echo ${conf[START_TIMEOUT]})
 	
 		# Set the new queue read timeout, we will run a cleanup every conf[CLEANUP_TIMER]. Cleanup will not run before we are started.
-		case ${starting} in
-		0)
-			# Do a cleanup if the timer is about to expire.
-			if [[ ${time_active:0:-4} -gt $((${cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] || [[ ${res} -eq 142 && ${read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]]; then
-				do_daemon_cleanup
-			fi
-			read_to="$(((${conf[CLEANUP_TIMER]}+${conf[QUEUE_TIMEOUT]})-(${time_active:0:-4}%${conf[CLEANUP_TIMER]})))";;
-		1|2)
-			# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
-			read_to="$(((${conf[START_TIMEOUT]}+${conf[QUEUE_TIMEOUT]})-(${time_active:0:-4}%${conf[START_TIMEOUT]})))";;
-		esac
-		
-		# Start reading from the reader message queue. Parse the message into an arry the first element will be reader second the pid of the reader, rest is the message.
+		# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
+		# Parse the message into an arry the first element will be reader second the pid of the reader, rest is the message.
+		[[ ${starting} -eq 0 && ${time_active:0:-4} -gt $((${cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] && do_daemon_cleanup
+		read_to="$(((read_to+conf[QUEUE_TIMEOUT])-(${time_active:0:-4}%read_to)))"
 		IFS=" " read -t${read_to} -ru${fd_reader} -a msg
 		res=$?
 		
 		# Evaluate the exit status of the message queue read and act accordingly.
 		time_active=$(do_timer ${time_start})
 		if [[ ${res} -eq 142 ]]; then 
-			case ${starting} in 
-			1|2|3)
+			do_log debug2 "${myname} waking up from slumber"
+			[[ ${starting} -eq 0 && ${read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]] && do_daemon_cleanup
+			if [[ ${starting} -ne 0 && ${time_active:0:-4} -ge ${conf[START_TIMEOUT]} ]]; then 
 				# Start timeout reached, notify systemd.
-				do_log debug2 "${myname} start timeout reached, notifying reader and systemd"
-				starting=0
-				start_status=3
+				do_log warning "${myname} start timeout reached, notifying reader and systemd"
+				starting=0 start_status=3
 				do_daemon_notify_systemd
-				;;
-			0)
-				# Queue timeout for cleanup.
-				do_log debug2 "${myname} waking up from slumber"
-				;;
-			esac
-			do_log debug2 "${myname} running since $(do_timer date ${time_start})"
+			fi
 			continue
 		elif [[ ${res} -gt 128 ]]; then
 			# Should not happen, daemon process received unhandled signal from somewhere.
@@ -251,19 +231,11 @@ systemd_daemon()
 			continue
 		elif [[ ${res} -ne 0 ]]; then
 			# Reader has terminated unexpectedly or fd has somehow been closed from reader end.
-			if [[ ${readerr} -eq 0 ]]; then 
-				do_log error "${myname} read error ${res} \"${msg[@]}\""
-			elif [[ $((readerr%20)) -eq 0 ]]; then
-				reader_alive=2
-				do_daemon_cleanup
-			elif [[ ${readerr} -gt 99 ]]; then
-				do_log error "${myname} too many read errors, terminating"
-				trap_term_daemon 1
-			fi
-			readerr=$((readerr+1))
+			do_log error "${myname} read error ${res} \"${msg[@]}\""
+			reader_alive=2
+			do_daemon_cleanup
 			continue
 		fi
-		readerr=0
 
 		# Evaluate the start status. Check if we have a start timeout. If so we are started and will notify systemd.
 		if [[ ${starting} -ne 0 && ${time_active:0:-4} -ge ${conf[START_TIMEOUT]} ]]; then
@@ -271,9 +243,7 @@ systemd_daemon()
 			starting=0 start_status=3
 			do_daemon_notify_systemd
 			continue
-		fi
-		
-		if [[ -z "${msg[@]}" || ! ( "${msg[0],,}" == "reader" && ${msg[1]} -eq ${pid_reader} ) ]]; then
+		elif [[ -z "${msg[@]}" || ! ( "${msg[0],,}" == "reader" && ${msg[1]} -eq ${pid_reader} ) ]]; then
 			# Should not occur, run cleanup if it does, if reader has exited next read will fail, see above.
 			do_log error "${myname} received invalid message \"${msg[@]}\""
 			reader_alive=2
@@ -519,21 +489,19 @@ do_daemon_check_conf()
 do_daemon_reload_conf()
 {
 	do_log debug "${myname} loading configuration"
-	crypttab="" systemdconf=""
+	local __var __val
+	unset bootconf crypttab systemdconf
+	declare -gA bootconf
 
 	# Load the crypttab into memory.
 	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#")" 
 
 	# Source the boot config if necessary.
-	local __var __val
-	for __var in ${!bootconf[@]}; do
-		unset bootconf[${__var}]
-	done
-	if [[ -s ${conf[BOOTCONF]} ]]; then
-		while IFS="=" read -r __var __val; do
-			[[ ! -z "${__val}" ]] && bootconf[${__var^^}]="${__val}"
-	   	done <<<"$(cat ${conf[BOOTCONF]} |grep -ve "^\s*#")"
-	fi
+	IFS=$'\n'
+	if [[ -s ${conf[BOOTCONF]} ]]; then for __var in $(cat ${conf[BOOTCONF]} |grep -ve "^\s*#"); do
+		__val=${__var#*=} __var=${__var%%=*}
+		bootconf[${__var^^}]="${__val}"
+   	done fi
 	[[ -s ${CONF} ]] && systemdconf="$(cat ${CONF} |grep -ve "^\s*#")"
 }
 
@@ -548,17 +516,15 @@ do_daemon_cleanup()
 	systemd-notify WATCHDOG=1 WATCHDOG_USEC=$(((2*conf[CLEANUP_TIMER])*1000000))
 
 	# Check if the log writer is still active, restart it and the reader if necessary.
-	if [[ ! -z ${pid_logwriter} ]]; then
-		if [[ "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" != "${MYNAME}" ]] || ! kill -0 ${pid_logwriter} && kill -SIGKILL ${pid_logwriter}; then
-			do_log error "${myname} logwriter (PID: ${pid_logwriter}) terminated after ${time_active}s, restarting"
-			systemd-notify "cryptdisksd: logwriter (PID: ${pid_logwriter}) terminated after ${time_active}s, restarting"
-			if [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && [[ ! -z "${pid_reader}" && "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-				kill -SIGTERM ${pid_reader} && unset pid_reader
-				[[ -e /proc/self/fd/${fd_reader} ]] && exec {fd_reader}>&-
-				do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
-			fi
-			do_daemon_start_logwriter
+	if [[ "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" != "${MYNAME}" ]] || ! kill -0 ${pid_logwriter} && kill -SIGKILL ${pid_logwriter}; then
+		do_log error "${myname} logwriter (PID: ${pid_logwriter}) terminated after ${time_active}s, restarting"
+		systemd-notify "cryptdisksd: logwriter (PID: ${pid_logwriter}) terminated after ${time_active}s, restarting"
+		if [[ ${conf[LOGLEVEL]} -ne 2 && ${conf[LOGLEVEL]} -ne 4 ]]; then
+			[[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_reader} && unset pid_reader
+			[[ -e /proc/self/fd/${fd_reader} ]] && exec {fd_reader}>&-
+			do_log debug2 "${myname} killed reader (PID: ${pid_reader})"
 		fi
+		do_daemon_start_logwriter
 	fi
 
 	# Kill too long running control conections.
@@ -592,8 +558,8 @@ do_daemon_cleanup()
 	fi
 
 	# Check if the reader is still alive and restart it if necessary.	
-	if [[ ${reader_alive} -eq 2 || "$(cat /proc/${pid_reader}/comm 2>/dev/null)" != "${MYNAME}" ]] || ! kill -0 ${pid_reader}; then
-		do_log error "${myname} reader (PID: ${pid_reader}) not functioning after ${time_active}s"
+	if [[ -z ${pid_reader} || ${reader_alive} -eq 2 || "$(cat /proc/${pid_reader}/comm 2>/dev/null)" != "${MYNAME}" ]] || ! kill -0 ${pid_reader}; then
+		[[ ${reader_alive} -eq 2 ]] && do_log error "${myname} reader (PID: ${pid_reader}) not functioning after ${time_active}s"
 		systemd-notify --pid=$$ --status="cryptdisksd: reader (PID: ${pid_reader}) terminated after ${time_active}s"
 		if [[ "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 			kill -SIGTERM ${pid_reader}
@@ -610,27 +576,24 @@ do_daemon_cleanup()
 	elif [[ ${reader_alive} -eq 1 ]]; then
 		do_log warning "${myname} have not received ping from reader (PID: ${pid_reader})"
 		reader_alive=2
-	else
-		reader_alive=1
 	fi
+	reader_alive=$((reader_alive+1))
 
 	# Check the active crypts and add to active list if not already present.
 	_mnt_crypt="$(dmsetup ls --target crypt |cut -f1 |grep -vi "No devices found")"
-	for _crypt in ${_mnt_crypt}; do
-		if [[ -z "${active_mnt[${_crypt}]}" ]]; then
-			_crypt_arr=($(do_xcrypt_fromtab "${myname}" "${_crypt}"))
-			[[ "$(lsblk -rD /dev/mapper/${_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _trim=0 || _trim=1
-			if [[ ! -z "${_crypt_arr[@]}" ]]; then
-				_dev="${_crypt_arr[1]}"
-				_pp="$(do_eval_pp "${_crypt_arr[2]}")"
-				active_mnt[${_crypt}]="${_dev} ${_pp} ${_trim} $(do_timer)"
-			else
-				_dev=/dev/"$(dmsetup deps ${_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2)"
-				active_mnt[${_crypt}]="${_dev} - ${_trim} $(do_timer)"
-			fi
-			do_log debug "${myname} found ${_dev} as ${_crypt} TRIM ${_trim} passphrase ${_pp} adding to active list"
+	for _crypt in ${_mnt_crypt}; do if [[ -z "${active_mnt[${_crypt}]}" ]]; then
+		IFS=" " _crypt_arr=($(do_xcrypt_fromtab "${myname}" "${_crypt}"))
+		[[ "$(lsblk -rD /dev/mapper/${_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _trim=0 || _trim=1
+		if [[ ! -z "${_crypt_arr[@]}" ]]; then
+			_dev="${_crypt_arr[1]}"
+			_pp="$(do_eval_pp "${_crypt_arr[2]}")"
+			active_mnt[${_crypt}]="${_dev} ${_pp} ${_trim} $(do_timer)"
+		else
+			_dev=/dev/"$(dmsetup deps ${_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2)"
+			active_mnt[${_crypt}]="${_dev} - ${_trim} $(do_timer)"
 		fi
-	done
+		do_log debug "${myname} found ${_dev} as ${_crypt} TRIM ${_trim} passphrase ${_pp} adding to active list"
+	fi done
 
 	# Check for removed crypts and remove the from active list.
 	for _crypt in ${!active_mnt[@]}; do
@@ -642,22 +605,16 @@ do_daemon_cleanup()
 		unset active_mnt[${_crypt}]
 	done
 
-	# If we have reloaded look up any managed crypts removed from crypttab and try to unmount them.
-	if [[ ! -z "${_tab_crypt}" ]]; then
-		for _crypt in ${!active_mnt[@]}; do
-			IFS=" " read -r _dev _pp _trim _time <<<"${active_mnt[${_crypt}]}"
-			[[ "${_pp}" == "-" ]] && continue
-			for __crypt in ${_tab_crypt}; do
-				[[ "${_crypt}" == "${__crypt}" ]] && continue 2
-			done
-			do_log warning "${myname} ${_dev} as ${_crypt} TRIM ${_trim} passphrase ${_pp} mounted since $(do_timer date ${_time}) removed from crypttab"
-			do_daemon_unmount_crypt "${_crypt}"
+	# If we have reloaded look up any managed crypts removed from crypttab and make them unmanaged.
+	if [[ ! -z "${_tab_crypt}" ]]; then for _crypt in ${!active_mnt[@]}; do
+		IFS=" " read -r _dev _pp _trim _time <<<"${active_mnt[${_crypt}]}"
+		[[ "${_pp}" == "-" ]] && continue
+		for __crypt in ${_tab_crypt}; do
+			[[ "${_crypt}" == "${__crypt}" ]] && continue 2
 		done
-
-		# Trigger udev to mount any new devices on the crypttab not already mounted.
-		do_log debug "${myname} triggering udev"
-		udevadm trigger -s block -c change
-	fi
+		do_log warning "${myname} ${_dev} as ${_crypt} TRIM ${_trim} passphrase ${_pp} mounted since $(do_timer date ${_time}) removed from crypttab"
+		active_mnt[${_crypt}]="${_dev} - ${_crypt} ${_trim} ${_time}"
+	done fi
 
 	do_log debug2 "${myname} cleanup took $(do_timer ${_time_start})s, cached passphrases: ${!cached_pp[@]} - active mounts: ${!active_mnt[@]}"
 }
@@ -858,29 +815,17 @@ daemon_control_status()
 {
 	# Connect to control socket and blurt status in some form of a pretty fashion.
 	do_control_init "status" "Status Report"
-	local __key __passphrase="" __waiting_mnt=${msg[5]} __tab_crypt __crypt_arr=() __crypt ___crypt __dev __pp __trim __time __status __storageprefix="storage"
+	local __key __passphrase="" __waiting_mnt=${msg[5]} __tab_crypt __crypt_arr=() __crypt ___crypt __dev __pp __trim __time __status
 
 	# Output the status to the coproc, which will transfer it to stdout of the requestor. First al active mounts.
 	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}ACTIVE SINCE${PS}STATUS${NOR}\r" >&${__socat[1]}
-	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}"
+	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for __crypt in ${!active_mnt[@]}; do
 		__status=""
 		IFS=" " read -r __dev __pp __trim __time <<<"${active_mnt[${__crypt}]}"
 		[[ "${__trim}" == "1" ]] && __trim="On" || __trim="Off"
-		if [[ "${__pp}" == "-" ]]; then
-			if [[ "${__crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ ]]; then
-				__status="${GRN}Online (M)"
-				if [[ -n "${bootconf[STORAGEPP]}" ]]; then
-					__pp="$(do_eval_pp "${bootconf[STORAGEPP]}")"
-				else
-					__pp="system:master"
-				fi
-			else
-				__status="${YEL}Online (U)"
-			fi
-		else
-			__status="${GRN}Online (M)"
-		fi
+		[[ "${__pp}" == "-" && "${__crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ && -n "${bootconf[STORAGEPP]}" ]] && __pp="$(do_eval_pp "${bootconf[STORAGEPP]}")" || __pp="system:master"
+		[[ "${__pp}" == "-" ]] &&__status="${YEL}Online (U)" || __status="${GRN}Online (M)"
 		__time=$(do_timer date ${__time}); __dev=${__dev##*/}
 		echo -e "${PR}${__crypt}${PD}${__dev}${PE}${__trim}${PP}${__pp}${PT}${__time}${PS}${__status}${NOR}\r" >&${__socat[1]}
 	done
@@ -899,11 +844,8 @@ daemon_control_status()
 				break
 			fi
 		done <<<"${__waiting_mnt}"
-		if [[ ! "${__status}" == "${YEL}Waiting" ]]; then
-			__status="${RED}Offline"
-			__time="-"
-		fi
-		__crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${__crypt}"))
+		[[ ! "${__status}" == "${YEL}Waiting" ]] && __status="${RED}Offline" __time="-"
+		IFS=" " __crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${__crypt}"))
 		__dev=${__crypt_arr[1]}
 		__pp="$(do_eval_pp "${__crypt_arr[2]}")"
 		[[ "${__crypt_arr[3]}" == "1" ]] && __trim="On" || __trim="Off"
@@ -911,23 +853,16 @@ daemon_control_status()
 	done
 	echo >&${__socat[1]}
 
-	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
-		# Output cached passphrases.
-		echo -e "${PR}${GREY}${BOLD}Cached Passphrases:${PS}${NOR}${!cached_pp[@]}\r\n" >&${__socat[1]}
-	fi
+	# Output cached passphrases.
+	[[ ${conf[LOGLEVEL]} -ge 1 ]] && echo -e "${PR}${GREY}${BOLD}Cached Passphrases:${PS}${NOR}${!cached_pp[@]}\r\n" >&${__socat[1]}
 	if [[ ${conf[LOGLEVEL]} -ge 3 ]]; then
 		# Output passphrases.
 		echo -e "${PR}${GREY}${BOLD}PASSPHRASE${PS}VALUE${NOR}\r" >&${__socat[1]}
 		for __pp in ${!cached_pp[@]}; do
 			__key="$(keyctl request user "${__pp}")" 
 			__passphrase="$(keyctl pipe "${__key}")"
-			echo -ne "${PR}${__pp}${PS}" >&${__socat[1]}
-			if [[ -z "${key}" ]]; then
-				echo -me "${RED}${BOLD}FAIL${NOR}" >&${__socat[1]}
-			else
-				echo -n  "\"${__passphrase}\"" >&${__socat[1]}
-			fi
-			echo -e "${NOR}\r" >&${__socat[1]}
+			echo -ne "${PR}${__pp}:${PS}" >&${__socat[1]}
+			[[ -z "${key}" ]] && echo -e "${RED}${BOLD}FAIL${NOR}\r" >&${__socat[1]} || echo -e "\"${__passphrase}\"${NOR}\r" >&${__socat[1]}
 		done
 		echo >&${__socat[1]}
 	fi
@@ -1087,7 +1022,7 @@ daemon_control_add()
 		trap_term_control 1
 	elif [[ ${__crypttab} -eq 1 ]]; then
 		# Crypt should be added to tab, check if specified crypt and dev are already on tab.
-		__crypt_arr2=($(do_xcrypt_fromtab "${__myname}" "${__add_dev}"))
+		IFS=" " __crypt_arr2=($(do_xcrypt_fromtab "${__myname}" "${__add_dev}"))
 		if [[ -z "${__crypt_arr[@]}" && -z "${__crypt_arr2[@]}" ]]; then
 			# Crypt and dev not on tab, find device.
 			__add_dev="$(do_find_dev "${__myname}" "${__add_dev}")" __add_dev2="$(do_find_dev "${__myname}" "${__add_crypt}")"
@@ -1162,7 +1097,7 @@ do_control_init()
 	trap 'trap_term_control' SIGINT SIGTERM
 
 	# Initialize the control worker and connect to the requestor socket.
-	__crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${msg[5]}")) __myname="daemon-$1 (${BASHPID}:${_pid_ctrl}):" __time_start=$(do_timer)
+	IFS=" " __crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${msg[5]}")) __myname="daemon-$1 (${BASHPID}:${_pid_ctrl}):" __time_start=$(do_timer)
 	
 	# Check if socket exists first.
 	if [[ ! -S ${_sock_ctrl} ]]; then
@@ -1292,7 +1227,7 @@ do_xcrypt_fromtab()
 	# Element 4 = TRIM
 	local i crypt_arr myname=$1
 	for ((i=2;i<=$#;i++)); do
-		crypt_arr=($(grep -iE "(^|\s)${!i}\s" <<<"${crypttab}" 2>/dev/null)) 
+		IFS=$'\t' crypt_arr=($(grep -iE "(^|\s)${!i}\s" <<<"${crypttab}" 2>/dev/null)) 
 		[[ "${#crypt_arr[@]}" -eq 3 ]] && crypt_arr[3]=0
 		if [[ "${#crypt_arr[@]}" -eq 0 ]]; then
 			do_log debug "${myname} device ${!i} not found in crypttab"
@@ -1612,9 +1547,9 @@ trap_hup_reader()
 		_confok=1
 	elif [[ ${_starting} -ne 0 ]]; then
 		do_log warning "${_myname} start timeout reached after ${_time_active}s, running cleanup"
-		do_reader_cleanup
 		_starting=0
-		echo ping >${conf[FIFO]}
+		do_reader_cleanup
+		echo "ping" >${conf[FIFO]}
 	fi
 }
 
@@ -1627,7 +1562,7 @@ udev_reader()
 	# At the very least we should check for any running password workers, start worker process and keep track of them all.
 	# Just like the daemon process the reader will run a cleanup timer and do cleanup every conf[CLEANUP_TIMER].
 	local _pid_reader=${BASHPID} _myname="reader (${BASHPID}):" _time_start=$(do_timer) _time_active=0.000 _read_to __myname _cmd=() __waiting_mnt
- 	local _nr_cmds=0 _start_status=0 _cleanup=0.000 _pid_logwriter _key= _fd_fifo _pp _confok=0 _starting=${starting} _crypt_arr _crypt _dev _trim _time
+ 	local _nr_cmds=0 _start_status=0 _cleanup=0.000 _pid_logwriter _key= _fd_fifo _pp _confok=0 _starting=${starting} _crypt_arr _crypt _dev _trim _time _res
 	declare -A _pid_ppwrk _pid_putkey _pid_shell _waiting_mnt
 	
 	# Start logwriter with dedicated logfile when LOGLEVEL=2 or = 4. When level = 4 redirect out stdout and stderr to the logwriter.
@@ -1641,6 +1576,7 @@ udev_reader()
 	while true; do
 		# If we are starting up, read time-out when initial queue is empty so we can notify parent.
 		# If we are in normal op, keep cleanup timer (60secs).
+		do_log debug2 "${_myname} running since $(do_timer date ${_time_start})"
 		time_active=$(do_timer ${time_start})
 
 		# Rceived SIGHUP. Do a config reload (restart the reader), when no active workers.
@@ -1650,52 +1586,31 @@ udev_reader()
 		fi
 
 		# Evaluate the queue read timeout, to see at which point in time we are.
-		case ${_starting} in
-		0|2)
-			# Evaluate cleanup timer against daemon active time
-			if [[ ${_confok} -eq 1 ]] || [[ ${time_active:0:-4} -gt $((${_cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] || [[ ${_res} -eq 142 && ${_read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]]; then
-				do_reader_cleanup
-			fi
-			if [[ ${_confok} -eq 1 ]]; then
-				# If we need to reloud config use a short timeout.		
-				_read_to="-t${conf[QUEUE_TIMEOUT]}"
-			else
-				_read_to="-t$(((${conf[CLEANUP_TIMER]}+${conf[QUEUE_TIMEOUT]})-((${time_active:0:-4}+${conf[CLEANUP_TIMER]}/2)%${conf[CLEANUP_TIMER]})))"
-			fi;;
-		1)
-			# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
-			_read_to="-t${conf[QUEUE_TIMEOUT]}";;
-		esac
+		[[ ${_confok} -eq 1 || ${time_active:0:-4} -gt $((${_cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] && do_reader_cleanup
+		[[ ${_confok} -eq 1 || ${_starting} -eq 1 ]] && _read_to=${conf[QUEUE_TIMEOUT]} \
+													 || _read_to=$(((conf[CLEANUP_TIMER]+conf[QUEUE_TIMEOUT])-((${time_active:0:-4}+conf[CLEANUP_TIMER]/2)%conf[CLEANUP_TIMER])))
         
 		# Start reading from the queue.
-		IFS=' ' read ${_read_to} -ru${_fd_fifo} -a _cmd
-		local _res=$?
+		IFS=' ' read -t${_read_to} -ru${_fd_fifo} -a _cmd
+		_res=$?
 
 		if [[ ${_res} -eq 142 ]]; then
 			# Read timed out. Set the starting status if we are starting up, or run cleanup.
 			# Cleanup will start after conf[START_TIMEOUT] to give all initial workers the chance to finish.
-			if [[ ${_starting} -ne 0 && -z "${!_waiting_mnt[@]}" ]]; then
-				_starting=0
-				do_reader_cleanup
-				do_reader_notify_daemon "started ${_starting} ${_start_status}"
-			elif [[ ${_starting} -eq 1 ]]; then
-				_starting=2
-				do_reader_notify_daemon "started ${_starting} ${_start_status}"
+			[[ ${_starting} -ne 1 && ${_read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]] && do_reader_cleanup
+			if [[ ${_starting} -ne 0 ]]; then
+				local __starting=${_starting}
+				[[ -z "${!_waiting_mnt[@]}" ]] && _starting=0 || _starting=2
+				[[ ${_starting} -eq 0 ]] && do_reader_cleanup 
+				[[ ${__starting} != ${_starting} ]] && do_reader_notify_daemon "started ${_starting} ${_start_status}"
 			fi
-			do_log debug2 "${_myname} running since $(do_timer date ${_time_start})"
 			continue
 		elif [[ ${_res} -gt 128 ]]; then
 			# Should not happen, only if we received signal during read.
 			do_log debug "${_myname} read result ${_res} may have been trapped"
 			[[ ${_cleanup} -eq 0 ]] && do_reader_cleanup
-		elif [[ ${_res} -ne 0 ]]; then
-			do_log error "${__myname} read error, terminating after $(do_timer ${_time_start})s"
-			do_reader_notify_daemon "reload"
-			trap_term_reader
-		fi
-
-		if [[ -z "${_cmd[@]}" ]]; then
-			do_log error "${_myname} reached EOF on queue, terminating"
+		elif [[ ${_res} -ne 0 || -z "${_cmd[@]}" ]]; then
+			do_log error "${_myname} read error, terminating after $(do_timer ${_time_start})s"
 			do_reader_notify_daemon "reload"
 			trap_term_reader
 		fi
@@ -1706,10 +1621,10 @@ udev_reader()
 		do_log debug "${__myname} new command received \"${_cmd[@]}\""
 		case ${_cmd[0],,} in
 		add|change)
-			_crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${_cmd[@]:1}"))
+			IFS=" " _crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${_cmd[@]:1}"))
 			[[ ! -z "${_crypt_arr[@]}" ]] && do_reader_add_crypt;;
 		remove)
-			_crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${_cmd[1]}"))
+			IFS=" " _crypt_arr=($(do_xcrypt_fromtab "${__myname}" "${_cmd[1]}"))
 			[[ ! -z "${_crypt_arr[@]}" ]] && do_reader_notify_daemon "remove ${_crypt_arr[0]}";;
 		passphrase)
 			while IFS=' ' read -rd, _crypt _dev _trim _time; do
@@ -1719,8 +1634,8 @@ udev_reader()
 			unset _waiting_mnt[${_cmd[1]}] _pid_ppwrk[${_cmd[1]}]
 			if [[ ${_starting} -ne 0 && -z ${!_waiting_mnt[@]} ]]; then
 				_starting=0
-				do_reader_notify_daemon "started ${_starting} ${_start_status}"
 				do_reader_cleanup
+				do_reader_notify_daemon "started ${_starting} ${_start_status}"
 			fi;;
 		control|notify)
 			case ${_cmd[2],,} in
@@ -1746,8 +1661,6 @@ udev_reader()
 			do_log debug "${__myname} received invalid command: \"${_cmd[@]}\"";;
 		esac
 		do_log debug2 "${__myname} processing command \"${_cmd[@]}\" took $(do_timer ${__time_start})s total"
-
-		do_log debug2 "${_myname} running since $(do_timer date ${_time_start})"
 	done
 
 	# We should never get here, exit with error if we do.
@@ -1841,7 +1754,7 @@ do_reader_notify_daemon()
 do_reader_cleanup()
 {
 	# Reader cleanup routine. Check all the active workers, se if they're still running, terminate after timeout.
-	local __myname="reader cleanup (${BASHPID}):" __time_start=$(do_timer) __waiting_mnt="" _crypt _dev _pp __trim _time _to
+	local __myname="reader cleanup (${BASHPID}):" __time_start=$(do_timer) __waiting_mnt="" _crypt_arr _pp _mnt
 	_cleanup=$(do_timer ${time_start})
 	_time_active=$(do_timer ${_time_start})
 	do_log debug "${_myname} cleanup starting at ${_time_active}"
@@ -1856,35 +1769,30 @@ do_reader_cleanup()
 	fi
 
 	# Cleanup shells.
-	if [[ ! -z "${!_pid_shell[@]}" ]]; then
-		for	_pp in ${!_pid_shell[@]}; do
-			[[ "$(cat /proc/${_pid_shell[${_pp}]}/comm 2>/dev/null)" != "${MYNAME}" ]] && unset _pid_shell[${_pp}]
-		done
-	fi
+	if [[ ! -z "${!_pid_shell[@]}" ]]; then for	_pp in ${!_pid_shell[@]}; do
+		[[ "$(cat /proc/${_pid_shell[${_pp}]}/comm 2>/dev/null)" != "${MYNAME}" ]] && unset _pid_shell[${_pp}]
+	done fi
 
 	# Remove too long outstanding mounts and passphrase workers.
-	if [[ ${_starting} -eq 0 ]]; then for _pp in ${!_waiting_mnt[@]}; do
-		while IFS=" " read -rd, _crypt _dev __trim _time; do
-			_to=$(do_timer ${_time})
-			if [[ ${_to:0:-4} -ge $((conf[PP_TIMEOUT])) ]]; then
-				do_log debug "${_myname} cleanup removed waiting mount for ${__add_pp}: ${_crypt} - ${_dev} - ${__trim}"
+	for _pp in ${!_waiting_mnt[@]}; do
+		IFS=,; for _mnt in ${_waiting_mnt[${_pp}]}; do
+			IFS=" " _crypt_arr=(${_mnt})
+			if [[ $(do_timer ${_crypt_arr[3]} |cut -d. -f1) -ge $([[ ${_starting} -eq 0 ]] && echo ${conf[PP_TIMEOUT]} || echo ${conf[START_TIMEOUT]}) ]]; then
+				do_log debug "${_myname} cleanup removed waiting mount for ${_pp}: ${_crypt_arr[0]} - ${_crypt_arr[1]} - ${_crypt_arr[2]}"
 			else
-				do_log debug2 "${_myname} cleanup readded waiting mount for ${__add_pp}: ${_crypt} - ${_dev} - ${__trim}"
-				__waiting_mnt+="${_crypt} ${_dev} ${__trim} ${_time},"
+				do_log debug2 "${_myname} cleanup readded waiting mount for ${_pp}: ${_crypt_arr[0]} - ${_crypt_arr[1]} - ${_crypt_arr[2]}"
+				__waiting_mnt+="${_crypt_arr[0]} ${_crypt_arr[1]} ${_crypt_arr[2]} ${_crypt_arr[3]},"
 			fi
-		done <<<"${_waiting_mnt[${_pp}]}"
-		if [[ ! -z "${__waiting_mnt}" ]]; then
-			_waiting_mnt[${_pp}]="${__waiting_mnt}"
-		else
-			unset _waiting_mnt[${_pp}] _pid_pp[${_pp}]
-		fi
-	done fi
+		done
+		[[ ! -z "${__waiting_mnt}" ]] && _waiting_mnt[${_pp}]="${__waiting_mnt}" || unset _waiting_mnt[${_pp}]
+	done
+	unset IFS
 	
 	# Notify daemon we are still active.
 	do_reader_notify_daemon "active"
 
 	[[ -z "${!_pid_ppwrk[@]}" ]] && _pp="no active workers" || _pp="active workers for ${!_pid_ppwrk[@]}"	
-	do_log debug2 "${_myname} cleanup done in $(do_timer ${_time_start})s, ${_pp}"
+	do_log debug2 "${_myname} cleanup done in $(do_timer ${__time_start})s, ${_pp}"
 }
 
 # [END OF UDEV QUEUE READER FUNCTIONS]
