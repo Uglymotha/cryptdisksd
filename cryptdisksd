@@ -1302,27 +1302,6 @@ do_cache_pp()
 	do_log debug "$3 cached $1 passphrase indefinitely"
 }
 
-trap_term_get_passphrase() {
-	trap 'do_log warning "${___myname} unclean exit after $(do_timer ${___time_start})s"; exit 1' SIGINT SIGTERM
-
-	do_log debug "${___myname} terminating after $(do_timer ${___time_start})"
-	local ___srv
-	if [[ ! -z "${!___pid_bootserver[@]}" ]]; then for ___srv in ${!___pid_bootserver[@]}; do
-		if [[ "$(cat /proc/${___pid_bootserver[${___srv}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-			kill -SIGTERM ${___pid_bootserver[${___srv}]}
-			wait ${___pid_bootserver[${___srv}]}
-			do_log debug "${___myname} killed ssh (PID: ${___pid_bootserver[${___srv}]})"
-		fi
-	done fi
-	if [[ ! -z ${___pid_querypp} && "$(cat /proc/${___pid_querypp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-		kill -SIGTERM ${___pid_querypp}
-		wait ${___pid_querypp}
-		do_log debug2 "${___myname} killed query worker (PID: ${___pid_querypp})"
-	fi
-
-	exit 0
-}
-
 # Key client executes commands on keyservers and relays the result back to caller, which may be user on cli.
 # We expect to be called with two or three parameters, depending on the command. And optionally a list of servers.
 # 1. The command (GET / PUT / DEL)
