@@ -1302,6 +1302,30 @@ do_cache_pp()
 	do_log debug "$3 cached $1 passphrase indefinitely"
 }
 
+trap_term_key_clnt()
+{
+	trap 'do_log warning "${myname} unclean exit after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
+
+	# Reader received SIGTERM or SIGINT. See if we have any workers to kill and remove the queue.
+	do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s"
+
+	for ts in ${pid_cmd}; do if [[ "$(cat /proc/${ts}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${ts}
+		do_log debug2 "${myname} killed ${cmd} (PID: ${ts})"
+		wait ${ts}
+	fi done
+	if [[ -n "${pid_ssh}" && "$(cat /proc/${pid_ssh}/comm 2>/dev/null)" == "ssh" ]]; then
+		kill -SIGTERM ${pid_ssh}
+		do_log debug2 "${myname} killed ssh (PID: ${pid_ssh})"
+		wait ${pid_ssh}
+	fi
+	if [[ "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${pid_logwriter}
+		wait ${pid_logwriter}
+	fi
+	
+}
+
 # Key client executes commands on keyservers and relays the result back to caller, which may be user on cli.
 # We expect to be called with two or three parameters, depending on the command. And optionally a list of servers.
 # 1. The command (GET / PUT / DEL)
@@ -1312,11 +1336,12 @@ key_clnt()
 {
 	trap 'trap_term_key_clnt' SIGINT SIGTERM
 
-	local myname="${1,,}:$2 (${BASHPID}):" _time_start=$(do_timer) cmd="$1" pp="$2" timeout to ts pid_logwriter pid_cmd pid_ssh fd_ssh passphrase="" srv res
+	local myname="${1,,}:$2 (${BASHPID}):" _time_start=$(do_timer) cmd="$1" pp="$2" timeout to ts pid_logwriter pid_cmd passphrase="" srv res
 	[[ "${cmd,,}" == "put" ]] && passphrase="$3" srv="$4" to="to" || srv="$3" to="from"
 
 	# If we are called with exactly one server, execute the command on that server.
 	if [[ ( "${cmd,,}" == "put" && $# -eq 4 ) || ( "${cmd,,}" != "put" && $# -eq 3 ) ]]; then
+		local pid_ssh pid_cmd pid_logwriter
 		do_log debug "${myname} ${cmd} ${pp} key ${to} ${srv}"
 		[[ ${starting} -eq 0 ]] && timeout=${conf[PP_TIMEOUT]} || timeout=${conf[START_TIMEOUT]}
 		[[ "${cmd,,}" == "get" ]] && timeout=$((timeout/conf[NET_RETRIES]+1))
@@ -1719,15 +1744,15 @@ trap_term_ppwrk()
 		wait ${__pid_querypp}
 		do_log debug2 "${__myname} killed query worker (PID: ${__pid_querypp})"
 	fi
-	if [[ ! -z ${__pid_putkey} && "$(cat /proc/${__pid_putkey}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-		kill -SIGTERM ${__pid_putkey}
-		wait ${__pid_putkey}
-		do_log debug2 "${__myname} killed put key worker (PID: ${__pid_putkey})"
-	fi
 	if [[ ! -z "${__pid_logwriter}" && "$(cat /proc/${__pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${__pid_logwriter}
 		wait ${__pid_logwriter}
 		do_log debug2 "${__myname} killed log writer (PID: ${__pid_logwriter})"
+	fi
+	if [[ ! -z ${__pid_putkey} && "$(cat /proc/${__pid_putkey}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		[[ $1 -ne 0 ]] && kill -SIGTERM ${__pid_putkey}
+		wait ${__pid_putkey}
+		do_log debug2 "${__myname} killed put key worker (PID: ${__pid_putkey})"
 	fi
 
 	exit $1
@@ -1744,7 +1769,7 @@ udev_reader_ppwrk()
 
 	if [[ $# -ne 0 ]]; then
 		# Start key client, wait for a little bit if appropriate, start the query worker and wait.
-		local __pid_keyclnt __pid_querypp __pid_getpp __pid_logwriter
+		local __pid_keyclnt __pid_querypp __pid_getpp __pid_logwriter __pid_putkey
 		if [[ ${conf[NET_ONLINE]} -eq 0 || "$(NOTIFY_SOCKET= networkctl status | grep "Online state")" =~ (online|partial)$ ]]; then 
 			key_clnt "GET" "${_add_pp}" &
 			__pid_keyclnt=$!
