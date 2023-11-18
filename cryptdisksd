@@ -1389,12 +1389,12 @@ query_passphrase()
 	do_ask_passphrase "Enter ${pp} Passphrase: "
 
 	# Received a passphrase from the user check it against key stored in firmware.
-	#local ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
-	if [[ ${ppchk} -eq 3 ]]; then
+	local ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
+	case ${ppchk} in
+	3)
 		do_log error "${myname} Unable to confirm passphrase due to key error, giving up"
-		trap_term_query_passphrase
-
-	elif [[ ${ppchk} -eq 2 ]]; then
+		trap_term_query_passphrase;;
+	2)
 		# Key not present in firmware, ask for confirmation from the user.
 		local _passphrase="${passphrase}"
 		do_ask_passphrase "Created key file. Confirm ${pp} Passphrase: "
@@ -1406,21 +1406,19 @@ query_passphrase()
 			do_ask_passphrase "Confirm ${pp} Passphrase: "
 			[[ "${_passphrase}" == "${passphrase}" ]] && do_write_keyfile "${pp}" "${passphrase}" "${myname}"
 		done
-		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s"
-
-	elif [[ ${ppchk} -eq 1 ]]; then
+		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
+	1)
 		# Passphrase entered does not match stored key, keep asking until it does.
 		until [[ ${ppchk} -eq 0 ]]; do
 			do_log debug2 "${myname} query passphrase check failed"
 			do_ask_passphrase "Incorrect Passphrase. Enter ${pp} Passphrase: "
-			#ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
+			ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
 		done
-		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s"
-
-	elif [[ ${ppchk} -eq 0 ]]; then
+		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
+	0)
 		# Passphrase received is ok.
-		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s"
-	fi
+		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
+	esac
  
  	# Notify the reader, so it knows passphrase worker has finished.
 	echo "${passphrase}" >&${__fd_up}
