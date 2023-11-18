@@ -1359,25 +1359,6 @@ key_clnt()
 	do_log debug2 "${myname} finished after $(do_timer ${_time_start})s"
 }
 
-trap_term_query_passphrase()
-{
-	trap 'do_log warning "${myname} unclean finish after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
-
-	# Close the fd to the reader, we don't need it and should not keep it.
-	if [[ ! -z "${pid_askpp}" && "$(cat /proc/${pid_askpp}/comm 2>/dev/null)" == "systemd-ask-pas" ]]; then
-		kill -SIGKILL ${pid_askpp}
-		do_log debug2 "${myname} killed ask worker (PID: ${pid_askpp})"
-	fi
-	if [[ ! -z "${pid_putkey}" && "$(cat /proc/${pid_putkey}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-		kill -SIGTERM ${pid_putkey}
-		wait ${pid_putkey}
-		do_log debug2 "${myname} killed putkey worker (PID: ${pid_putkey})"
-	fi
-
-	do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s"
-	exit 0
-}
-
 do_ask_passphrase()
 {
 	if [[ -z "${__fd_user[@]}" ]]; then
