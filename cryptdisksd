@@ -1359,7 +1359,7 @@ key_clnt()
 	do_log debug2 "${myname} finished after $(do_timer ${_time_start})s"
 }
 
-query_passphrase()
+akgjhaquery_passphrase()
 {
 	trap 'trap_term_query_passphrase' SIGINT SIGTERM
 
