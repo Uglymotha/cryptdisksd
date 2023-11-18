@@ -1383,7 +1383,7 @@ query_passphrase()
 	trap 'trap_term_query_passphrase' SIGINT SIGTERM
 
 	# Ask for a pssphrase input by user through systemd-ask-password
-	local myname="query:${1} (${BASHPID}):" _time_start=$(do_timer) pp=$1 pid_askpp fd_askpp pid_putkey CHAR passphrase _passphrase ppchk
+	local myname="query:${1} (${BASHPID}):" _time_start=$(do_timer) pp=$1 pid_askpp fd_askpp pid_putkey CHAR DEL="$(printf "\x7F")" passphrase _passphrase ppchk
 	do_log debug "${myname} query for ${pp} passphrase started"
 
 	do_ask_passphrase "Enter ${pp} Passphrase: "
