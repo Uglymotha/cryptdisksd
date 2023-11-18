@@ -1378,11 +1378,6 @@ trap_term_query_passphrase()
 	exit 0
 }
 
-query_passphrase()
-{
-	trap 'trap_term_query_passphrase' SIGINT SIGTERM
-}
-
 do_ask_passphrase()
 {
 	if [[ -z "${__fd_user[@]}" ]]; then
