@@ -1389,7 +1389,7 @@ query_passphrase()
 	do_ask_passphrase "Enter ${pp} Passphrase: "
 
 	# Received a passphrase from the user check it against key stored in firmware.
-	local ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
+	#local ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
 	if [[ ${ppchk} -eq 3 ]]; then
 		do_log error "${myname} Unable to confirm passphrase due to key error, giving up"
 		trap_term_query_passphrase
@@ -1413,7 +1413,7 @@ query_passphrase()
 		until [[ ${ppchk} -eq 0 ]]; do
 			do_log debug2 "${myname} query passphrase check failed"
 			do_ask_passphrase "Incorrect Passphrase. Enter ${pp} Passphrase: "
-			ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
+			#ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
 		done
 		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s"
 
