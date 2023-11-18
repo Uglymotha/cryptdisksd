@@ -1359,6 +1359,54 @@ key_clnt()
 	do_log debug2 "${myname} finished after $(do_timer ${_time_start})s"
 }
 
+query_passphrase()
+{
+	trap 'trap_term_query_passphrase' SIGINT SIGTERM
+
+	# Ask for a pssphrase input by user through systemd-ask-password
+	local myname="query:${1} (${BASHPID}):" _time_start=$(do_timer) pp=$1 pid_askpp fd_askpp pid_putkey CHAR DEL="$(printf "\x7F")" passphrase _passphrase ppchk
+	do_log debug "${myname} query for ${pp} passphrase started"
+
+	do_ask_passphrase "Enter ${pp} Passphrase: "
+
+	# Received a passphrase from the user check it against key stored in firmware.
+	local ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
+	case ${ppchk} in
+	3)
+		do_log error "${myname} Unable to confirm passphrase due to key error, giving up"
+		trap_term_query_passphrase;;
+	2)
+		# Key not present in firmware, ask for confirmation from the user.
+		_passphrase="${passphrase}"
+		do_ask_passphrase "Created key file. Confirm ${pp} Passphrase: "
+		# If the passphrase does not match, enter a loop until it does and wirte the keyfile if ok.
+		until [[ "${_passphrase}" == "${passphrase}" ]]; do
+			do_ask_passphrase "Passphrases do not Match. Enter ${pp} Passphrase: "
+			_passphrase="${passphrase}"
+			do_check_passphrase "${pp}" "${passphrase}" "${myname}" rmkey
+			do_ask_passphrase "Confirm ${pp} Passphrase: "
+			[[ "${_passphrase}" == "${passphrase}" ]] && do_write_keyfile "${pp}" "${passphrase}" "${myname}"
+		done
+		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
+	1)
+		# Passphrase entered does not match stored key, keep asking until it does.
+		until [[ ${ppchk} -eq 0 ]]; do
+			do_log debug2 "${myname} query passphrase check failed"
+			do_ask_passphrase "Incorrect Passphrase. Enter ${pp} Passphrase: "
+			ppchk=$(do_check_passphrase "${pp}" "${passphrase}" "${myname}")$?
+		done
+		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
+	0)
+		# Passphrase received is ok.
+		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
+	esac
+ 
+ 	# Notify the reader, so it knows passphrase worker has finished.
+	echo "${passphrase}" >&${__fd_up}
+	
+	do_log debug2 "${myname} took $(do_timer ${_time_start})s total"
+}
+
 do_ask_passphrase()
 {
 	if [[ -z "${__fd_user[@]}" ]]; then
