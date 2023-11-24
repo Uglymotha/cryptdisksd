@@ -59,6 +59,7 @@ do_init_conf()
 		[[ ! -z "${keyserverconf[USER_TIEMOUT]}" ]] && conf[USER_TIMEOUT]=${keyserverconf[USER_TIEMOUT]}
 		[[ ! -z "${keyserverconf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]="${keyserverconf[CLEANUP_TIMER]}"
 		[[ ! -z "${keyserverconf[KEYDIR]}" ]] && conf[KEYDIR]="${HOME}/${keyserverconf[KEYDIR]}" || conf[KEYDIR]="${CONFDIR}/keys"
+		[[ ! -z "${keyserverconf[KEYSRV_TIMEOUT]}" ]] && conf[KEYSRV_TIMEOUT]="${keyserverconf[KEYSRV_TIMEOUT]}" || conf[KEYSRV_TIMEOUT]=5
 	fi
 	if [[ -n "${conf[KEYLIFE]}" || -n "${keyserverconf[KEYLIFE]}" ]]; then
 		IFS=' '; for _conf  in conf[KEYLIFE] keyserverconf[KEYLIFE]; do 
@@ -161,7 +162,7 @@ do_timer()
 
 trap_term_daemon()
 {
-	trap 'systemd-notify --pid=$$ --stopping=1 --status="${MYNAME}: unclean finish after $(do_timer ${time_start})s"; exit 1;' SIGINT SIGTERM
+	trap 'systemd-notify --pid=$$ --stopping --status="${MYNAME}: unclean finish after $(do_timer ${time_start})s"; exit 1;' SIGINT SIGTERM
 
 	# Main process received SIGTERM or SIGINT, shutdown reader and logwriter processes.
 	do_log warning "${myname} terminating after $(do_timer ${time_start})s"
@@ -313,7 +314,7 @@ systemd_daemon()
 
 	# We should never get here, exit with error if we do.
 	do_log error "${myname} terminated unexpectedly after $(do_timer {time_start})s"
-	systemd-notify --pid=$$ --stopping=1 --status="${MYNAME}: Daemon Terminated Unexpectedly After $(do_timer {time_start})s (PID: ${BASHPID}))"
+	systemd-notify --pid=$$ --stopping --status="${MYNAME}: Daemon Terminated Unexpectedly After $(do_timer {time_start})s (PID: ${BASHPID}))"
 	trap_term_daemon 1
 }
 
@@ -707,7 +708,7 @@ do_daemon_control()
 	# Daemon received control command from cryptdisksd command line. Initialize common variables for control process (__*)
 	local myname="daemon-control (${BASHPID}):" _time_start=$(do_timer) _pid_ctrl=${msg[3]%%,*}
 	local pid_socat=${msg[3]##*,} cmd="${msg[4],,}" _cmd="${msg[4],,}" sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${_pid_ctrl}.sock"
-	local _myname _crypt_arr _pid_logwriter _pid_putkey _confirm=0 _crypttab=0 _trim=0 _smartall=0 _smarttest=0 _kr=0 _fw=0 _srv="" _socat
+	local _myname _crypt_arr _pid_logwriter _pid_putkey _confirm=0 _crypttab=0 _trim=0 _smartall=0 _smarttest=0 _cache="" _fw=0 _srv="" add="" _socat
 	do_log debug "${myname} processing \"${msg[@]:4}\""
 	[[ "${cmd}" =~ ^(smart|erase)$ ]] && _cmd=smarterase
 	[[ "${cmd}" =~ ^(putkey|rmkey)$ ]] && _cmd=putrmkey 
@@ -942,16 +943,20 @@ daemon_control_putrmkey()
 {
 	# Remove the key file for the passphrase.
 	[[ "${cmd}" == "rmkey" ]] && do_control_init "rmkey" "Removing Key File" || do_control_init "putkey" "Putting Key File"
+	do_log debug "${_myname} YOYOYOYO f: ${_fw} c: ${_cache} s: ${_srv} add: ${_add} i: ${_confirm}"
 	local _pp="$(do_eval_pp "${msg[5]}")" _res=0; local _keyfile="${conf[FWDIR]}/UglyLinux${_pp}.key-${conf[FWGUID]}" _key="$(keyctl request user "${_pp}" @s 2>/dev/null)" _passphrase _t _s
-	if [[ ${_fw} -eq 0 && ${_kr} -eq 0 && "${_srv}" == "0" && ${_confirm} -eq 0 ]]; then
-		_fw=1 _kr=1 _srv=${bootconf[BOOTSERVERS]} _confirm=1
-	elif [[ ${_fw} -eq 0 && ${_kr} -eq 0 && "${_srv}" == "0" && ${_confirm} -eq 1 ]]; then
-		_fw=1 _kr=1 _srv=${bootconf[BOOTSERVERS]} _confirm=0
+	if [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 0 ]]; then
+		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
+		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=1
+	elif [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 1 ]]; then
+		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
+		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=0
 	fi
 	[[ "${_srv}" == "1" ]] && _srv=${bootconf[BOOTSERVERS]}
 	[[ "${cmd}" == "rmkey" ]] && _s="Removing" _t="from" || _s="Putting" _t="to"
-	do_log debug "${_myname} ${_s,,} ${_pp} ${_t,,} $([[ ${_kr} -eq 1 ]] && echo "cache ")$([[ ${_fw} -eq 1 ]] && echo "firmware ")$([[ "${_srv}" != "0" ]] && echo "${_srv}")"
-	echo -e "\r${BOLD}${_s} ${_pp} ${_t}: $([[ ${_kr} -eq 1 ]] && echo "cache ")$([[ ${_fw} -eq 1 ]] && echo "firmware ")$([[ "${_srv}" != "0" ]] && echo "${_srv}")${NOR}\r" >&${_socat[1]}
+	do_log debug "${_myname} YOYOYOYO1 f: ${_fw} c: ${_cache} s: ${_srv} add: ${_add} i: ${_confirm}"
+	do_log debug "${_myname} ${_s,,} ${_pp} ${_t,,} $([[ ${_cache} -ne -2 ]] && echo "cache ")$([[ ${_fw} -eq 1 ]] && echo "firmware ")$([[ "${_srv}" != "0" ]] && echo "${_srv}")"
+	echo -e "\r${BOLD}${_s} ${_pp} ${_t}: $([[ ${_cache} -ne -2 ]] && echo "cache ")$([[ ${_fw} -eq 1 ]] && echo "firmware ")$([[ "${_srv}" != "0" ]] && echo "${_srv}")${NOR}\r" >&${_socat[1]}
 
 	# Add or remove key to/from firmware
 	[[ "${cmd}" == "putkey" ]] && ! do_control_get_passphrase "${_pp}" && trap_term_control 1
@@ -975,34 +980,46 @@ daemon_control_putrmkey()
 	fi
 
 	# Add or remove key to/from keyring.
-	if [[ "${cmd}" == "rmkey" && ${_kr} -eq 1 && -z "${_key}" ]]; then
+	if [[ "${cmd}" == "rmkey" && ${_cache} -ne -2 && -z "${_key}" ]]; then
 		do_log debug "${_myname} ${_pp} not cached"
 		echo -e "\r${BOLD}${RED}${_pp} not Cached.${NOR}\r" >&${_socat[1]}
-	elif [[ ${_kr} -eq 1 ]]; then
+	elif [[ ${_cache} -ne -2 ]]; then
 		[[ ${_confirm} -eq 1 ]] && do_control_confirm "Continue ${_s} ${_pp} ${_t} Cache? (Y/n)" "y" || _res="y"
 		if [[ ${_res} == "y" ]]; then
 			if [[ "${cmd}" == "rmkey" ]] && keyctl revoke "${_key}" >dev/null 2>&1 && keyctl unlink "${_key}" @s >/dev/null 2>&1; then
 				echo "passphrase ${_pp} daemon 0" >${conf[FIFO]}
 				echo -e "\r${BOLD}${GRN}Removed ${_pp} from Cache.${NOR}\r" >&${_socat[1]}
 				do_log debug "${_myname} removed ${_pp} from cache"
-			elif [[ "${cmd}" == "putkey" ]] && do_cache_pp "${_myname}" "${_pp}" "-1" "${_passphrase}"; then
+			elif [[ "${cmd}" == "putkey" ]] && do_cache_pp "${_myname}" "${_pp}" "${_cache}" "${_passphrase}"; then
 				echo "passphrase ${_pp} daemon 1" >${conf[FIFO]}
 				echo -e "\r${BOLD}${GRN}Cached ${_pp} Passphrase.${NOR}\r" >&${_socat[1]}
 			else
-				echo -e "\r${BOLD}${RED}Failed to $([[ "${cmd}" == "rmkey" ]] && echo Remove || echo Cache) ${_pp} Passphrase $([[ "${cmd}" == "rmkey" ]] && echo from Cache).${NOR}\r" >&${_socat[1]}
+				echo -e "\r${BOLD}${RED}Failed to $([[ "${cmd}" == "rmkey" ]] && echo Remove || echo Cache) ${_pp} Passphrase$([[ "${cmd}" == "rmkey" ]] && echo " from Cache").${NOR}\r" >&${_socat[1]}
 				[[ "${cmd}" == "rmkey" ]] && do_log debug "${_myname} failed to remove ${_pp} from cache"
 			fi
 		fi
 	fi
 
-	# Remove key from servers.
+	# Add or remove key to/from servers (cache).
 	if [[ "${_srv}" != "0" ]]; then
+		exec {__fd_user}>&${_socat[1]}
 		[[ ${_confirm} -eq 1 ]] && do_control_confirm "Continue ${_s} ${_pp} ${_t} Boot Servers: ${NOR}${GREY}${_srv}${RED}${BOLD}? (Y/n)" "y" || _res="y"
 		if [[ "${_res}" == "y" ]]; then
 			echo -e "\r${BOLD}${GRN}${_s} ${_pp} Key ${_t} Boot Servers: ${GREY}${_srv}.${NOR}\r" >&${_socat[1]}
 			do_log debug "${_myname} ${_s,,} ${_pp} key ${_t,,} boot servers: ${_srv}"
-			exec {__fd_user}>&${_socat[1]}
-			key_clnt "$([[ "${cmd}" == "rmkey" ]] && echo DEL || echo PUT)" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${cmd}" == "putkey" ]] && key_clnt "PUT" "${_pp}" "${_passphrase}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${cmd}" == "rmkey" ]] && key_clnt "DEL" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			echo -e "\r" >&${_socat[1]}
+		fi
+		[[ ${_add} -ne -3 && ${_confirm} -eq 1 ]] && do_control_confirm "Continue Adding ${_pp} ${_t} Boot Servers Cache: ${NOR}${GREY}${_srv}${RED}${BOLD}? (Y/n)" "y" || _res="y"
+		if [[ "${_res}" == "y" && ${_add} -ne -3 ]]; then
+			[[ ${_add} -eq -2 && -n "${keylife[${_pp}]}" ]] && _add=${keylife[${_pp}]}
+			[[ ${_add} -eq -2 ]] && _add=${conf[KEYLIFE]}
+			[[ "${cmd}" == "putkey" ]] && _s="Adding" _t="to" || _s="Deleting" _t="from"
+			echo -e "\r${BOLD}${GRN}${_s} ${_pp} Key ${_t} Boot Servers Cache: ${GREY}${_srv}.${NOR}\r" >&${_socat[1]}
+			do_log debug "${_myname} ${_s,,} ${_pp} key ${_t,,} boot servers cache: ${_srv}"
+			[[ "${cmd}" == "putkey" ]] && key_clnt "ADD" "${_pp}" "${_add}" "${_passphrase}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${cmd}" == "rmkey" ]] && key_clnt "REM" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
 			echo -e "\r" >&${_socat[1]}
 		fi
 	fi
@@ -1184,7 +1201,7 @@ do_control_init()
 	if [[ "${cmd}" == "smart" ]]; then
 		_smartall=${msg[$((${#msg[@]}-2))]} _smarttest=${msg[$((${#msg[@]}-1))]}
 	elif [[ "${cmd}" =~ ^(putkey|rmkey)$ ]]; then
-		_confirm=${msg[$((${#msg[@]}-4))]} _kr=${msg[$((${#msg[@]}-3))]} _fw=${msg[$((${#msg[@]}-2))]} _srv=$(IFS=','; echo ${msg[$((${#msg[@]}-1))]})
+		_confirm=${msg[$((${#msg[@]}-5))]} _add=${msg[$((${#msg[@]}-4))]} _cache=${msg[$((${#msg[@]}-3))]} _fw=${msg[$((${#msg[@]}-2))]} _srv=$(IFS=','; echo ${msg[$((${#msg[@]}-1))]})
 	elif [[ "${cmd}" =~ ^(add|del)$ ]]; then
 		_trim=${msg[$((${#msg[@]}-3))]} _confirm=${msg[$((${#msg[@]}-2))]} _crypttab=${msg[$((${#msg[@]}-1))]} 
 	fi
@@ -1194,7 +1211,8 @@ do_control_init()
 do_control_confirm()
 {
 	echo -ne "\r${RED}${BOLD}$1 ${NOR}" >&${_socat[1]}
-	read -t${conf[USER_TIMEOUT]} -rsn1 -u ${_socat[0]} _res
+	read -t${conf[USER_TIMEOUT]} -rsn1 -u ${_socat[0]} _res 
+	[[ $? -ne 0 && $? -ne 142 ]] && trap_term_control 1
 	[[ "${_res,,}" != "y" && "${_res,,}" != "n" ]] && _res=${2,,} || _res=${_res,,}
 	echo -e "${BOLD}${_res}${NOR}\r" >&${_socat[1]}
 }
@@ -1393,7 +1411,7 @@ query_passphrase()
 	local myname="query:$1 (${BASHPID}):" _time_start=$(do_timer) pp=$1 pid_askpp fd_askpp passphrase _passphrase ppchk
 	do_log debug "${myname} query for ${pp} passphrase started"
 
-	do_ask_passphrase "Enter ${pp} Passphrase: "
+	do_ask_passphrase "Enter ${pp} Passphrase: " || trap_term_query_passphrase
 
 	# Received a passphrase from the user check it against key stored in firmware.
 	local ppchk=$(do_check_passphrase "${myname}" "${pp}" "${passphrase}")$?
@@ -1404,13 +1422,13 @@ query_passphrase()
 	2)
 		# Key not present in firmware, ask for confirmation from the user.
 		_passphrase="${passphrase}"
-		do_ask_passphrase "Created key file. Confirm ${pp} Passphrase: "
+		do_ask_passphrase "Created key file. Confirm ${pp} Passphrase: " || trap_term_query_passphrase
 		# If the passphrase does not match, enter a loop until it does and wirte the keyfile if ok.
 		until [[ "${_passphrase}" == "${passphrase}" ]]; do
-			do_ask_passphrase "Passphrases do not Match. Enter ${pp} Passphrase: "
+			do_ask_passphrase "Passphrases do not Match. Enter ${pp} Passphrase: " || trap_term_query_passphrase
 			_passphrase="${passphrase}"
 			do_check_passphrase "${myname}" "${pp}" "${passphrase}" rmkey
-			do_ask_passphrase "Confirm ${pp} Passphrase: "
+			do_ask_passphrase "Confirm ${pp} Passphrase: " || trap_term_query_passphrase
 			[[ "${_passphrase}" == "${passphrase}" ]] && do_write_keyfile "${myname}" "${pp}" "${passphrase}"
 		done
 		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
@@ -1418,7 +1436,7 @@ query_passphrase()
 		# Passphrase entered does not match stored key, keep asking until it does.
 		until [[ ${ppchk} -eq 0 ]]; do
 			do_log debug2 "${myname} query passphrase check failed"
-			do_ask_passphrase "Incorrect Passphrase. Enter ${pp} Passphrase: "
+			do_ask_passphrase "Incorrect Passphrase. Enter ${pp} Passphrase: " || trap_term_query_passphrase
 			ppchk=$(do_check_passphrase "${myname}" "${pp}" "${passphrase}")$?
 		done
 		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
@@ -1444,14 +1462,14 @@ do_ask_passphrase()
 	else
 		passphrase="" CHAR=""
 		echo -ne "\r${BOLD}$1: ${NOR}" >&${__fd_user[1]}
-		until [[ "${CHAR}" == $'\r' ]]; do
-		   	read -t${conf[USER_TIMEOUT]} -rsn1 -u${__fd_user[0]} CHAR || return 1
+		until [[ "${CHAR}" == $'\r' || "${CHAR}" == $'\n' ]]; do
+		   	read -t${conf[USER_TIMEOUT]} -rsN1 -u${__fd_user[0]} CHAR || return 1
 			if [[ "${CHAR}" == "${DEL}" && "${#passphrase}" -ge 1 ]]; then
 				echo -ne "\b \b" >&${__fd_user[1]}
 				passphrase="${passphrase::-1}"
-			elif [[ "${CHAR}" != $'\r' && "${CHAR}" != "${DEL}" ]]; then
+			elif [[ "${CHAR}" != $'\r' && "${CHAR}" != $'\n' && "${CHAR}" != "${DEL}" ]]; then
 				passphrase+="${CHAR}"
-				echo -n "$CHAR" >&${__fd_user[1]}
+				echo -n "*" >&${__fd_user[1]}
 			fi
 		done
 		echo -e "\r" >&${__fd_user[1]}
@@ -1914,7 +1932,7 @@ trap_term_systemd_keysrv()
 
 do_systemd_keysrv()
 {
-	trap 'trap_term_systemd_keysrv' SIGINT SIGTERM
+	trap 'trap_term_systemd_keysrv' SIGINT SIGTERM SIGHUP
 	local fd_fifo pid msg cmd pp passphrase key timeout _conf="$(cat ${CONF})" res=0 IFS=' '
 	declare -A cached_pp
 	systemd-notify --ready --status="${myname}: Started on $(do_timer date ${time_start})"
@@ -1932,18 +1950,20 @@ do_systemd_keysrv()
 			0)   do_log debug "${myname} new command \"${msg[@]}\"";;
 			*)   break
 		esac
-		pid="${msg[0]}" cmd="${msg[1]}" pp="$(do_eval_pp ${msg[2]})" timeout="${msg[3]}" passphrase="${msg[4]}"
-		if [[ ! ${pid} =~ ^[0-9]+$ || ! ${cmd} =~ ^(add|rem|get|put|del|status)$ || $((${#msg[@]}-3)) -gt 2 || ! -p ${cmd}.${pid}.res ]]; then
-			do_log error "${myname} invalid command \"${msg[@]}\""
-			continue
-		fi
 		for pp in ${!cached_pp[@]}; do if ! keyctl request user "${pp}" @s >/dev/null 2>&1; then
 			do_log info "${myname} ${pp} passphrase has expired"
 			unset cached_pp[${pp}]
 		fi done
 
+		pid="${msg[0]}" cmd="${msg[1]}" pp="$(do_eval_pp ${msg[2]})" timeout="${msg[3]}"
+		if [[ ! ${pid} =~ ^[0-9]+$ || ! ${cmd} =~ ^(add|rem|get|put|del|status)$ || $((${#msg[@]}-3)) -gt 2 || ! -p ${cmd}.${pid}.res ]]; then
+			do_log error "${myname} invalid command \"${msg[@]}\""
+			continue
+		fi
+
 		case ${cmd} in
 		add)
+			passphrase="${msg[4]}"
 			do_log debug "${myname} adding ${pp} key"
 			[[ ! -f ${conf[KEYDIR]}/${pp}.key ]] && res=$(do_write_keyfile "${myname}" "${pp}" "${passphrase}" 1)$?
 			[[ ${res} -ne 1 ]] && res=$(do_cache_pp "${myname}" "${pp}" "${timeout}" "${passphrase}" $timeout)$?
@@ -1985,9 +2005,10 @@ do_systemd_keysrv()
 				do_keysrv_send "${passphrase}"
 			fi;;
 		put)
+			passphrase="${msg[3]}"
 			do_log debug "${myname} putting ${pp} key"
 			if openssl aes-256-cbc -d -salt -pbkdf2 -in ${conf[KEYDIR]}/${pp}.key -out /dev/null -k "${passphrase}"; then
-				do_log info "${myname} recevied passphrase ${pp} equal to stored passphrase"
+				do_log info "${myname} recevied $? passphrase ${pp} equal to stored passphrase"
 				do_keysrv_send "SAME"
 			elif ! do_write_keyfile "${myname}" "${pp}" "${passphrase}" 1; then
 				do_log warning "${myname} PUT of passphrase ${pp} failed."
@@ -2070,18 +2091,20 @@ key_clnt()
 {
 	trap 'trap_term_key_clnt' SIGINT SIGTERM
 
-	local myname="${1,,}:$2 (${BASHPID}):" _time_start=$(do_timer) cmd="$1" pp="$2" timeout to ts pid_logwriter pid_cmd pid_sleep passphrase="" srv res ret
-	[[ "${cmd,,}" == "put" ]] && passphrase="$3" srv="$4" to="to" || srv="$3" to="from"
+	local myname="${1,,}:$2 (${BASHPID}):" _time_start=$(do_timer) cmd="${1,,}" pp="$2" timeout kto to ts pid_logwriter pid_cmd pid_sleep passphrase="" srv res ret
+	[[ "${cmd}" == "add" ]] && kto="$3" passphrase="$4" srv="$5" to="to"
+	[[ "${cmd}" == "put" ]] && passphrase="$3" srv="$4" to="to"
+	[[ ! ${cmd} =~ ^(put|add)$ ]] && srv="$3" to="from"
 	[[ ${starting} -eq 0 ]] && timeout=${conf[PP_TIMEOUT]} || timeout=${conf[START_TIMEOUT]}
-	[[ "${cmd,,}" == "get" ]] && timeout=$((timeout/(conf[NET_RETRIES]+1)))
+	[[ "${cmd}" == "get" ]] && timeout=$((timeout/(conf[NET_RETRIES]+1)))
 
 	# If we are called with exactly one server, execute the command on that server.
-	if [[ ( "${cmd,,}" == "put" && $# -eq 4 ) || ( "${cmd,,}" != "put" && $# -eq 3 ) ]]; then
+	if [[ ( "${cmd}" == "add" && $# -eq 5 ) || ( "${cmd}" == "put" && $# -eq 4 ) || ( ! "${cmd}" =~ ^(put|add)$ && $# -eq 3 ) ]]; then
 		local _pid_ssh pid_cmd pid_logwriter
 		do_log debug "${myname} ${cmd} ${pp} key ${to} ${srv}"
-		exec {fd_ssh}< <(ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${srv} "${cmd}" "${pp}" "${passphrase}")
+		exec {fd_ssh}< <(ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${srv} "${cmd^^}" "${pp}" "${kto}" "${passphrase}")
 		_pid_ssh=$!
-		if ! read -t${timeout} -ru${fd_ssh} res || [[ "${cmd,,}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ]]; then
+		if ! read -t${timeout} -ru${fd_ssh} res || [[ "${cmd}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ]]; then
 			[[ $? -eq 142 ]] && ts="timeout" || ts="failed"
 			[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}${NOR} " >&${__fd_user}
 			do_log warning "${myname} ${cmd} ${pp} key ${to} ${srv} for ${bootconf[BOOTUSER]} ${ts}"
@@ -2091,14 +2114,14 @@ key_clnt()
 		elif [[ ( "${cmd,,}" != "get" && "${res,,}" == "ok" ) || ( "${cmd,,}" == "get" && $(do_check_passphrase "${myname}" "${pp}" "${res}")$? -ne 1 ) ]]; then
 			[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${GRN}${srv}${NOR} " >&${__fd_user}
 			do_log debug "${myname} ${cmd} ${pp} key ${to} ${srv} for ${bootconf[BOOTUSER]} succeeded"
-			[[ "${cmd,,}" == "get" ]] && echo "${res}" >&${__fd_up}
+			[[ "${cmd}" == "get" ]] && echo "${res}" >&${__fd_up}
 		fi
 		exit
 	fi
 
 	# When starting wait for network before trying to connect to servers.
 	if [[ ${FOREGROUND} -eq 0 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]]; then
-		[[ ${conf[LOGLEVEL]} -eq 4 ]] && exec {fd_logwriter}> >(logwriter ${cmd,,}-${pp}-${BASHPID}.log) 1>&${fd_logwriter} 2>&1 || exec {fd_logwriter}> >(logwriter ${cmd,,}-${pp}-${BASHPID}.log)
+		[[ ${conf[LOGLEVEL]} -eq 4 ]] && exec {fd_logwriter}> >(logwriter ${cmd}-${pp}-${BASHPID}.log) 1>&${fd_logwriter} 2>&1 || exec {fd_logwriter}> >(logwriter ${cmd}-${pp}-${BASHPID}.log)
 		pid_logwriter=$!
 	fi
 	if [[ ${starting} -ne 0 && ${conf[NET_ONLINE]} -eq 1 ]]; then
@@ -2111,50 +2134,94 @@ key_clnt()
 
 	# For every boot server on command line start a command sub shell. If no list of servers was specified use all.
 	# We will not retry PUT or DEL as this should just work if the other side is set up. Also no retry for getting the passphrase for cli user.
-	[[ "${cmd,,}" == "put" ]] && srv="${@:4}" || srv="${@:3}"
+	[[ ${cmd} == "add" ]] && srv="${@:5}" 
+	[[ ${cmd} == "put" ]] && srv="${@:4}"
+	[[ ! ${cmd} =~ ^(put|add)$ ]] && srv="${@:3}"
 	[[ -z "${srv}" ]] && srv="${bootconf[BOOTSERVERS]}"
 	do_log debug "${myname} ${cmd} ${pp} key ${to} boot servers: ${srv}"
 	ret=0
 	while [[ -n "${srv}" && ${ret} -le ${conf[NET_RETRIES]} ]]; do
 		to=$(do_timer)
 		for ts in ${srv}; do
-			if [[ "${cmd,,}" == "put" ]]; then
-				key_clnt "${cmd}" "${pp}" "${passphrase}" "${ts}" &
-			else
-				key_clnt "${cmd}" "${pp}" "${ts}" &
-			fi
-			pid_cmd+="$! "
+			[[ "${cmd}" == "add" ]] && key_clnt "${cmd}" "${pp}" "${kto}" "${passphrase}" "${ts}" & pid_cmd+="$! "
+			[[ "${cmd}" == "put" ]] && key_clnt "${cmd}" "${pp}" "${passphrase}" "${ts}" & pid_cmd+="$! "
+			[[ ! ${cmd} =~ ^(put|add)$ ]] &&  key_clnt "${cmd}" "${pp}" "${ts}" & pid_cmd+="$! "
 		done
 		wait ${pid_cmd}
-		[[ "${cmd,,}" != "get" || -n "${__fd_user}" ]] && unset srv || ret=$((ret+1))
-		[[ "${cmd,,}" == "get" && -z "${__fd_user}" && ${ret} -le ${conf[NET_RETRIES]} ]] && sleep $((timeout-$(do_timer ${to} |cut -d'.' -f1))) & pid_sleep=$!; wait ${pid_sleep}
+		[[ "${cmd}" != "get" || -n "${__fd_user}" ]] && unset srv || ret=$((ret+1))
+		[[ "${cmd}" == "get" && -z "${__fd_user}" && ${ret} -le ${conf[NET_RETRIES]} ]] && sleep $((timeout-$(do_timer ${to} |cut -d'.' -f1))) & pid_sleep=$!; wait ${pid_sleep}
 	done
 
 	do_log debug2 "${myname} finished after $(do_timer ${_time_start})s"
 }
 
+do_sanboot()
+{
+	local myname="${MYNAME}-boot-${USER}" cmd="${1,,}" pp="$2" timeout="$([[ "${1,,}" == "add" ]] && echo $3)" passphrase="$([[ "${1,,}" == put ]] && echo "$3" || echo "$4")" fd_fifo res r
+	if ! do_init_conf keyserver || ! mkfifo ${CONFDIR}/${cmd}.$$.res; then
+		logger -p user.error "${myname}: initialization failed"
+		return 1
+	fi
+	exec {fd_fifo}<>${CONFDIR}/${cmd}.$$.res
+	echo "$$ ${cmd}" "${pp}" "${timeout}" "${passphrase}" >${conf[FIFO]}
+	if ! read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} res; then
+		logger -p user.error "${myname}: no response received from keyserver"
+		r=1
+	elif [[ "${cmd}" == "get" && "${res,,}" == "nok" ]] || ! read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} passphrase; then
+		[[ $? -ne 0 ]]            && logger -p user.error "${myname}: no ${pp} passphrase received from keyserver"
+		[[ "${res,,}" == "nok" ]] && logger -p user.error "${myname}: ${pp} passphrase not cached by keyserver"
+		kill -SIGTERM ${PPID}
+		r=1
+	elif [[ "${cmd}" == "get" ]]; then
+		logger -p user.info "${myname}: received ${pp} passphrase from keyserver"
+		echo "${passphrase}" >&${out}
+	elif [[ "${cmd}" == "put" ]]; then
+		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: ${pp} passphrase equal to stored passphrase on keyserver"
+		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to put ${pp} passphrase to keyserver"
+		[[ "${res,,}" == "ok" ]]   && r=0 && logger -p user.info "${myname}: put ${pp} passphrase to keyserver succeeded"
+	elif [[ "${cmd}" == "del" ]]; then
+		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: ${pp} passphrase not stored on keyserver"
+		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to remove ${pp} passphrase from keyserver"
+		[[ "${res,,}" == "ok" ]]   && r=0 && logger -p user.info "${myname}: removing ${pp} passphrase from keyserver succeeded"
+	elif [[ "${cmd}" == "add" ]]; then
+		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: ${pp} passphrase already cached on keyserver"
+		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to cache ${pp} passphrase on keyserver"
+		[[ "${res,,}" == "ok" ]]   && r=0 && logger -p user.info "${myname}: adding ${pp} passphrase to keyserver cache succeeded"
+	elif [[ "${cmd}" == "add" ]]; then
+		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: ${pp} passphrase already cached on keyserver"
+		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to cache ${pp} passphrase on keyserver"
+		[[ "${res,,}" == "ok" ]]   && r=0 && logger -p user.info "${myname}: adding ${pp} passphrase to keyserver cache succeeded"
+	fi
+
+	[[ "${cmd}" != "get" ]] && echo "${res}" >&${out}
+	rm -f ${CONFDIR}/${cmd}.$$.res
+	return ${r}
+}
+
 do_bootsan()
 {
 	# Set HOME to host(user) homedir and initialize config.
-	local HOME=$(getent passwd $2 |cut -d':' -f6 2>/dev/null) host=$2 passphrase pp key f fd_fifo
+	local HOME=$(getent passwd $2 |cut -d':' -f6 2>/dev/null) host=$2 passphrase pp key f fd_fifo res r=0
 	if [[ -z "${HOME}" ]] || ! do_init_conf keyserver; then
-		echo "Unable to Initialize$([[ -z "${HOME}" ]] && echo ", ${host} is not a Valid Host")."
+		echo -e "${RED}${BOLD}Unable to Initialize$([[ -z "${HOME}" ]] && echo ", ${host} is not a Valid Host" || echo " Config").${NOR}"
 		exit 1
 	fi
 	cd ${CONFDIR}
 	[[ -f host.conf ]] && . host.conf
 
 	# Ask the passphrase for every key present. And send add command to keyserver.
+	exec {__fd_user[0]}<&0 {__fd_user[1]}>&1
 	for f in ${conf[KEYDIR]}/*.key; do
-	    key=${f##*/} && pp=${key%*.}
+	    key=${f##*/} && pp=${key%.*}
 		if [[ "${key}" != "*" ]]; then
-			passphrase="$(systemd-ask-password --timeout=${conf[PP_TIMEOUT]} --id=${pp} "Enter ${pp} Passphrase: ")"
+			do_ask_passphrase "Enter ${pp} Passphrase: " || break
 			until openssl aes-256-cbc -d -salt -pbkdf2 -in ${f} -out /dev/null -k "${passphrase}" >/dev/null 2>&1; do
-		        passphrase="$(systemd-ask-password --timeout=${conf[PP_TIMEOUT]} --id=${pp} "Incorrect Password. Enter ${pp} Passphrase: ")"
+		        do_ask_passphrase "Incorrect Password. Enter ${pp} Passphrase: " || break
 			done
-			mkfifo ${CONFDIR}/add.$$.res
+			r=$(mkfifo ${CONFDIR}/add.$$.res)? 
+			[[ ${r} -ne 0 ]] && break
 			exec {fd_fifo}<>${CONFDIR}/add.$$.res
-			echo "$$ add ${pp} ${to} ${passphrase}" >${conf[FIFO]}
+			echo "$$ add ${pp} ${timeout} ${passphrase}" >${conf[FIFO]}
 			read -t${conf[USER_TIMEOUT]} -ru${fd_fifo} res
 			[[ $? -ne 0 || "${res,,}" == "nok" ]] && echo "Failed to Cache ${pp} Pasphrase."
 			[[ "${res,,}" == "same" ]] && echo "${pp} Pasphrase Already Cached."
@@ -2164,6 +2231,7 @@ do_bootsan()
 		fi
 	done
 
+	[[ ${r} -ne 0 ]] && echo -e "${BOLD}${RED}Error, Cannot Create FIFO for Response.${NOR}"
 	# Wake-up System.
 	[[ -n "${MAC}" && -n "${INTERFACE}" ]] && sudo /usr/sbin/etherwake -i "${INTERFACE}" -b "${MAC}"
 }
@@ -2223,56 +2291,64 @@ do_echo_use()
 		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tAdd an Encrypted Block Device to the Manager\n"
 		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hct ] { crypt | device } || { -p passphrase crypt device }${NOR}\n\n"
 		echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
-		echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
+		echo -e "\t${BOLD}-i${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
 		echo -e "\t${BOLD}-p {passphrase}${NOR}\tUse {passphrase} for Crypt"
 		echo -e "\t${BOLD}-t${NOR}\t\tEnable TRIM for Crypt\n\n"
-		echo -e "The $1 Command Can Be Used it Two Ways.\nThe First ( ${BOLD}[ -c ] { crypt | device }${NOR} ) Will Add a Crypt or Device Which is Already on the Crypttab"
-		echo -e "The Second ( ${BOLD}[ -c ] { -p passphrase crypt device }${NOR} ) Will Add a crypt (and Corresponding Backing Device) to the Crypttab\nThe Option '${BOLD}-p passphrase${NOR}' Must Be Specified in the Second Case\n"
+		echo -e "The $1 Command Can Be Used it Two Ways.\nThe First ( ${BOLD}[ -i ] { crypt | device }${NOR} ) Will Add a Crypt or Device Which is Already on the Crypttab"
+		echo -e "The Second ( ${BOLD}[ -i ] { -p passphrase crypt device }${NOR} ) Will Add a crypt (and Corresponding Backing Device) to the Crypttab\nThe Option '${BOLD}-p passphrase${NOR}' Must Be Specified in the Second Case\n"
 		echo -e "The Options and Arguments Can Be Specified in any Order"
-		echo -e "${BOLD}${UL}${MYNAME} $1 -p passphrase crypt device${NOR}\tand\t${BOLD}${UL}${MYNAME} $1 crypt -c\n${MYNAME} $1 crypt -c device -p passphrase${NOR}\tand\t${BOLD}${UL}${MYNAME} $1 -t device -p passphrase crypt -c${NOR}"
+		echo -e "${BOLD}${UL}${MYNAME} $1 -p passphrase crypt device${NOR}\tand\t${BOLD}${UL}${MYNAME} $1 crypt -i\n${MYNAME} $1 crypt -i device -p passphrase${NOR}\tand\t${BOLD}${UL}${MYNAME} $1 -t device -p passphrase crypt -i${NOR}"
 		echo -e "Are All Valid $1 Command Specifications\n"			
 		echo -e "The ${MYNAME} Will Look for Block Devices in \"${BOLD}${conf[BLOCKDEVSDIRS]}${NOR}\"\n";;
 	del)
 		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tRemove an Encrypted Block Device from the Manager\n"
 		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -htc ] { crypt | device }${NOR}\n\n"
 		echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
-		echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
+		echo -e "\t${BOLD}-i${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
 		echo -e "\t${BOLD}-t${NOR}\t\tRemove the crypt (and Corresponding Backing Device) from the Crypttab\n\n"
 		echo -e "The Options and Arguments Can Be Specified in any Order\n";;
 	putkey)
 		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tPut Key File to Boot Servers\n"
-		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hc ] passphrase${NOR}\n\n"
+		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -h -c -s (-a -l) -f -k HOST ] passphrase${NOR}\n\n"
 		echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
-		echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
-		echo -e "\t${BOLD}-k${NOR}\t\tPut key only to keyring"
+		echo -e "\t${BOLD}-i${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
+		echo -e "\t${BOLD}-k${NOR}\t\tPut key only to local keyserver for HOST"
+		echo -e "\t${BOLD}-c${NOR}\t\tPut key only to cache"
 		echo -e "\t${BOLD}-f${NOR}\t\tPut key only to firmware"
-		echo -e "\t${BOLD}-s${NOR}\t\tPut key only to servers\n"
-		echo -e "The option -c is a confirmation flag, when no other options are specified\nit disables confirmation, enables confirmation otherwise"
-		echo -e "The options -s -f -k can be combined to put key to these places only."
-		echo -e "With -s a server can be specified and this may occur more than once.\nIt may only occur once without server to remove from all servers"
-		echo -e "Multiple servers can be specified with , as separator."
+		echo -e "\t${BOLD}-s${NOR}\t\tPut key only to servers"
+		echo -e "\t${BOLD}-a${NOR}\t\tPut key to servers cache"
+		echo -e "\t${BOLD}-l${NOR}\t\tUse local configured timeout values instead of keyserver values\n"
+		echo -e "The option -i is a confirmation flag, when no other options are specified\nit disables confirmation, enables confirmation otherwise"
+		echo -e "The options -s -f -c can be combined to put key to these places only\With -c an optional timeout can be specified, if not configured values are used"
+		echo -e "With -s a server can be specified and this may occur more than once\nIt may only occur once without server to remove from all servers"
+		echo -e "Multiple servers can be specified with , as separator"
+		echo -e "When -s is used, -a will also add passphrase to boot servers cache\nOptionally a timeout for the passphrase can be specified"	
+		echo -e "When -a is used without a timeout value, by default the keyserver timeout values are used\nWith -l the locally configured timeout values will be used"
 		echo -e "${BOLD}${UL}(\"-s\" and \"-s server1 -s server2,server3\" are valid but \"-s -s server1\" or \"-s server1 -s\" are not.)${NOR}"
 		echo -e "${BOLD}${MYNAME} putkey { passphrase }${NOR}\t\t- without any option puts key to everywhere asking for confirmation each step"
-		echo -e "${BOLD}${MYNAME} putkey -c { passphrase }${NOR}\t\t- puts key to everywhere not asking for confirmation"
-		echo -e "${BOLD}${MYNAME} putkey -c -k -f { passphrase }${NOR}\t- puts key to specified locations asking for confirmation"
-		echo -e "${BOLD}${MYNAME} putkey -k -f { passphrase }${NOR}\t- puts key to specified locations not asking for confirmation";;
+		echo -e "${BOLD}${MYNAME} putkey -i { passphrase }${NOR}\t\t- puts key to everywhere not asking for confirmation"
+		echo -e "${BOLD}${MYNAME} putkey -i -c -f { passphrase }${NOR}\t- puts key to specified locations asking for confirmation"
+		echo -e "${BOLD}${MYNAME} putkey -c -f { passphrase }${NOR}\t- puts key to specified locations not asking for confirmation";;
 	rmkey)
 		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tRemove Key File from Firmware and/or Boot Servers\n"
-		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hckfs ] { passphrase }${NOR}\n\n"
+		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -h -c -s (-a) -f -k ] passphrase${NOR}\n\n"
 		echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
-		echo -e "\t${BOLD}-c${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
-		echo -e "\t${BOLD}-k${NOR}\t\tRemove key only from keyring"
+		echo -e "\t${BOLD}-i${NOR}\t\tAsk for Confirmation for Non-Crtitical Actions"
+		echo -e "\t${BOLD}-k${NOR}\t\tRemove key only from local keyserver for HOST"
+		echo -e "\t${BOLD}-c${NOR}\t\tRemove key only from cache"
 		echo -e "\t${BOLD}-f${NOR}\t\tRemove key only from firmware"
-		echo -e "\t${BOLD}-s${NOR}\t\tRemove key only from servers\n"
-		echo -e "The option -c is a confirmation flag, when no other options are specified\nit disables confirmation, enables confirmation otherwise"
-		echo -e "The options -s -f -k can be combined to remove key from these places only."
-		echo -e "With -s a server can be specified and this may occur more than once.\nIt may only occur once without server to remove from all servers"
-		echo -e "Multiple servers can be specified with , as separator."
+		echo -e "\t${BOLD}-s${NOR}\t\tRemove key only from servers"
+		echo -e "\t${BOLD}-a${NOR}\t\tRemove key from servers cache\n"
+		echo -e "The option -i is a confirmation flag, when no other options are specified\nit disables confirmation, enables confirmation otherwise"
+		echo -e "The options -s -f -c can be combined to remove key from these places only"
+		echo -e "With -s a server can be specified and this may occur more than once\nIt may only occur once without server to remove from all servers"
+		echo -e "Multiple servers can be specified with , as separator"
+		echo -e "When -s is used, -a can be used to also remove passphrase from boot servers cache"
 		echo -e "${BOLD}${UL}(\"-s\" and \"-s server1 -s server2,server3\" are valid but \"-s -s server1\" or \"-s server1 -s\" are not.)${NOR}"
 		echo -e "${BOLD}${MYNAME} rmkey { passphrase }${NOR}\t\t- without any option removes key from everywhere asking for confirmation each step"
-		echo -e "${BOLD}${MYNAME} rmkey -c { passphrase }${NOR}\t\t- removes key from everywhere not asking for confirmation"
-		echo -e "${BOLD}${MYNAME} rmkey -c -k -f { passphrase }${NOR}\t- removes key from specified locations asking for confirmation"
-		echo -e "${BOLD}${MYNAME} rmkey -k -f { passphrase }${NOR}\t- removes key from specified locations not asking for confirmation";;
+		echo -e "${BOLD}${MYNAME} rmkey -i { passphrase }${NOR}\t\t- removes key from everywhere not asking for confirmation"
+		echo -e "${BOLD}${MYNAME} rmkey -i -c -f { passphrase }${NOR}\t- removes key from specified locations asking for confirmation"
+		echo -e "${BOLD}${MYNAME} rmkey -c -f { passphrase }${NOR}\t- removes key from specified locations not asking for confirmation";;
 	smart)
 		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tShow S.M.A.R.T. Information for Backing Device\n"
 		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -hax ] {crypt | device }${NOR}\n\n"
@@ -2322,29 +2398,60 @@ do_parse_opt()
 {
 	# Parse command line options (-h -d -f). Function is run from main cli to parse as first options given.
 	# Function can also run from the parse cmds function, it that case only -d option can be valid.
-	local opt; OPTIND=1; getopts :fFd:D:hHcCaAxXkKsSp:P:tT opt
+	local opt; OPTIND=1; getopts :fFd:D:hHiIlLcCaAxXk:K:sSp:P:tT opt
 	opt="${opt,,}"
 	case ${opt} in
 	h|:) # if -h is specified as a command line option echo usage for the command running if run from parse cmds.
 		do_echo_use "${command}";;
-	a|x) # Option for smart -x
+	a) # Option for smart -x or add to bootserver cache for putkey/rmkey
+		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(smart|putkey|rmkey)$ ]] && do_echo_use "${command}"
+		if [[ "${command,,}" == "smart" ]]; then
+			smartall=1
+		else
+			[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
+			[[ ${_add} == "1" ]] && _add=0
+			[[ ${_cache} == "1" ]] && _cache=0
+			[[ -n "${add}" ]] && do_echo_use "${command}"
+			add=-1 _add=1
+		fi
+		return 1;;
+	k) # Option to put/del key from/to local keyserver..
+		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(putkey|rmkey)$ ]] && do_echo_use "${command}"
+		[[ -n "${ks}" || -z "${OPTARG}" ]] && do_echo_use "${command}"
+		[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
+		[[ ${_add} == "1" ]] && _add=0
+		[[ ${_cache} == "1" ]] && _cache=0
+		ks="${OPTARG}"
+		return $((OPTIND-1));;
+	l) # option for using local timeout values instead of keyserver values when adding keys to keyserver cache.
+		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(putkey|rmkey)$ || ${loc} -ne 0 ]] && do_echo_use "${command}"
+		[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
+		[[ ${_add} == "1" ]] && _add=0
+		[[ ${_cache} == "1" ]] && _cache=0
+		loc=1
+		return 1;;
+	x) # Option for smart -x
 		[[ ${cmd} -eq 0 || ! "${command,,}" == "smart" ]] && do_echo_use "${command}"
 		smartall=1
 		return 1;;
-	c) # Option to ask for confirmation for non critical actions.
+	i) # Option to ask for confirmation for non critical actions.
 		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(add|del|putkey|rmkey)$ ]] && do_echo_use "${command}"
 		[[  ${confirm} -eq 1 ]] && do_echo_use "${command}"
 		[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
+		[[ ${_add} == "1" ]] && _add=0
+		[[ ${_cache} == "1" ]] && _cache=0
 		confirm=1
 		return 1;;
-	k) # Option to remove key from firmware.
+	c) # Option to add/remove key from cache.
 		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(putkey|rmkey)$ || ${key} -eq 1 ]] && do_echo_use "${command}"
 		[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
-		key=1
+		[[ ${_add} == "1" ]] && _add=0
+		[[ ${_cache} == "1" ]] && _cache=0
+		cache=-1 _cache=1
 		return 1;;
 	p) # Option to specify a passphrase name for the new crypt to be added to the crypttab.
 		[[ ${cmd} -eq 0 || ! "${command,,}" == "add" ]] && do_echo_use "${command}"
-		[[  ${crypttab} -eq 1 ]] && do_echo_use "${command}"
+		[[ ${crypttab} -eq 1 || -z "${OPTARG}" ]] && do_echo_use "${command}"
 		crypttab=1
 		pp="${OPTARG}"
 		return $((OPTIND-1));;
@@ -2352,13 +2459,18 @@ do_parse_opt()
 	   # 1 for first time option is encountered, 2 for consecutive. May only contain server names when it occurs more than once.
 		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(putkey|rmkey)$ ]] && do_echo_use "${command}"
 		[[ ${srv} == "1" || ${_srv} -eq 1 ]] && do_echo_use "${command}"
+		[[ ${_add} == "1" ]] && _add=0
+		[[ ${_cache} == "1" ]] && _cache=0
 		[[ -z "${srv}" ]] && _srv=1 srv=1 || _srv=2
 		return 1;;
 	t) # Option trim enable foor add, remove crypt from crypttap for del command. Or Run smart self test.
 		[[ ${cmd} -eq 0 || ! "${command,,}" =~ ^(add|del|smart|bootsan)$ ]] && do_echo_use "${command}"
+		[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
+		[[ ${_add} == "1" ]] && _add=0
+		[[ ${_cache} == "1" ]] && _cache=0
 		if [[ "${command}" == "bootsan" ]]; then
-			[[ ${to} -ne -1 || _to -eq 1 ]] && do_echo_use "${command}"
-			_to=1
+			[[ -n "${timeout}" ]] && do_echo_use "${command}"
+			timeout=-1
 		elif [[ "${command}" == "add" ]]; then
 			[[ ${add_trim} -eq 1 ]] && do_echo_use "${command}"
 			add_trim=1
@@ -2383,6 +2495,8 @@ do_parse_opt()
 		[[ ( ${cmd} -eq 1 && ! "${command,,}" =~ ^(putkey|rmkey)$ ) || ${FOREGROUND} -eq 1 ]] && do_echo_use "${command}"
 		if [[ "${command}" =~ ^(putkey|rmkey)$ ]]; then
 			[[ ${srv} == "1" && ${_srv} -eq 1 ]] && _srv=0
+			[[ ${_add} == "1" ]] && _add=0
+			[[ ${_cache} == "1" ]] && _cache=0
 			[[ ${fw} -eq 1 ]] && do_echo_use "${command}"
 			fw=1
 			return 1
@@ -2401,15 +2515,19 @@ do_parse_opt()
 					# We may get here if put/rmkey command contains -s server options. Check here if it was specified without server before.
 					# If this is the last word in the command return 0 because we are done and it is the keynamen, not a server.
 					[[ ${_srv} -eq 2 && ${srv} == 1 ]] && do_echo_use "${command}"
-					if [[ ${_to} -eq 1 ]]; then
+					if [[ ${timeout} == "-1" ]]; then
 						[[ ! ${!OPTIND} =~ ^[0-9]+$ ]] && do_echo_use "${command}"
-						_to=0 to=$((${!OPTIND}*60))
+						timeout=$((${!OPTIND}*60))
 						return 1
 					fi
-					[[ -z "$2" ]] || ! do_parse_cmd check $2 && return 0
+					[[ ${_add} -ne 1 && ${_cache} -ne 1 ]] && ( [[ -z "$2" ]] || ! do_parse_cmd check $2 ) && return 0
 					if [[ ${_srv} -ge 1 ]]; then
 						[[ ${srv} == "1" ]] && srv=""
 						srv+="${!OPTIND}," _srv=0
+						return 1
+					elif [[ ${cache} == "-1" || ${add} == "-1" ]]; then
+						[[ ! ${!OPTIND} =~ ^[0-9]+$ ]] && do_echo_use "${command}"
+						[[ "${add}" == "-1" ]] && add=$((${!OPTIND}*60)) _add=0 || cache=$((${!OPTIND}*60)) _cache=0
 						return 1
 					fi
 				fi
@@ -2421,11 +2539,11 @@ do_parse_opt()
 	esac
 
 	# Check rmkey server option for validity. If -s server was specified before and now only -s this is an error and we catch it here.
-	[[ ${opt} != s && ${_srv} -eq 2 ]] && do_echo_use "${command}"
-	[[ ${opt} != s && ${_srv} -eq 1 ]] && _srv=0
+	[[ ${_srv} -eq 2 ]] && do_echo_use "${command}"
+	[[ ${_srv} -eq 1 ]] && _srv=0
 
 	# All options are evaluated or confdir specified, initialize the configuration.
-	if [[ ( ${cmd} -eq 0 && ( ${_conf} -eq 1 || -z "$1" ) ) || ( ${cmd} -eq 1 && ${_conf} -eq 0 ) ]]; then
+	if [[ ${cmd} -eq 0 && ( ${_conf} -eq 1 || -z "$1" ) ]]; then
 		if ! do_init_conf; then
 			echo "Error loading configuration from ${CONFDIR}"; exit 1
 		else
@@ -2455,7 +2573,7 @@ do_parse_cmd()
 {
 	# Parse the commands specified on the command line, one by one. If called with check, then return 1 on match.
 	# This is to let the parse opt function know a match for a new command has been found.
-	local command="${1,,}" check msg="$1 " s to=-1 _to=0
+	local command="${1,,}" check msg="$1 " s timeout=""
 	if [[ "${command}" == "check" ]]; then 
 		shift
 		command="${1,,}" check=1;
@@ -2464,16 +2582,19 @@ do_parse_cmd()
 	udev)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
+		do_init_conf || return 1
 		do_cryptdisksd_udev $@
 		return $#;;
 	stop)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
+		do_init_conf || return 1
 		/bin/kill -SIGTERM $(cat ${conf[PIDFILE]})
 		return $#;;
 	reload)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
+		do_init_conf || return 1
 		/bin/kill -SIGHUP $(cat ${conf[PIDFILE]})
 		return 1;;
 	status|shell|add|del|putkey|rmkey|smart|erase)
@@ -2484,7 +2605,9 @@ do_parse_cmd()
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
 		s=$?
-		[[ ${_to} -ne 0 || $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
+		do_init_conf || return ${s}
+		[[ $(wc -w <<<"${msg}") -ne 2 || "${timeout}" == "-1" ]] && do_echo_use "${command}"
+		[[ -z "${timeout}" ]] && timeout=-1
 		do_bootsan ${msg}
 		return ${s};;
 	*)
@@ -2537,20 +2660,51 @@ do_cryptdisksd_cmd()
 {
 	trap 'trap_term_cryptdisksd_cmd' SIGINT SIGTERM
 
-	local crypttab=0 confirm=0 smartall=0 smarttest=0 key=0 fw=0 srv="" pp="" add_trim=0 msg="$1 " stty_opt="" s sock pid_socat stdin
+	local crypttab=0 confirm=0 smartall=0 smarttest=0 cache="" _cache=0 fw=0 srv="" add="" _add=0 loc=0 pp="" ks="" add_trim=0 msg="$1 " stty_opt="" s c sock pid_socat stdin passphrase _passphrase
+	# Parse the options to the command and store the nr. of paramters to shift in s.
+	do_cmd_parseopt $@
+	s=$?
+
+	if [[ -n "${ks}" ]]; then 
+		# First put or del key to local keyserver
+		HOME=$(getent passwd ${ks} |cut -d':' -f6 2>/dev/null) pp="$(do_eval_pp ${msg#* })"
+		[[ "${command,,}" == "rmkey" ]] && c=del || c=put
+		if [[ -z "${HOME}" ]] || ! do_init_conf keyserver || ! mkfifo ${CONFDIR}/${c}.$$.res; then
+			echo "Unable to Initialize$([[ -z "${HOME}" ]] && echo ", ${ks} is not a Valid Host")."
+			exit 1
+		elif [[ "${command,,}" == "putkey" ]]; then
+			exec {__fd_user[0]}<&0 {__fd_user[1]}>&1
+			do_ask_passphrase "Enter ${pp} Passphrase: " || return ${s}
+			_passphrase="${passphrase}"
+			do_ask_passphrase "Confirm ${pp} Passphrase: " || return ${s}
+			until [[ "${passphrase}" == "${_passphrase}" ]]; do
+				passphrase="" _pasphrase=""
+		        do_ask_passphrase "Passhrases do not Match. Enter ${pp} Passphrase: " || return ${s}
+				_passphrase="${passphrase}"
+				do_ask_passphrase "Confirm ${pp} Passphrase: " || return ${s}
+			done
+		fi
+		exec {fd}<>${CONFDIR}/${c}.$$.res
+		echo "$$" "${c}" "${pp}" "${passphrase}" >${conf[FIFO]}
+		read -t${conf[QUEUE_TIMEOUT]} -ru${fd} res || exit
+		[[ $? -ne 0 || "${res,,}" == "nok" ]] && echo "Failed to Put ${pp} Pasphrase."
+		[[ "${res,,}" == "same" ]] && echo "${pp} Pasphrase Equal to Stored Passphrase."
+		[[ -z "${srv}" && ${fw} -eq 0 && -z "${cache}" ]] && return ${s}
+	fi
+
+	# Reload config, necessary when executing put to local keyserver.
+	unset conf
+	do_init_conf || exit 1
+	sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
 	if [[ ! "$(NOTIFY_SOCKET= systemctl is-active ${MYNAME:0:-1}.service 2>&1)" =~ activating|active ]]; then
 		echo "${MYNAME} not Running"
 		exit 1
 	fi
-
-	# Parse the options to the command and store the nr. of paramters to shift in s.
-	do_cmd_parseopt $@
-	s=$? sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
 	
 	# Start socat in background and attach stdin, listen on a socket in RUNDIR. 
 	# The daemon will spawn a worker which will connect and start interactive session.
 	exec {stdin}<&0
-	socat -t2 - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- &
+	socat -t${conf[QUEUE_TIMEOUT]} - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- &
 	pid_socat=$!
 
 	case ${command} in
@@ -2574,14 +2728,17 @@ do_cryptdisksd_cmd()
 		msg+="${smartall} ${smarttest}"
 		stty_opt="-echo isig";;
 	putkey)
-		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
-		[[ -z "${srv}" ]] && srv=0
-		msg+="${confirm} ${key} ${fw} ${srv}"
+		[[ -z "${srv}" ]] && srv=0; [[ -z "${cache}" ]] && cache=-2; [[ -z "${add}" ]] && add=-3; [[ ${add} -eq -1 && ${loc} -eq 1 ]] && add=-2; pp=${msg#* }
+		echo "M: ${msg} P: ${pp} C: ${cache} F: ${fw} A: ${add} L: ${loc} S: ${srv} K: ${ks} I: ${confirm}"
+		[[ $(wc -w <<<"${msg}") -ne 2 || ( ${loc} -eq 1 && ( ${add} -eq -3 || ${add} -ge 0 ) ) || ( ${add} -ne -3 && "${srv}" == "0" ) ]] && do_echo_use "${command}"
+		msg+="${confirm} ${add} ${cache} ${fw} ${srv}"
 		stty_opt="raw -echo isig";;
 	rmkey)
-		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
-		[[ -z "${srv}" ]] && srv=0
-		msg+="${confirm} ${key} ${fw} ${srv}"
+		echo "M: ${msg} P: ${pp} C: ${cache} F: ${fw} A: ${add} L: ${loc} S: ${srv} K: ${ks} I: ${confirm}"
+		[[ $(wc -w <<<"${msg}") -ne 2 || ${loc} -eq 1 || ( -n "${add}" && ( ${add} -ne -1 || -z "${srv}" ) ) || ( -n "${cache}" && ${cache} -ne -1 ) ]] && do_echo_use "${command}"
+		[[ -z "${srv}" ]] && srv=0; [[ -z "${cache}" ]] && cache=-2; [[ -z "${add}" ]] && add=-3; [[ ${add} -eq -1 && ${loc} -eq 1 ]] && add=-2; pp=${msg#* }
+		echo "M: ${msg} P: ${pp} C: ${cache} F: ${fw} A: ${add} L: ${loc} S: ${srv} K: ${ks} I: ${confirm}"
+		msg+="${confirm} ${add} ${cache} ${fw} ${srv}"
 		stty_opt="raw -echo isig";;
 	shell)
 		[[ $(wc -w <<<"${msg}") -ne 1 ]] && do_echo_use "${command}"
@@ -2593,9 +2750,8 @@ do_cryptdisksd_cmd()
 	esac
 
 	# Notify the daemon to connect to the socket and wait until it's finished. Then restore stdin and exit.
-	#sleep .05
 	stty ${stty_opt}
-	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "Requesting \"$@\" \"${msg}\" from ${MYNAME}\r"
+	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "Requesting \"$@\" \"${msg}\" from ${MYNAME} - ${conf[FIFO]}\r"
 	echo "control ${BASHPID},${pid_socat} ${msg}" >${conf[FIFO]}
 	wait ${pid_socat}
 
@@ -2739,24 +2895,29 @@ if [[ $# -eq 0 ]]; then
 	do_systemd_daemon_start
 	exit 1
 elif [[ "$1" == "keyserver" && $(($#-2)) -le 1 ]]; then
-	[[ $# -ge 2 && ! "$2" =~ ^(-f|-h|status)$ || $# -gt 3 ]] && do_echo_use keyserver
-	[[ "$2" == "-h" ]] && do_echo_use keyserver
-	[[ "$2" == "-f" ]] && FOREGROUND=1
+	[[ ( $# -ge 2 && ! "$2" =~ ^(-f|-h|status)$ ) || $# -gt 3 || "$2" == "-h" || ( "$2" == "status" && -z "$3" ) ]] && do_echo_use keyserver
 	if [[ "$2" == "status" ]]; then
 		HOME=$(getent passwd $3 |cut -d':' -f6 2>/dev/null)
-		if [[ -z "${HOME}" ]] || ! do_init_conf keyserver || ! mkfifo ${CONFDIR}/status.$$.res; then
-			echo "Unable to Initialize$([[ -z "${HOME}" ]] && echo ", $3 is not a Valid Host")."
+		if [[ -z "${HOME}" ]] || ! do_init_conf keyserver || ! mkfifo ${CONFDIR}/status.$$.res >/dev/null 2>&1; then
+			echo "Unable to Initialize$([[ -z "${HOME}" ]] && echo ", $3 is not a Valid Host" || echo " Config")."
 			exit 1
 		else
 			exec {fd}<>${CONFDIR}/status.$$.res
 			echo "$$ status" >${conf[FIFO]}
-			until ! read -t 1 -ru${fd} res || [[ ${res} == . ]]; do echo -e "$res"; done
+			until ! read -t${conf[QUEUE_TIMEOUT]} -ru${fd} res || [[ ${res} == . ]]; do echo -e "${res}"; done
 		fi
 		rm -f ${CONFDIR}/status.$$.res
 		exit 0
 	else
+		[[ "$2" == "-f" ]] && FOREGROUND=1
 		do_systemd_keysrv_start
 	fi
+elif [[ "$(basename ${SHELL})" == "${MYNAME}" ]]; then
+	[[ "$(cat /proc/${PPID}/comm)" != "sshd" ]] && exit 1
+	exec 0>&- {out}>&1- 2>/dev/null
+	shift
+	do_sanboot $@
+	exit $?
 else
 	# Command line options present, run in interactive mode.
 	do_cryptdisksd_cli $@
