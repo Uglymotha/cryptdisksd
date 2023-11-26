@@ -168,13 +168,11 @@ trap_term_daemon()
 	# Main process received SIGTERM or SIGINT, shutdown reader and logwriter processes.
 	do_log warning "${myname} terminating after $(do_timer ${time_start})s"
 	do_daemon_check_conf
-	for _pid in ${pid_ctrl[@]}; do
-		if [[ "$(cat /proc/${pid_ctrl[${_pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-			kill -SIGTERM ${pid_ctrl[${_pid}]}
-			wait ${pid_ctrl[${_pid}]}
-			do_log debu2 "${myname} killed control process (PID: ${pid_ctrl[${_pid}]})"
-		fi
-	done
+	for _pid in ${pid_ctrl[@]}; do if [[ "$(cat /proc/${pid_ctrl[${_pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${pid_ctrl[${_pid}]}
+		wait ${pid_ctrl[${_pid}]}
+		do_log debu2 "${myname} killed control process (PID: ${pid_ctrl[${_pid}]})"
+	fi done
 	if [[ ! -z "${pid_reader}" && "$(cat /proc/${pid_reader}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${pid_reader}
 		wait ${pid_reader}
@@ -1228,6 +1226,7 @@ do_control_get_passphrase()
 	else
 		do_log "${_myname} ${_pp} passphrase not cached"
 		echo -e "\r${BOLD}${RED}Passphrase ${_pp} not Cached.${NOR}\r" >&${_socat[1]}
+		[[ -n "${cached_pp[${_pp}]}" ]] && echo "passphrase ${_pp} daemon 0" >${conf[FIFO]}
 	fi
 
 	# If confirm option is specified ask to retreive passphrase from boot servers.
@@ -1490,26 +1489,20 @@ trap_term_reader()
 
 	# Kill all active passphrase workers.
 	local _pp
-	for _pp in ${!_pid_ppwrk[@]}; do
-		if [[ ! -z "${_pid_ppwrk[${_pp}]}" && "$(cat /proc/${_pid_ppwrk[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-			kill -SIGTERM ${_pid_ppwrk[${_pp}]}
-			wait ${_pid_ppwrk[${_pp}]}
-			do_log debug2 "${_myname} killed passphrase worker for ${_pp} (PID: ${_pid_ppwrk[${_pp}]})"
-		fi
-	done
-	for _pp in ${!_pid_putkey[@]}; do
-		if [[ ! -z "${_pid_putkey[${_pp}]}" && "$(cat /proc/${_pid_putkey[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-			kill -SIGTERM ${_pid_putkey[${_pp}]}
-			wait ${_pid_putkey[${_pp}]}
-			do_log debug2 "${_myname} killed putkey worker for ${_pp} (PID: ${_pid_putkey[${_pp}]})"
-		fi
-	done
-	for _pp in ${!_pid_shell[@]}; do
-		if [[ "$(cat /proc/${_pid_shell[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-			kill -SIGTERM ${_pid_shell[${_pp}]}
-			wait ${_pid_shell[${_pp}]}
-		fi
-	done
+	for _pp in ${!_pid_ppwrk[@]}; do if [[ ! -z "${_pid_ppwrk[${_pp}]}" && "$(cat /proc/${_pid_ppwrk[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${_pid_ppwrk[${_pp}]}
+		wait ${_pid_ppwrk[${_pp}]}
+		do_log debug2 "${_myname} killed passphrase worker for ${_pp} (PID: ${_pid_ppwrk[${_pp}]})"
+	fi done
+	for _pp in ${!_pid_putkey[@]}; do if [[ ! -z "${_pid_putkey[${_pp}]}" && "$(cat /proc/${_pid_putkey[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${_pid_putkey[${_pp}]}
+		wait ${_pid_putkey[${_pp}]}
+		do_log debug2 "${_myname} killed putkey worker for ${_pp} (PID: ${_pid_putkey[${_pp}]})"
+	fi done
+	for _pp in ${!_pid_shell[@]}; do if [[ "$(cat /proc/${_pid_shell[${_pp}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		kill -SIGTERM ${_pid_shell[${_pp}]}
+		wait ${_pid_shell[${_pp}]}
+	fi done
 	# If we are in startup we should not be terminated, exit with error. Otherwise exit with current status.
 	if [[ "${_starting}" -ne 0 ]]; then
 		do_log error "${_myname} terminated while in startup"
@@ -2146,7 +2139,7 @@ key_clnt()
 		for ts in ${srv}; do
 			[[ "${cmd}" == "add" ]] && key_clnt "${cmd}" "${pp}" "${kto}" "${passphrase}" "${ts}" & pid_cmd+="$! "
 			[[ "${cmd}" == "put" ]] && key_clnt "${cmd}" "${pp}" "${passphrase}" "${ts}" & pid_cmd+="$! "
-			[[ ! ${cmd} =~ ^(put|add)$ ]] &&  key_clnt "${cmd}" "${pp}" "${ts}" & pid_cmd+="$! "
+			[[ ! ${cmd} =~ ^(put|add)$ ]] && key_clnt "${cmd}" "${pp}" "${ts}" & pid_cmd+="$! "
 		done
 		wait ${pid_cmd}
 		[[ "${cmd}" != "get" || -n "${__fd_user}" ]] && unset srv || ret=$((ret+1))
