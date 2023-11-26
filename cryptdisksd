@@ -16,7 +16,7 @@ do_init_conf()
 	if [[ -s ${CONF} ]]; then for var in $(cat ${CONF} |grep -ve "^\s*#"); do
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
-   	done fi
+	done fi
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
 	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
 	[[ -z "${conf[RUNDIR]}" ]] && conf[RUNDIR]="/run"
@@ -530,7 +530,7 @@ do_daemon_reload_conf()
 	if [[ -s ${conf[BOOTCONF]} ]]; then for var in $(cat ${conf[BOOTCONF]} |grep -ve "^\s*#"); do
 		val=${var#*=} var=${var%%=*}
 		bootconf[${var^^}]="${val}"
-   	done fi
+	done fi
 }
 
 do_daemon_cleanup()
@@ -1300,8 +1300,8 @@ do_xcrypt_fromtab()
 do_eval_pp()
 {
 	# Evaluate the passphrase and prepend cryptdisks: or make system:master. 
-  	if [[ ${1,,} =~ ^(1|master|system|system:master)$ ]]; then
-   		echo "system:master"
+	if [[ ${1,,} =~ ^(1|master|system|system:master)$ ]]; then
+		echo "system:master"
 	elif [[ ! ${1,,} =~ ^cryptdisks: ]]; then
 		echo "cryptdisks:${1,,}"
 	else 
@@ -1442,8 +1442,8 @@ query_passphrase()
 		# Passphrase received is ok.
 		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
 	esac
- 
- 	# Notify the reader, so it knows passphrase worker has finished.
+
+	# Notify the reader, so it knows passphrase worker has finished.
 	echo "${passphrase}" >&${__fd_up}
 	
 	do_log debug2 "${myname} took $(do_timer ${_time_start})s total"
@@ -1546,7 +1546,7 @@ udev_reader()
 	# At the very least we should check for any running password workers, start worker process and keep track of them all.
 	# Just like the daemon process the reader will run a cleanup timer and do cleanup every conf[CLEANUP_TIMER].
 	local _pid_reader=${BASHPID} _myname="reader (${BASHPID}):" _time_start=$(do_timer) _time_active=0.000 _read_to __myname _cmd=() __waiting_mnt IFS
- 	local _nr_cmds=0 _start_status=0 _cleanup=0.000 _pid_logwriter _key= _fd_fifo _pp _confok=0 _starting=${starting} _crypt_arr _crypt _dev _trim _time _res
+	local _nr_cmds=0 _start_status=0 _cleanup=0.000 _pid_logwriter _key= _fd_fifo _pp _confok=0 _starting=${starting} _crypt_arr _crypt _dev _trim _time _res
 	declare -A _pid_ppwrk _pid_putkey _pid_shell _waiting_mnt
 	
 	# Start logwriter with dedicated logfile when LOGLEVEL=2 or = 4. When level = 4 redirect out stdout and stderr to the logwriter.
@@ -1575,7 +1575,7 @@ udev_reader()
 		[[ ${_confok} -eq 1 || ${time_active:0:-4} -gt $((${_cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] && do_reader_cleanup
 		[[ ${_confok} -eq 1 || ${_starting} -eq 1 ]] && _read_to=${conf[QUEUE_TIMEOUT]} \
 													 || _read_to=$(((conf[CLEANUP_TIMER]+conf[QUEUE_TIMEOUT])-((${time_active:0:-4}+conf[CLEANUP_TIMER]/2)%conf[CLEANUP_TIMER])))
-        
+
 		# Start reading from the queue.
 		unset IFS
 		read -t${_read_to} -ru${_fd_fifo} -a _cmd
