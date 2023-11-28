@@ -236,26 +236,29 @@ systemd_daemon()
 	
 		# Set the new queue read timeout, we will run a cleanup every conf[CLEANUP_TIMER]. Cleanup will not run before we are started.
 		# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
-		[[ ${starting} -eq 0 && ${time_active:0:-4} -gt $((${cleanup:0:-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] && do_daemon_cleanup
-		read_to="$([[ ${starting} -ne 0 ]] && echo ${conf[QUEUE_TIMEOUT]} || echo $(((conf[CLEANUP_TIMER]+conf[QUEUE_TIMEOUT])-(${time_active:0:-4}%read_to))))"
+		[[ ${starting} -eq 0 && ${time_active::-4} -gt $((${cleanup::-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] && do_daemon_cleanup
+		[[ ${starting} -eq 0 && ${confok} -eq 1 ]] && do_daemon_reload_conf && confok=0
+		[[ ${starting} -eq 2 && -z "${!waiting_mnt[@]}" ]] && starting=0 && do_daemon_notify_systemd
+		[[ ${starting} -eq 0 ]] && read_to=$(((conf[CLEANUP_TIMER]+conf[QUEUE_TIMEOUT])-(${time_active::-4}%read_to)))
+		[[ ${starting} -eq 1 ]] && read_to=${conf[QUEUE_TIMEOUT]}
+		[[ ${starting} -eq 2 ]] && read_to=$((conf[START_TIMEOUT]-${time_active::-4}+conf[QUEUE_TIMEOUT]))
 		read -t${read_to} -ru${fd_fifo} -a msg
 		res=$?
-		[[ ${starting} -ne 0 && -z "${!wating_mnt[@]}" ]] && starting=0 && do_daemon_notify_systemd
-		[[ ${starting} -eq 0 && ${confok} -eq 1 ]] && do_daemon_reload_conf && confok=0
 		
 		# Evaluate the exit status of the message queue read and act accordingly.
 		time_active=$(do_timer ${time_start})
-		if [[ ${res} -eq 142 || ( ${starting} -ne 0 && ${time_active:0:-4} -ge ${conf[START_TIMEOUT]} ) ]]; then 
-			do_log debug2 "${myname} waking up from slumber"
-			if [[ ${res} -eq 142 ]]; then
-				[[ ${read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]] && do_daemon_cleanup
-				continue
-			else
+		if [[ ${res} -eq 142 || ( ${starting} -ne 0 && ${time_active::-4} -ge ${conf[START_TIMEOUT]} ) ]]; then 
+			[[ ${res} -eq 142 ]] && do_log debug2 "${myname} waking up from slumber"
+			[[ ${res} -eq 142 && ${starting} -ne 0 && -z "${!waiting_mnt[@]}" ]] && starting=0 && do_daemon_notify_systemd
+			[[ ${res} -eq 142 && ${read_to##* } -gt $((conf[CLEANUP_TIMER]/2)) ]] && do_daemon_cleanup
+			if [[ ${starting} -eq 2 && ( ${res} -eq 142 || ${time_active::-4} -ge ${conf[START_TIMEOUT]} ) ]]; then
 				# Start timeout reached, notify systemd.
 				do_log warning "${myname} start timeout reached, notifying systemd"
 				starting=0 start_status=3
 				do_daemon_notify_systemd
 			fi
+			[[ ${res} -eq 142 && ${starting} -eq 1 && -n "${!waiting_mnt[@]}" ]] && starting=2
+			[[ ${res} -eq 142 ]] && continue
 		elif [[ ${res} -gt 128 ]]; then
 			# Should not happen, daemon process received unhandled signal from somewhere.
 			do_log debug "${myname} read result ${res}, may have been trapped"
@@ -289,7 +292,7 @@ systemd_daemon()
 		control)
 			pid_ctrl=${msg[1]%%,*} pid_socat=${msg[1]##*,} cmd="${msg[2],,}" sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock" fd_ctrl=${ctrl[${msg[1]%%,*}]%% *}
 			[[ "${msg[2],,}" =~ ^(smart|erase)$ ]] && cmd=smarterase; [[ "${msg[2],,}" =~ ^(putkey|rmkey)$ ]] && cmd=putrmkey 
-			if [[ ${cmd} =~ ^(add|del|putkey|rmkey|status|smart|erase|shell)$ ]]; then
+			if [[ ${cmd} =~ ^(add|del|putrmkey|status|smarterase|shell)$ ]]; then
 				exec {fd_ctrl}> >(daemon_control_${cmd})
 				ctrl[${pid_ctrl}]="${fd_ctrl} $! $(do_timer)"
 				do_log debug "${myname} started control connection (PID: $(echo ${ctrl[${pid_ctrl}]} |cut -d ' ' -f 2))"
@@ -337,17 +340,17 @@ systemd_daemon()
 		passphrase)
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "${myname} passphrase ${msg[1]} failed" || do_log info "${myname} passphrase ${msg[1]} success"
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${msg[1]}" ]]; then
-				crypt_arr=($(do_xcrypt_fromtab "${myname}" "${crypt}"))
-				if [[ ${msg[2]} == 0 ]]; then
-					do_log info "${myname} removed ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${crypt_arr[2]} passphrase, waited for $(do_timer ${waiting_mnt[${crypt}]##* })s"
-				else
-					do_log debug2 "${myname} can mount ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${crypt_arr[2]} passphrase, waited for $(do_timer ${waiting_mnt[${crypt}]##* })s"
-					[[ ! -z ${mount[${crypt_arr[0]}]} ]] && do_log debug "${myname} ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${mount[${crypt_arr[0]}]%% *})" && continue
-					daemon_mount_crypt "${crypt_arr[0]}" "0" "${crypt_arr[1]}" "${crypt_arr[2]}" "${crypt_arr[3]}" & mount[${crypt_arr[0]}]="$! $(do_timer)"
-				fi
+				crypt_arr=($(do_xcrypt_fromtab "${myname}" "${crypt}")); crypt_arr[4]="$(do_timer ${waiting_mnt[${crypt}]##* })s"
 				unset waiting_mnt[${crypt}]
+				if [[ ${msg[2]} == 0 ]]; then
+					do_log info "${myname} removed ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${crypt_arr[2]} passphrase, waited for ${crypt_arr[4]}s"
+				else
+					do_log debug2 "${myname} can mount ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${crypt_arr[2]} passphrase, waited for ${crypt_arr[4]}s"
+					[[ ! -z ${mount[${crypt_arr[0]}]} ]] && do_log debug "${myname} ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${mount[${crypt_arr[0]}]%% *})" && continue
+					daemon_mount_crypt "${crypt_arr[0]}" "0" "$(do_find_dev "${myname}" "${crypt_arr[1]}")" "${crypt_arr[2]}" "${crypt_arr[3]}" & mount[${crypt_arr[0]}]="$! $(do_timer)"
+				fi
 			fi done
-			[[ ${msg[2]} -ne 2 && -n "${pid_getpp[${msg[1]}]}" && "$(cat /proc/${pid_getpp[${msg[1]}]}/comm)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_getpp[${msg[1]}]}
+			[[ ${msg[2]} -ne 2 && -n "${pid_getpp[${msg[1]}]}" && "$(cat /proc/${pid_getpp[${msg[1]}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_getpp[${msg[1]}]}
 			[[ ${msg[2]} -ne 2 ]] && unset pid_getpp[${msg[1]}]
 			[[ ${msg[2]} -eq 1 ]] && cached_pp[${msg[1]}]=1 || unset cached_pp[${msg[1]}];;
 		*)	
@@ -613,12 +616,12 @@ do_daemon_cleanup()
 	# Remove too long outstanding mounts and passphrase workers.
 	for crypt in ${!waiting_mnt[@]}; do if [[ $(do_timer ${waiting_mnt[${crypt}]##* } |cut -d'.' -f1) -ge $([[ ${starting} -eq 0 ]] && echo ${conf[PP_TIMEOUT]} || echo ${conf[START_TIMEOUT]}) ]]; then
 		do_log debug "${myname} cleanup removed waiting mount for ${crypt}: ${waiting_mnt[${crypt}]}"
-		unset waiting_mnt[${crypt}]
-		if [[ -n "${pid_getpp[${waiting_mnt[${crypt}]%% *}]}" && "$(cat /proc/${pid_getpp[${waiting_mnt[${crypt}]%% *}]}/comm)" == "$MYNAME}" ]]; then
+		if [[ -n "${pid_getpp[${waiting_mnt[${crypt}]%% *}]}" && "$(cat /proc/${pid_getpp[${waiting_mnt[${crypt}]%% *}]}/comm) 2>/dev/null" == "$MYNAME}" ]]; then
 			kill -SIGTERM ${pid_getpp[${waiting_mnt[${crypt}]%% *}]}
 			unset pid_getpp[${waiting_mnt[${crypt}]%% *}]
 			do_log debug "${myname} killed passhprase worker (PID: ${crypt}: ${waiting_mnt[${crypt}]})"
 		fi
+		unset waiting_mnt[${crypt}]
 	else
 		do_log debug2 "${myname} cleanup readded waiting mount for ${crypt}: ${waiting_mnt[${crypt}]}"
 	fi done
@@ -670,7 +673,7 @@ do_daemon_cleanup()
 		unset cached_pp[${_pp}]
 	fi done
 
-	do_log debug2 "${myname} cleanup took $(do_timer ${_time_start})s, cached passphrases: ${!cached_pp[@]} - active mounts: ${!active_mnt[@]}"
+	do_log debug2 "${myname} cleanup took $(do_timer ${_time_start})s, cached passphrases: ${!cached_pp[@]} - active mounts: ${!active_mnt[@]} - waiting mounts: ${!waiting_mnt[@]}"
 }
 
 trap_term_mount()
@@ -1172,7 +1175,7 @@ daemon_control_add()
 		# if we do not get a passphrase we cannot mount, continue to add on tab after confirmation.
 		echo -e "\r${BOLD}${RED}No Passphrase Received, Cannot Mount ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase.${NOR}\r" >&${_socat[1]}
 		_confirm=1
-	elif ! do_cache_pp "${_myname}" "${_add_pp}" "-1" "${_passphrase}"; then
+	elif [[ $(do_cache_pp "${_myname}" "${_add_pp}" "-1" "${_passphrase}")$? -eq 1 ]]; then
 		echo -e "\r${BOLD}${RED}Failed to Cache ${_add_pp} Passphrase.${NOR}\r" >&${_socat[1]}
 		trap_term_control 1
 	else
@@ -1390,13 +1393,11 @@ do_eval_pp()
 do_find_dev()
 {
 	local myname=$1 blockdevdir dev=$2
-	do_log debug "${myname} YOYOYOY 1"
-	for blockdevdir in ${conf[BLOCKDEVSDIRS]}; do do_log debug "$myname YOYOYOY \"${dev}\""; if [[ -b ${blockdevdir}/${dev} ]]; then
+	for blockdevdir in ${conf[BLOCKDEVSDIRS]}; do if [[ -b ${blockdevdir}/${dev} ]]; then
 		do_log debug "${myname} found ${blockdevdir}/${dev} for ${dev}"
 		echo "${blockdevdir}/${dev}"
 		return
 	fi done
-	do_log debug "${myname} YOYOYOY 2"
 	do_log debug "${myname} ${dev} not found in ${conf[BLOCKDEVSDIRS]}"
 }
 
@@ -1822,7 +1823,7 @@ do_sanboot()
 		logger -p user.info "${myname}: received ${pp} passphrase from keyserver"
 		echo "${passphrase}" >&${out}
 	elif [[ "${cmd}" == "put" || "${cmd}" == "del" ]]; then
-		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: ${pp} passphrase ${s1} on keyserver"
+		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: put ${pp} passphrase on keyserver equal to stored passhrase"
 		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to put ${pp} passphrase to keyserver"
 		[[ "${res,,}" == "ok" ]]   && r=0 && logger -p user.info "${myname}: put ${pp} passphrase to keyserver succeeded"
 	elif [[ "${cmd}" == "del" ]]; then
