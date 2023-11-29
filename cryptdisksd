@@ -2173,7 +2173,7 @@ do_read_passphrase()
 		passphrase="$(keyctl print "${key}" 2>/dev/null)"
 	else
 		if [[ "${network}" -eq 1 ]]; then
-			exec {fd_pp}< <(key_clnt "${myname}" "GET" "${pp}" {__fd_up}>&1- ${__fd_user}>/dev/console)
+			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- ${__fd_user}>/dev/console)
 			IFS= read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && key=1
 		fi
 		if [[ "${key}" != "1" ]]; then
