@@ -957,7 +957,7 @@ daemon_control_status()
 daemon_control_smarterase()
 {
 	# Secure Erase Device.
-	[[ "${cmd}" == "smart" ]] && do_control_init "smart" "S.M.A.R.T." || do_control_init "erase" "Secure Erase"
+	[[ "${msg[2],,}" == "smart" ]] && do_control_init "smart" "S.M.A.R.T." || do_control_init "erase" "Secure Erase"
 	local _crypt="${_crypt_arr[0]}" _dev="$(do_find_dev "${_myname}" "${_crypt_arr[1]}")" _res=""
 
 	if [[ -z "${_crypt_arr[@]}" ]]; then
@@ -971,17 +971,17 @@ daemon_control_smarterase()
 	fi
 
 	[[ ${_smartall} -eq 1 ]] && smartctl -x ${_dev} >&${_socat[1]} 2>&1 || smartctl -A ${_dev} >&${_socat[1]} 2>&1
-	if [[ ${_smarttest} -eq 1 || "${cmd}" == "erase" ]] && dmsetup info "${_crypt}" >/dev/null 2>&1; then
+	if [[ ${_smarttest} -eq 1 || "${msg[2],,}" == "erase" ]] && dmsetup info "${_crypt}" >/dev/null 2>&1; then
 		echo -e "\r${RED}${BOLD}${_crypt} Still Active.${NOR}\r" >&${_socat[1]}
 		do_log debug "${_myname} ${_crypt} still active"
 		trap_term_control 1
 	fi
 
-	if [[ "${cmd}" == "smart" && ${_smarttest} -eq 1 ]]; then
+	if [[ "${msg[2],,}" == "smart" && ${_smarttest} -eq 1 ]]; then
 		smartctl -t long ${_dev} >&${_socat[1]} 2>&1
 		do_log debug "${_myname} smart test started on ${_crypt}"
 		echo -e "\r${GRN}${BOLD}Started SMART test on ${_dev}.${NOR}\r" >&${_socat[1]}
-	elif [[ "${cmd}" == "erase" ]]; then
+	elif [[ "${msg[2],,}" == "erase" ]]; then
 		do_control_confirm "This Will Wipe all Data on ${_dev}, Are You Sure? (y/N)" "n"
 		if [[ "${_res}" == "y" ]]; then
 			echo -e "${RED}${BOLD}Secure Erasing ${_dev} ${YEL}password: $(hostname)${NOR}\r" >&${_socat[1]}
@@ -998,8 +998,8 @@ daemon_control_smarterase()
 daemon_control_putrmkey()
 {
 	# Remove the key file for the passphrase.
-	[[ "${cmd}" == "rmkey" ]] && do_control_init "rmkey" "Removing Key File" || do_control_init "putkey" "Putting Key File"
-	local _pp="$(do_eval_pp "${msg[5]}")" _res=0; local _keyfile="${conf[FWDIR]}/UglyLinux${_pp}.key-${conf[FWGUID]}" _key="$(keyctl request user "${_pp}" @s 2>/dev/null)" _passphrase _t _s
+	[[ "${msg[2],,}" == "rmkey" ]] && do_control_init "rmkey" "Removing Key File" || do_control_init "putkey" "Putting Key File"
+	local _pp="$(do_eval_pp "${msg[3]}")" _res=0; local _keyfile="${conf[FWDIR]}/UglyLinux${_pp}.key-${conf[FWGUID]}" _key="$(keyctl request user "${_pp}" @s 2>/dev/null)" _passphrase _t _s
 	if [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 0 ]]; then
 		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
 		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=1
@@ -1008,48 +1008,48 @@ daemon_control_putrmkey()
 		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=0
 	fi
 	[[ "${_srv}" == "1" ]] && _srv=${bootconf[BOOTSERVERS]}
-	[[ "${cmd}" == "rmkey" ]] && _s="Removing" _t="from" || _s="Putting" _t="to"
+	[[ "${msg[2],,}" == "rmkey" ]] && _s="Removing" _t="from" || _s="Putting" _t="to"
 	do_log debug "${_myname} ${_s,,} ${_pp} ${_t,,} $([[ ${_cache} -ne -2 ]] && echo "cache ")$([[ ${_fw} -eq 1 ]] && echo "firmware ")$([[ "${_srv}" != "0" ]] && echo "${_srv}")"
 	echo -e "\r${BOLD}${_s} ${_pp} ${_t}: $([[ ${_cache} -ne -2 ]] && echo "cache ")$([[ ${_fw} -eq 1 ]] && echo "firmware ")$([[ "${_srv}" != "0" ]] && echo "${_srv}")${NOR}\r" >&${_socat[1]}
 
 	# Add or remove key to/from firmware
-	[[ "${cmd}" == "putkey" ]] && ! do_control_get_passphrase "${_pp}" && trap_term_control 1
-	if [[ "${cmd}" == "rmkey" && ${_fw} -eq 1 && ! -e ${_keyfile} ]]; then
+	[[ "${msg[2],,}" == "putkey" ]] && ! do_control_get_passphrase "${_pp}" && trap_term_control 1
+	if [[ "${msg[2],,}" == "rmkey" && ${_fw} -eq 1 && ! -e ${_keyfile} ]]; then
 		echo -e "\r${BOLD}${RED}${_keyfile} Does not Exist.${NOR}\r" >&${_socat[1]}
 		do_log debug "${_myname} ${_keyfile} does not exist"
 	elif  [[ ${_fw} -eq 1 ]]; then
 		[[ ${_confirm} -eq 1 ]] && do_control_confirm "Continue ${_s} ${_pp} ${_t} Firmware? (Y/n)" "y" || _res="y"
 		if [[ ${_res} == "y" ]]; then
-			if [[ "${cmd}" == "rmkey" ]] && chattr -i ${_keyfile} && rm -f ${_keyfile}; then
+			if [[ "${msg[2],,}" == "rmkey" ]] && chattr -i ${_keyfile} && rm -f ${_keyfile}; then
 				echo -e "\r${BOLD}${GRN}Removed ${_keyfile} Succesfully.${NOR}\r" >&${_socat[1]}
 				do_log debug "${_myname} removed ${_keyfile}"
-			elif [[ "${cmd}" == "putkey" ]] && do_write_keyfile "${_myname}" "${_pp}" "${_passphrase}"; then
+			elif [[ "${msg[2],,}" == "putkey" ]] && do_write_keyfile "${_myname}" "${_pp}" "${_passphrase}"; then
 				echo -e "\r${BOLD}${GRN}Wrote ${_keyfile} Succesfully.${NOR}\r" >&${_socat[1]}
 				do_log debug "${_myname} wrote ${_keyfile}"
 			else
-				echo -e "\r${BOLD}${RED}Failed to $([[ "${cmd}" == "putkey" ]] && echo Write || echo Remove) ${_keyfile}.${NOR}\r" >&${_socat[1]}
-				[[ "${cmd}" == "rmkey" ]] && do_log debug "${_myname} failed to remove ${_keyfile}"
+				echo -e "\r${BOLD}${RED}Failed to $([[ "${msg[2],,}" == "putkey" ]] && echo Write || echo Remove) ${_keyfile}.${NOR}\r" >&${_socat[1]}
+				[[ "${msg[2],,}" == "rmkey" ]] && do_log debug "${_myname} failed to remove ${_keyfile}"
 			fi
 		fi
 	fi
 
 	# Add or remove key to/from keyring.
-	if [[ "${cmd}" == "rmkey" && ${_cache} -ne -2 && -z "${_key}" ]]; then
+	if [[ "${msg[2],,}" == "rmkey" && ${_cache} -ne -2 && -z "${_key}" ]]; then
 		do_log debug "${_myname} ${_pp} not cached"
 		echo -e "\r${BOLD}${RED}${_pp} not Cached.${NOR}\r" >&${_socat[1]}
 	elif [[ ${_cache} -ne -2 ]]; then
 		[[ ${_confirm} -eq 1 ]] && do_control_confirm "Continue ${_s} ${_pp} ${_t} Cache? (Y/n)" "y" || _res="y"
 		if [[ ${_res} == "y" ]]; then
-			if [[ "${cmd}" == "rmkey" ]] && keyctl revoke "${_key}" >dev/null 2>&1 && keyctl unlink "${_key}" @s >/dev/null 2>&1; then
+			if [[ "${msg[2],,}" == "rmkey" ]] && keyctl revoke "${_key}" >dev/null 2>&1 && keyctl unlink "${_key}" @s >/dev/null 2>&1; then
 				echo "passphrase ${_pp} 2" >${conf[FIFO]}
 				echo -e "\r${BOLD}${GRN}Removed ${_pp} from Cache.${NOR}\r" >&${_socat[1]}
 				do_log debug "${_myname} removed ${_pp} from cache"
-			elif [[ "${cmd}" == "putkey" ]] && do_cache_pp "${_myname}" "${_pp}" "${_cache}" "${_passphrase}"; then
+			elif [[ "${msg[2],,}" == "putkey" ]] && do_cache_pp "${_myname}" "${_pp}" "${_cache}" "${_passphrase}"; then
 				echo "passphrase ${_pp} 1" >${conf[FIFO]}
 				echo -e "\r${BOLD}${GRN}Cached ${_pp} Passphrase.${NOR}\r" >&${_socat[1]}
 			else
-				echo -e "\r${BOLD}${RED}Failed to $([[ "${cmd}" == "rmkey" ]] && echo Remove || echo Cache) ${_pp} Passphrase$([[ "${cmd}" == "rmkey" ]] && echo " from Cache").${NOR}\r" >&${_socat[1]}
-				[[ "${cmd}" == "rmkey" ]] && do_log debug "${_myname} failed to remove ${_pp} from cache"
+				echo -e "\r${BOLD}${RED}Failed to $([[ "${msg[2],,}" == "rmkey" ]] && echo Remove || echo Cache) ${_pp} Passphrase$([[ "${msg[2],,}" == "rmkey" ]] && echo " from Cache").${NOR}\r" >&${_socat[1]}
+				[[ "${msg[2],,}" == "rmkey" ]] && do_log debug "${_myname} failed to remove ${_pp} from cache"
 			fi
 		fi
 	fi
@@ -1061,19 +1061,19 @@ daemon_control_putrmkey()
 		if [[ "${_res}" == "y" ]]; then
 			echo -e "\r${BOLD}${GRN}${_s} ${_pp} Key ${_t} Boot Servers: ${GREY}${_srv}.${NOR}\r" >&${_socat[1]}
 			do_log debug "${_myname} ${_s,,} ${_pp} key ${_t,,} boot servers: ${_srv}"
-			[[ "${cmd}" == "putkey" ]] && key_clnt "PUT" "${_pp}" "${_passphrase}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
-			[[ "${cmd}" == "rmkey" ]] && key_clnt "DEL" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${msg[2],,}" == "putkey" ]] && key_clnt "PUT" "${_pp}" "${_passphrase}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${msg[2],,}" == "rmkey" ]] && key_clnt "DEL" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
 			echo -e "\r" >&${_socat[1]}
 		fi
 		[[ ${_add} -ne -3 && ${_confirm} -eq 1 ]] && do_control_confirm "Continue Adding ${_pp} ${_t} Boot Servers Cache: ${NOR}${GREY}${_srv}${RED}${BOLD}? (Y/n)" "y" || _res="y"
 		if [[ "${_res}" == "y" && ${_add} -ne -3 ]]; then
 			[[ ${_add} -eq -2 && -n "${keylife[${_pp}]}" ]] && _add=${keylife[${_pp}]}
 			[[ ${_add} -eq -2 ]] && _add=${conf[KEYLIFE]}
-			[[ "${cmd}" == "putkey" ]] && _s="Adding" _t="to" || _s="Deleting" _t="from"
+			[[ "${msg[2],,}" == "putkey" ]] && _s="Adding" _t="to" || _s="Deleting" _t="from"
 			echo -e "\r${BOLD}${GRN}${_s} ${_pp} Key ${_t} Boot Servers Cache: ${GREY}${_srv}.${NOR}\r" >&${_socat[1]}
 			do_log debug "${_myname} ${_s,,} ${_pp} key ${_t,,} boot servers cache: ${_srv}"
-			[[ "${cmd}" == "putkey" ]] && key_clnt "ADD" "${_pp}" "${_add}" "${_passphrase}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
-			[[ "${cmd}" == "rmkey" ]] && key_clnt "REM" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${msg[2],,}" == "putkey" ]] && key_clnt "ADD" "${_pp}" "${_add}" "${_passphrase}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
+			[[ "${msg[2],,}" == "rmkey" ]] && key_clnt "REM" "${_pp}" ${_srv} & __pid_putkey=$!; wait ${__pid_putkey}
 			echo -e "\r" >&${_socat[1]}
 		fi
 	fi
@@ -1263,7 +1263,7 @@ do_control_init()
 		exec {fd_logwriter}> >(logwriter control-$1-${BASHPID}.log ${_pid_logwriter})
 		_pid_logwriter=$!
 	fi
-	[[ "${cmd,,}" =~ ^(add|del|smart|erase)$ ]] && _crypt_arr=($(do_xcrypt_fromtab "${_myname}" "${msg[3]}"))
+	[[ "${cmd,,}" =~ ^(add|del|smarterase)$ ]] && _crypt_arr=($(do_xcrypt_fromtab "${_myname}" "${msg[3]}"))
 	
 	# Check if socket exists first.
 	if [[ ! -S ${sock_ctrl} ]]; then
@@ -1277,9 +1277,9 @@ do_control_init()
 	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo -e "\r${_myname} Connected for $2.\r" >&${_socat[1]}
 
 	# Check the command line, it should contain crypt, device and passphrase and two options (confirm / crypttab) for add or del.
-	if [[ "${cmd}" == "smart" ]]; then
+	if [[ "${cmd}" == "smarterase" ]]; then
 		_smartall=${msg[$((${#msg[@]}-2))]} _smarttest=${msg[$((${#msg[@]}-1))]}
-	elif [[ "${cmd}" =~ ^(putkey|rmkey)$ ]]; then
+	elif [[ "${cmd}" == "putrmkey" ]]; then
 		_confirm=${msg[$((${#msg[@]}-5))]} _add=${msg[$((${#msg[@]}-4))]} _cache=${msg[$((${#msg[@]}-3))]} _fw=${msg[$((${#msg[@]}-2))]} _srv=$(IFS=','; echo ${msg[$((${#msg[@]}-1))]})
 	elif [[ "${cmd}" =~ ^(add|del)$ ]]; then
 		_trim=${msg[$((${#msg[@]}-3))]} _confirm=${msg[$((${#msg[@]}-2))]} _crypttab=${msg[$((${#msg[@]}-1))]} 
@@ -1827,7 +1827,7 @@ key_clnt()
 
 do_sanboot()
 {
-	local myname="${MYNAME}-boot" passphrase fd_fifo res r
+	local myname="${MYNAME}-boot" passphrase fd_fifo res r=0
 	if ! do_init_conf keyserver || ! mkfifo ${CONFDIR}/${cmd}.$$.res || ! chgrp ${conf[KEYSRV_GROUP]} ${CONFDIR}/${cmd}.$$.res || ! chmod 620 ${CONFDIR}/${cmd}.$$.res; then
 		logger -p user.error "${myname}: initialization failed"
 		return 1
@@ -1841,14 +1841,16 @@ do_sanboot()
 	if ! read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} res; then
 		logger -p user.error "${myname}: no response received from keyserver"
 		r=1
-	elif [[ "${cmd}" == "get" && "${res,,}" == "nok" ]] || [[ "${cmd}" == "get" ]] && ! IFS= read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} passphrase; then
-		[[ $? -ne 0 ]]            && logger -p user.error "${myname}: no ${pp} passphrase received from keyserver"
-		[[ "${res,,}" == "nok" ]] && logger -p user.error "${myname}: ${pp} passphrase not cached by keyserver"
-		kill -SIGTERM ${PPID}
-		r=1
 	elif [[ "${cmd}" == "get" ]]; then
-		logger -p user.info "${myname}: received ${pp} passphrase from keyserver"
-		echo "${passphrase}" >&${out}
+		if [[ "${res,,}" == "nok" ]] || ! IFS= read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} passphrase; then
+			[[ "${res,,}" == "nok" ]] && logger -p user.error "${myname}: ${pp} passphrase not cached by keyserver"
+			[[ "${res,,}" != "nok" ]] && logger -p user.info "${myname}: no ${pp} passphrase received from keyserver"
+			kill -SIGTERM ${PPID}
+			r=1
+		else
+			logger -p user.error "${myname}: received ${pp} passphrase from keyserver"
+			echo "${passphrase}" >&${out}
+		fi
 	elif [[ "${cmd}" == "put" || "${cmd}" == "del" ]]; then
 		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: put ${pp} passphrase on keyserver equal to stored passhrase"
 		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to put ${pp} passphrase to keyserver"
