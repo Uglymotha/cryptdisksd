@@ -8,7 +8,7 @@ do_init_conf()
 	local var val _conf _keylife IFS=$'\n'
 	declare -gA conf keyserverconf keylife
 	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME:0:-1}.d"
-	if [[ ! -d "${CONFDIR}" && "$1" != "keyserver" ]]; then
+	if [[ ! -d "${CONFDIR}" && -z "$1" ]]; then
 		do_log error "${myname} ${CONFDIR} not found"
 		return 1
 	fi
@@ -17,6 +17,7 @@ do_init_conf()
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
 	done fi
+	[[ -z "${conf[MASTERPP]}" ]] && conf[MASTERPP]=system:master 
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
 	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
 	[[ -z "${conf[RUNDIR]}" ]] && conf[RUNDIR]="/run"
@@ -88,6 +89,25 @@ do_init_conf()
 	# Initialize formatting parameters for console output.
 	RED="\033[91m" GREY="\033[94m" YEL="\033[93m" GRN="\033[92m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\0332J"
 	PR="\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[62C\033[s" PP="\033[u\033[6C\033[s" PT="\033[u\033[22C\033[s" PS="\033[u\033[21C"
+	return 0
+}
+
+do_reload_bootconf()
+{
+	do_log debug "${myname} loading configuration"
+	local var val IFS=$'\n'
+	unset bootconf crypttab systemdconf
+	declare -gA bootconf
+
+	# Load the crypttab and systemd conf into memory.
+	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#"| tr "\t" " " |tr -s " ")" 
+	[[ -s ${CONF} ]] && systemdconf="$(cat ${CONF} |grep -ve "^\s*#")"
+
+	# Source the boot config if necessary.
+	if [[ -s ${conf[BOOTCONF]} ]]; then for var in $(cat ${conf[BOOTCONF]} |grep -ve "^\s*#"); do
+		val=${var#*=} var=${var%%=*}
+		bootconf[${var^^}]="${val}"
+	done fi
 	return 0
 }
 
@@ -242,7 +262,7 @@ systemd_daemon()
 			do_daemon_notify_systemd
 		fi
 		[[ ${time_active::-4} -gt $((${cleanup::-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]] && do_daemon_cleanup
-		[[ ${confok} -eq 1 ]] && do_daemon_reload_conf && confok=0
+		[[ ${confok} -eq 1 ]] && do_reload_bootconf && confok=0
 		[[ ${starting} -eq 0 ]] && read_to=$((conf[CLEANUP_TIMER]-(${time_active::-4}-${cleanup::-4})))
 		[[ ${starting} -eq 1 ]] && read_to=${conf[QUEUE_TIMEOUT]}
 		[[ ${starting} -eq 2 ]] && read_to=$((conf[START_TIMEOUT]-${time_active::-4}+conf[QUEUE_TIMEOUT]))
@@ -455,7 +475,7 @@ do_daemon_check_conf()
 	fi
 
 	# If we are starting up, now is the time to load the config.	
-	[[ ${starting} -eq 1 ]] && do_daemon_reload_conf	
+	[[ ${starting} -eq 1 ]] && do_reload_bootconf	
 
 	# Check if the service config or crypttab has changed on disk.
 	if [[ ${starting} -eq 0 && ${confok} -eq 0 ]]; then
@@ -548,25 +568,6 @@ do_daemon_check_conf()
 		# No bootuserkeys at all
 		bootconf[BOOTSERVERS]=""
 	fi
-	return 0
-}
-
-do_daemon_reload_conf()
-{
-	do_log debug "${myname} loading configuration"
-	local var val IFS=$'\n'
-	unset bootconf crypttab systemdconf
-	declare -gA bootconf
-
-	# Load the crypttab and systemd conf into memory.
-	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(cat ${conf[CRYPTTAB]} |grep -ve "^\s*#"| tr "\t" " " |tr -s " ")" 
-	[[ -s ${CONF} ]] && systemdconf="$(cat ${CONF} |grep -ve "^\s*#")"
-
-	# Source the boot config if necessary.
-	if [[ -s ${conf[BOOTCONF]} ]]; then for var in $(cat ${conf[BOOTCONF]} |grep -ve "^\s*#"); do
-		val=${var#*=} var=${var%%=*}
-		bootconf[${var^^}]="${val}"
-	done fi
 	return 0
 }
 
@@ -1487,7 +1488,7 @@ query_passphrase()
 	trap 'trap_term_query_passphrase' SIGINT SIGTERM
 
 	# Ask for a pssphrase input by user through systemd-ask-password
-	local myname="query:$1 (${BASHPID}):" _time_start=$(do_timer) pp=$1 pid_askpp fd_askpp passphrase _passphrase ppchk
+	local myname="query:$1 (${BASHPID}):" _time_start=$(do_timer) pp="$1" pid_askpp fd_askpp passphrase _passphrase ppchk
 	do_log debug "${myname} query for ${pp} passphrase started"
 
 	do_ask_passphrase "Enter ${pp} Passphrase: " || trap_term_query_passphrase
@@ -1705,7 +1706,8 @@ do_systemd_keysrv()
 				timeout=${cached_pp[${pp}]#*,}
 				[[ ${timeout} -eq -1 && -n "${keylife[${pp}]}" ]] && timeout=${keylife[${pp}]}
 				[[ ${timeout} -eq -1 ]] && timeout=${conf[KEYLIFE]}
-				do_keysrv_send "${BOLD}${pp}: ${RED}\"$([[ ${conf[LOGLEVEL]} -ge 3 ]] && keyctl pipe "$(keyctl request user "${pp}" @s)")\"${NOR}${BOLD}, timeout: $((timeout-$(do_timer ${cached_pp[${pp}]%%,*} |cut -d'.' -f1)))s${NOR}"
+				[[ ${timeout} -ne 0 ]] && timeout=$((timeout-$(do_timer ${cached_pp[${pp}]%%,*} |cut -d'.' -f1)))
+				do_keysrv_send "${BOLD}${pp}: ${RED}\"$([[ ${conf[LOGLEVEL]} -ge 3 ]] && keyctl pipe "$(keyctl request user "${pp}" @s)")\"${NOR}${BOLD}, timeout: ${timeout}s${NOR}"
 			done
 			do_keysrv_send ".";;
 		esac
@@ -1908,9 +1910,7 @@ do_cryptdisksd_udev()
 	local msg="${ACTION} " command=udev dir
 
 	# Parse the udev command line and prepare the message to be put on the queue. Udev can only be run by root.
-	dir="$(grep -ie "^CONFDIR=\/" /etc/systemd/${MYNAME}.conf)"
-	CONFDIR="${dir##*=}"
-	if [[ ${UID} -ne 0 || -z "${ACTION}" ]] || ! do_init_conf; then
+	if [[ ${UID} -ne 0 || -z "${ACTION}" ]]; then
 		logger -p daemon.error "${MYNAME} udev failed to queue \"$@\""
 		exit 1
 	fi
@@ -1929,11 +1929,369 @@ do_cryptdisksd_udev()
 
 # [END OF UDEV PROCESSING FUNCTIONS]
 
+# [START OF INITRD FUNCTIONS]
+
+do_reset()
+{
+	do_initrd_log "RESETTING"
+	do_cecho -e "\n\033[9C\033[91m\033[1m$1\n\033[9CResetting!\033[0m"
+	sleep 5
+	echo 1 >/proc/sys/kernel/sysrq
+	echo b >/proc/sysrq-trigger
+}
+
+do_initrd()
+{
+	trap 'do_problem "Caught SIGINT or SIGTERM"' SIGINT SIGTERM
+	# Initialize System Paramters. Parameters from boot.conf are CAPS.
+	local myname="uglylinux-boot:" version="$(< /version)" tmpdir="/tmp" network=0 bootconfinfw=0 rootdir="/.root" logdev="/dev/zram0"
+	local etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=0 logdev="/dev/zram0" logdir="${rootdir}/var/log" libmd="/dev/md/lib" libsz=0
+	local sysimg="/sysimg-uglylinux-${version}.sqfs" init=/lib/systemd/systemd recovery="no" fd_logwriter CONFDIR=/tmp
+	set -o pipefail
+	PATH=/bin:/sbin
+
+	do_initrd_log "starting system initialization"
+	do_cecho -e "\033[9C\033[1mStarting System Initialization\033[0m"
+
+	touch /etc/mtab
+	dmesg -n 1
+	mount -n -t devtmpfs devtmpfs /dev
+	mount -n -t proc     proc     /proc
+	mount -n -t sysfs    sysfs    /sys
+	mount -n -t tmpfs    tmpfs    /run
+	mount -n -t efivarfs efivarfs /sys/firmware/efi/efivars
+	[[ ! -L /dev/fd ]] && ln -s /proc/self/fd /dev/fd
+	exec 1>&- 2>&- {fd}< <(haveged -F 1>&- 2>&- 0<&-) >/dev/null 2>&1
+	exec {fd_logwriter}>/dev/null
+	read -r cmdline < /proc/cmdline
+	for param in $cmdline ; do
+		[[ "${param}" == "recovery" ]] && recovery="yes"
+	done
+	do_init_conf initrd
+	[[ ! -d ${CONFDIR} ]] && mkdir -pv ${CONFDIR}
+	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -pv ${conf[CRYPTDISKSDDIR]}
+
+	do_initrd_cmd "Reading Boot Config from Firmware" do_parse_fwconf && bootconfinfw=1
+
+	/lib/systemd/systemd-udevd --daemon --resolve-names=never 2>/dev/null
+	udevadm trigger && udevadm settle
+	mdadm --assemble --scan >/dev/null 2>&1
+
+	if [[ ${network} -eq 0 && ${bootconfinfw} -eq 1 ]]; then
+		do_initrd_cmd "Starting Network" do_start_network && network=1
+	fi
+
+	if [[ $recovery = yes ]] ; then
+    	do_initrd_cmd "Mounting boot filesystem." do_mount_boot
+		do_cecho -e "\033[9C\033[91m\033[1mEntering Recovery Mode.\033[0m"
+		setsid cttyhack bash -i
+	fi
+
+	if [[ ! -f /default ]]; then
+		do_initrd_cmd "Importing Persistent Storage Pool ${storagepool} " do_import_storage "${bootconf[STORAGEPOOL]}" "${bootconf[STORAGEPREFIX]}" "$(do_read_passphrase "${bootconf[STORAGEPP]}")"
+		[[ $? -eq 1 ]] && touch /default
+	fi
+
+	do_initrd_cmd "Creating zram Drives" do_make_zram_fs "lz4hc,${bootconf[LOGSIZE]},log" "lz4hc,${etcsz},etc" "lz4hc,${libsz},lib"
+	do_init_log
+
+	imgtype="$(file -b ${sysimg})"
+	if [[ "${imgtype,,}" =~ ^openssl ]]; then
+		do_initrd_cmd "Mounting ${sysimg##*/}" do_mount_root "$(do_read_passphrase "${conf[MASTERPP]}")"
+	elif [[ "${imgtype,,}" =~ ^squashfs ]]; then
+		do_initrd_cmd "Mounting ${sysimg##*/}" do_mount_root 
+	else
+		do_initrd_log "unsupported system image type"
+		do_problem "Unsupported System Image Type"
+	fi
+
+	# Check for default config
+	if [[ -f /default ]]; then
+    	do_make_default_config
+	else
+	    do_mount_etc
+	fi
+
+	[[ "${network}" -eq 1 ]] && do_initrd_cmd "Stopping Network" do_stop_network && network=0
+
+	killall -15 ssh systemd-udevd haveged >/dev/null 2>&1
+
+	do_unmount
+
+	echo 3 >/proc/sys/vm/drop_caches
+
+	exec switch_root /.root "${init}" "$@"
+}
+
+do_initrd_log()
+{
+	echo "uglylinux-boot: $@" >dev/kmsg
+}
+
+do_cecho()
+{
+	echo "$@" >/dev/console
+}
+
+do_problem()
+{
+	do_initrd_log "$@"
+	do_cecho -e "\033[9C\033[91m\033[1mEncountered a do_problem! Dropping you to a shell\033[0m"
+	do_cecho -e "\033[9C\033[91m\033[1mThe error encountered (if any given):\033[0m"
+	do_cecho -e "\033[9C\033[93m\033[1m$@\033[0m"
+	setsid cttyhack bash -i
+}
+
+do_initrd_cmd()
+{
+	local msg="$1" cmd="$2" output="" result=1
+	shift 2
+	do_cecho -ne "\033[9C\033[1m${msg}\033[0m"
+	${cmd} $@
+	result=$?
+	if [[ ${result} -eq 0 ]]; then
+		do_initrd_log "${cmd} ${msg} - OK"
+		do_cecho -e "\033[200D\033[92m\033[1m[  OK  ]\033[0m"
+	elif [[ ${result} -eq 2 ]]; then
+		do_initrd_log "${cmd} ${msg} - WARN"
+		do_cecho -e "\033[200D\033[93m\033[1m[ WARN ]\033[0m"
+	else 
+		do_initrd_log "${cmd} ${msg} - FAIL"
+		do_cecho -e "\033[200D\033[91m\033[1m[ FAIL ]\033[0m"
+	fi
+	[[ ! -z "${output}" ]] && echo "${output}"
+	return ${result}
+}
+
+do_make_zram_fs()
+{
+	# Create zram filesystem
+	local status=0 num_fs=$# i=1 zr alg size fs
+	while [[ "${i}" -le "${num_fs}" ]]; do
+		zr="zram$((i-1))" alg=$(echo ${!i} |cut -d "," -s -f 1) size=$(echo ${!i} |cut -d "," -s -f 2) fs=$(echo ${!i} |cut -d "," -s -f 3)
+		if [[ -b /dev/${zr} ]]; then
+			echo "1" > /sys/block/${zr}/reset
+			echo "${alg}" > /sys/block/${zr}/comp_algorithm
+			echo "${size}" > /sys/block/${zr}/disksize
+		else
+			zramctl ${zr} -a ${alg} -s ${size} || do_problem "Cannot Create ${zr}"
+		fi
+		if [[ -n "${fs}" ]]; then 
+			if [[ ! "${fs}" == "etc" && ! "${fs}" == "lib" ]]; then
+				mkfs.ext4 -F /dev/${zr} > /dev/null 2>&1 || do_problem "Cannot Create Filesystem on ${zr}"
+				e2label /dev/${zr} ${fs} > /dev/null 2>&1 || do_problem "Cannot label ${fs} on ${zr}"
+			elif [[ ! -f /default ]]; then
+				mdadm --add /dev/md/${fs} /dev/${zr} >/dev/null 2>&1 || { do_initrd_log "unable to add ram backing device for ${fs}"; status=2; }
+			fi
+		fi
+		i=$((i+1))
+	done
+	return ${status}
+}
+
+do_parse_fwconf()
+{
+	[[ ! -s ${conf[FWBOOTCONF]} ]] && touch /default && do_cecho -ne "\033[93m Not found. Starting with default config." && return 2
+	cat ${conf[FWBOOTCONF]} |tail -c +5 |grep -ve "^\s*#" >${conf[BOOTCONF]}
+	do_reload_bootconf
+	[[ -z "${bootconf[STORAGEPOOL]}" ]] && bootconf[STORAGEPOOL]=storage
+	[[ -z "${bootconf[STORAGEPREFIX]}" ]] && bootconf[STORAGEPREFIX]=storage
+	[[ -z "${bootconf[STORAGEPP]}" ]] && bootconf[STORAGEPP]=${conf[MASTERPP]} || bootconf[STORAGEPP]="$(do_eval_pp ${bootconf[STORAGEPP]})"
+	[[ "${bootconf[STORAGETRIM]}" == "1" || "${bootconf[STORAGETRIM],,}" == "y" || "${bootconf[STORAGETRIM],,}" == "yes" ]] && bootconf[STORAGETRIM]=1 || bootconf[STORAGETRIM]=0
+	[[ -z "${bootconf[TIMEOUT]}" ]] && bootconf[TIMEOUT]=30
+	[[ -z "${bootconf[LOGSIZE]}" ]] && bootconf[LOGSIZE]=2GiB
+	if [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} ]] && cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTSERVERKEYS]}; then 
+		if [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} ]] && cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTUSERKEY]}; then
+			chmod 400 ${CONFIDR}/${bootconf[BOOTUSERKEY]}
+		else
+			network=2
+			return 2
+		fi
+	else
+		network=2
+		return 2
+	fi
+	[[ -z "${bootconf[BOOTUSER]}" || -z "${bootconf[BOOTSERVERS]}" ]] && return 1
+	return 0
+}
+
+do_mount_boot()
+{
+    [[ ! -d /boot ]] && mkdir /boot
+    mount /dev/disk/by-label/boot /boot || do_problem "Unable to mount boot"
+}
+
+do_mount_root()
+{
+	mkdir /squashfs
+	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${sysimg})+1))" /squashfs
+	if [[ -n "$1" ]]; then
+		openssl aes-256-cbc -salt -d -pbkdf2 -in ${sysimg} -out /squashfs/${sysimg##*/} -k "$1"
+	else 
+		cp ${sysimg} /squashfs/${sysimg##*/}
+	fi
+   	mount -t squashfs /squashfs/${sysimg##*/} ${rootdir} > /dev/null 2>&1 || do_problem "Unable to mount Squashfs root"
+}
+
+do_mount_etc()
+{
+   [[ ! -d ${etcdir} ]] && mkdir ${etcdir}
+   mount -n ${etcmd} ${etcdir} > /dev/null 2>&1 || do_problem "Unable to Mount etc"
+}
+
+do_init_log()
+{
+   mkdir -p ${logdir}
+   mount -n ${logdev} ${logdir} > /dev/null 2>&1 || do_problem "Unable to Mount log ram drive"
+   ln -s /var/storage/logarchive ${logdir}/archive
+   mkdir ${logdir}/samba
+   chmod 750 ${logdir}/samba
+   mkdir ${logdir}/journal
+   chgrp 10 ${logdir}/journal
+   chmod 2755 ${logdir}/journal
+   mkdir ${logdir}/sa
+   chmod 750 ${logdir}/sa
+   mkdir ${logdir}/clamav
+   chown clamav:clamav ${logdir}/clamav
+   chmod 750 ${logdir}/clamav
+   umount ${logdir}
+}
+
+do_start_network()
+{
+	if [[ ! -f ${tmpdir}/network ]]; then
+		return 1
+	fi
+	return 0
+}
+
+do_read_passphrase()
+{
+	local pp="$1" passphrase key fd_pp
+	key="$(keyctl request user "${pp}" 2>/dev/null)"
+	if [[ -n "${key}" ]]; then
+		passphrase="$(keyctl print "${key}" 2>/dev/null)"
+	else
+		if [[ "${network}" -eq 1 ]]; then
+			exec {fd_pp}< <(key_clnt "${myname}" "GET" "${pp}" {__fd_up}>&1- ${__fd_user}>/dev/console)
+			IFS= read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && key=1
+		fi
+		if [[ "${key}" != "1" ]]; then
+			exec {fd_pp}< <(query_passphrase "${pp}" {__fd_up}>&1- {__fd_user[0]}<&0- {__fd_user[1]}>/dev/console)
+			! IFS= read -ru${fd_pp} passphrase && do_reset "Query Passphrase Timeout"
+		fi
+		key=$(keyctl add user "${pp}" "${passphrase}" @u 2>/dev/null)
+		keyctl timeout ${_key} $((2*conf[START_TIMEOUT])) 2>/dev/null
+	fi
+	echo "${passphrase}"
+	return 0
+}
+
+do_import_storage()
+{
+	local nr i storagedev storagetrim status
+	if [[ ! -z "${bootconf[STORAGEDEVS]}" ]]; then
+		nr=1 i=0 storagedev storagetrim  status=0
+		for storagedev in ${bootconf[STORAGEDEVS]}; do
+			local ___dev="$(findfs ${storagedev} 2>/dev/null)" 
+			if [[ $? -ne 0 ]] ; then
+				do_initrd_log "incorrect storage device entry (${storagedev}) in bootconf"
+			elif [[ ! -b /dev/mapper/${2}${nr} ]]; then
+				[[ ${bootconf[STORAGETRIM]} -eq 1 && "$(lsblk -rD ${___dev} |head -n2 |tail -n1| cut -d " " -f3)" != "0B" ]] && storagetrim="--allow-discards"
+				/sbin/cryptsetup open --type plain ${storagetrim} ${___dev} ${2}${nr} <<<"$3" >/dev/null 2>&1
+				if [[ "$?" -eq 0 ]]; then
+					nr=$((nr+1))
+				else
+					do_initrd_log "cannot unlock persistent storage device ${storagedev}"
+					status=2
+				fi
+			else
+				do_initrd_log "persistent storage device /dev/mapper/${2}${nr} already present"
+				status=2
+			fi
+		done 
+		if [[ "${nr}" -eq 1 ]]; then
+			do_initrd_log "no usable storage devices in bootconf, starting with default config"
+			do_cecho -ne "\033[91mNo Usable Storage Devices in Bootconf, Starting with Default Config\033[0m"
+			return 1
+		else
+			if ! zpool import $1 -f >/dev/null 2>&1; then
+				do_initrd_log "unable to import storage pool $1, starting with default config"
+				do_cecho -ne "\033[91mUnable to Import Storage Pool $1, Starting with Default Config\033[0m"
+				return 1
+			fi
+			while [[ "${i}" -le ${bootconf[TIMEOUT]} ]]; do
+				[[ -b /dev/zvol/$1/etc || -b /dev/zvol/$1/lib ]] && mdadm --assemble --scan >/dev/null 2>&1
+				[[ -b ${etcmd} && -b ${libmd} ]] && break
+				sleep 1
+				i=$((i+1))
+			done
+			if [[ ! -b ${etcmd} || ! -b ${libmd} ]]; then
+				do_initrd_log "etc or lib zvol not found starting with default config"
+				do_cecho -ne "\033[91mNo lib or etc Zvol Found. Starting with Default Config\033[0m"
+				return 1
+			fi
+			etcsz=$(($(blockdev --getsize64 /dev/zvol/$1/etc) + 1))
+			libsz=$(($(blockdev --getsize64 /dev/zvol/$1/lib) + 1))
+		fi
+	else
+		do_initrd_log "no persistent storage devices in bootconf. starting with default config"
+		do_cecho -ne "\033[91mNo Persistent Storage Devices in Bootconf. Starting with Default Config\033[0m"
+		return 1
+	fi
+	return ${status}
+}
+
+do_make_default_config()
+{
+    local passphrase=""
+    mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
+    ln -s /etc/bashrc ${rootdir}/root/.bashrc
+    mkdir ${rootdir}/root/quarantine
+    do_initrd_cmd "Mounting boot filesystem." do_mount_boot
+    [[ "${imgtype,,}" =~ ^openssl ]] && passphrase="$(do_read_passphrase "${conf[MASTERPP]}")"
+    if [[ ! -f /boot/storage ]]; then
+        touch /boot/storage
+        truncate -s 1G /boot/storage
+        cryptsetup create --type plain storage /boot/storage <<<"${passphrase}" >/dev/null 2>&1
+        do_initrd_cmd "Creating new storage filesystem on /boot." mkfs.ext4 /dev/mapper/storage
+        mount /dev/mapper/storage /mnt
+        cp -a ${rootdir}/var/storage/* /mnt
+        cp -a ${rootdir}/etc /mnt
+        cp -a ${rootdir}/var/lib /mnt
+        ssh-keygen -A -f /mnt >/dev/null 2>&1
+        ${rootdir}/bin/systemd-machine-id-setup >/dev/null 2>&1
+        cp /etc/machine-id /mnt/etc/
+        umount /mnt
+    else
+        cryptsetup open --type plain /boot/storage storage <<<"${passphrase}" >/dev/null 2>&1
+    fi
+    do_initrd_cmd "Mounting storage filesystem." mount /dev/mapper/storage ${rootdir}/var/storage
+    mount -o bind ${rootdir}/var/storage/etc ${rootdir}/etc
+    mount -o bind ${rootdir}/var/storage/lib ${rootdir}/var/lib
+}
+
+do_stop_network()
+{
+	local interface="$(</tmp/network)"
+	ip route del default via ${bootconf[GATEWAY]} >/dev/null 2>&1 || return 1
+	ip addr del ${bootconf[IP]} dev ${interface} >/dev/null 2>&1 || return 1
+	ip link set dev ${interface} down >/dev/null 2>&1 || return 1
+	return 0
+}
+
+do_unmount()
+{
+	cd /
+	/bin/umount /sys/firmware/efi/efivars || do_problem "Could not unmount efivarfs"
+}
+# [END OF INITRD FUNCTIONS]
+
 # [START OF INTERACTIVE CONTROL FUNCTIONS]
 
 do_echo_use()
 {
-	[[ -z "${conf[RUNDIR]}" ]] && { do_init_conf keyserver || echo -e "${RED}${MYNAME}, Error Loading Configuration from ${CONFDIR}${NOR}"; }
+	[[ -z "${conf[RUNDIR]}" ]] && { do_init_conf cli || echo -e "${RED}${MYNAME}, Error Loading Configuration from ${CONFDIR}${NOR}"; }
 	echo -e "${GREY}${BOLD}${MYNAME} (Encrypted Block Device Manager)${NOR}\n"
 	case $1 in
 	status)
@@ -2220,19 +2578,19 @@ do_parse_cmd()
 	udev)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
-		do_init_conf || return 1
+		do_init_conf udev || return 1
 		do_cryptdisksd_udev $@
 		return $#;;
 	stop)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
-		do_init_conf || return 1
+		do_init_conf cli || return 1
 		/bin/kill -SIGTERM $(cat ${conf[PIDFILE]})
 		return $#;;
 	reload)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
-		do_init_conf || return 1
+		do_init_conf cli || return 1
 		/bin/kill -SIGHUP $(cat ${conf[PIDFILE]})
 		return 1;;
 	status|shell|add|del|putkey|rmkey|smart|erase)
@@ -2244,12 +2602,11 @@ do_parse_cmd()
 		do_cmd_parseopt $@
 		s=$?
 		[[ $(wc -w <<<"${msg}") -ne 2 || "${timeout}" == "-1" ]] && do_echo_use "${command}"
-		do_init_conf || return ${s}
 		[[ -z "${timeout}" ]] && timeout=-1
 		do_bootsan ${msg}
 		return ${s};;
 	*)
-		[[ ${check} -ne 1 ]] && do_echo_use "${command}"
+		[[ ${check} -ne 1 ]] && do_echo_use
 		return 0;;
 	esac
 	return 0
@@ -2551,7 +2908,10 @@ MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin
 [[ ! -z "${LC_NUMERIC}" ]] && unset LC_NUMERIC
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
-if [[ $# -eq 0 ]]; then
+if [[ "${MYNAME}" == "init" ]]; then
+	do_initrd
+	exit $?
+elif [[ $# -eq 0 ]]; then
 	# No command line options specified. check if we're started from systemd, start daemon if so.
 	do_systemd_daemon_start
 	exit 1
