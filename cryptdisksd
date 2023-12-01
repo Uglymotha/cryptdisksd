@@ -87,8 +87,9 @@ do_init_conf()
 	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
 
 	# Initialize formatting parameters for console output.
-	RED="\033[91m" GREY="\033[94m" YEL="\033[93m" GRN="\033[92m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\0332J"
-	PR="\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[62C\033[s" PP="\033[u\033[6C\033[s" PT="\033[u\033[22C\033[s" PS="\033[u\033[21C"
+	RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\033[2J"
+	PI="\033[u\033[9C" PR="\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[62C\033[s" PP="\033[u\033[6C\033[s" PT="\033[u\033[22C\033[s" PS="\033[u\033[21C"
+	OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 	return 0
 }
 
@@ -164,16 +165,19 @@ do_log()
 
 do_timer()
 {
+	local IFS='.' x y z
 	# Start a timer for debugging purposes. We will track to the ms.
 	if [[ $# -eq 0 ]]; then
 		# Started with no args, start a timer, echo the start time.
-		echo ${EPOCHREALTIME:0:-3}
-	elif [[ ${1,,} == "date" ]]; then
+		echo "${EPOCHREALTIME::-3}"
+	elif [[ "${1,,}" == "date" ]]; then
 		# Output the exact date of the timestamp.
-		echo "$(date --date @$2 +%Y-%m-%d.%H:%M:%S)"
+		echo "$(date --date @${2::-4} +%Y-%m-%d.%H:%M:%S)"
 	else
 		# Started with start time as args, calculate and echo the time difference.
-		echo "$(bc <<<"x=${EPOCHREALTIME:0:-3}-$1; if (x<1) print 0; x")"
+		x=(${EPOCHREALTIME::-3}) y=($1); z=$((${x[0]}${x[1]}-${y[0]}${y[1]}))
+		case $((4-${#z})) in 1) z="0${z}";; 2) z="00${z}";; 3) z="000${z}";; esac 
+		echo "${z::-3}.${z:$((${#z}-3)):3}"
 	fi
 }
 
@@ -695,7 +699,7 @@ daemon_mount_crypt()
 	if [[ -z "${_key}" ]]; then
 		do_log error "${myname} passphrase ${_add_pp} not cached!" 
 		echo "passphrase ${_add_pp} 0" >${conf[FIFO]} 
-		echo "mount ${_add_crypt} 4 ${pid_ctrl}" >${conf[FIFO]} 
+		echo "mount ${_add_crypt} 4 ${_pid_ctrl}" >${conf[FIFO]} 
 		exit 4
 	fi
 	_passphrase="$(keyctl pipe "${_key}" 2>/dev/null)"
@@ -703,7 +707,10 @@ daemon_mount_crypt()
 	# First check if the crypt is already mounted. If so, check if it's on the active list and add if not.	
 	if dmsetup info "${_add_crypt}" >/dev/null 2>&1 & _cmd=dmsetup _pid_cmd=$!; wait ${_pid_cmd}; then
 		exec {_fd_cmd}< <(lsblk -rD /dev/mapper/${_add_crypt} |head -n2 |tail -n1 |cut -d" " -f3)
-		_cmd=lsblk _pid_cmd=$!; ! read -t${conf[QUEUE_TIMEOUT]} -ru${_fd_cmd} _fd_cmd && echo "mount ${_add_crypt} 1 ${pid_ctrl}" >${conf[FIFO]} && exit 1
+		_cmd=lsblk _pid_cmd=$!; if ! read -t${conf[QUEUE_TIMEOUT]} -ru${_fd_cmd} _fd_cmd; then
+			echo "mount ${_add_crypt} 1 ${_pid_ctrl}" >${conf[FIFO]}
+			exit 1
+		fi
 		[[ "${_fd_cmd}" == "0B" ]] && _add_trim=0 || _add_trim=1
 		if [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
 			_crypt_arr=(${active_mnt[${_add_crypt}]})
@@ -712,7 +719,7 @@ daemon_mount_crypt()
 		fi
 	else
 		exec {_fd_cmd}< <(lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d" " -f3)
-		_cmd=lsblk _pid_cmd=$!; ! read -t${conf[QUEUE_TIMEOUT]} -ru${_fd_cmd} _fd_cmd && echo "mount ${_add_crypt} 1 ${pid_ctrl}" >${conf[FIFO]} && exit 1
+		_cmd=lsblk _pid_cmd=$!; ! read -t${conf[QUEUE_TIMEOUT]} -ru${_fd_cmd} _fd_cmd && echo "mount ${_add_crypt} 1 ${_pid_ctrl}" >${conf[FIFO]} && exit 1
 		if [[ "${_fd_cmd}" == "0B" ]]; then
 			_add_trim=0 _res=3
 			do_log info "${myname} requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
@@ -1488,27 +1495,31 @@ query_passphrase()
 	trap 'trap_term_query_passphrase' SIGINT SIGTERM
 
 	# Ask for a pssphrase input by user through systemd-ask-password
-	local myname="query:$1 (${BASHPID}):" _time_start=$(do_timer) pp="$1" pid_askpp fd_askpp passphrase _passphrase ppchk
+	local myname="query:$1 (${BASHPID}):" _time_start=$(do_timer) pp="$1" POS="$2" OK="$3" WARN="$4" FAIL="$5" pid_askpp fd_askpp passphrase _passphrase ppchk
 	do_log debug "${myname} query for ${pp} passphrase started"
 
-	do_ask_passphrase "Enter ${pp} Passphrase: " || trap_term_query_passphrase
+	do_ask_passphrase "${POS}Enter ${pp} Passphrase: " || trap_term_query_passphrase
 
 	# Received a passphrase from the user check it against key stored in firmware.
 	local ppchk=$(do_check_passphrase "${myname}" "${pp}" "${passphrase}")$?
 	case ${ppchk} in
 	3)
+		[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
 		do_log error "${myname} Unable to confirm passphrase due to key error, giving up"
 		trap_term_query_passphrase;;
 	2)
 		# Key not present in firmware, ask for confirmation from the user.
+		[[ -n "${WARN}" ]] && echo -e "${WARN}" >&${__fd_user[1]}
 		_passphrase="${passphrase}"
-		do_ask_passphrase "Created key file. Confirm ${pp} Passphrase: " || trap_term_query_passphrase
+		do_ask_passphrase "${POS}Created key file. Confirm ${pp} Passphrase: " || trap_term_query_passphrase
 		# If the passphrase does not match, enter a loop until it does and wirte the keyfile if ok.
 		until [[ "${_passphrase}" == "${passphrase}" ]]; do
-			do_ask_passphrase "Passphrases do not Match. Enter ${pp} Passphrase: " || trap_term_query_passphrase
+			[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
+			do_ask_passphrase "${POS}Passphrases do not Match. Enter ${pp} Passphrase: " || trap_term_query_passphrase
 			_passphrase="${passphrase}"
 			do_check_passphrase "${myname}" "${pp}" "${passphrase}" rmkey
-			do_ask_passphrase "Confirm ${pp} Passphrase: " || trap_term_query_passphrase
+			[[ -n "${WARN}" ]] && echo -e "${WARN}" >&${__fd_user[1]}
+			do_ask_passphrase "${POS}Confirm ${pp} Passphrase: " || trap_term_query_passphrase
 			[[ "${_passphrase}" == "${passphrase}" ]] && do_write_keyfile "${myname}" "${pp}" "${passphrase}"
 		done
 		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
@@ -1516,7 +1527,8 @@ query_passphrase()
 		# Passphrase entered does not match stored key, keep asking until it does.
 		until [[ ${ppchk} -eq 0 ]]; do
 			do_log debug2 "${myname} query passphrase check failed"
-			do_ask_passphrase "Incorrect Passphrase. Enter ${pp} Passphrase: " || trap_term_query_passphrase
+			[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
+			do_ask_passphrase "${POS}Incorrect Passphrase. Enter ${pp} Passphrase: " || trap_term_query_passphrase
 			ppchk=$(do_check_passphrase "${myname}" "${pp}" "${passphrase}")$?
 		done
 		do_log debug "${myname} received passphrase after $(do_timer ${_time_start})s";;
@@ -1526,6 +1538,7 @@ query_passphrase()
 	esac
 
 	# Notify the daemon, so it knows passphrase worker has finished.
+	[[ -n "${OK}" ]] && echo -e "${OK}" >&${__fd_user[1]}
 	echo "${passphrase}" >&${__fd_up}
 	
 	do_log debug2 "${myname} took $(do_timer ${_time_start})s total"
@@ -1533,7 +1546,7 @@ query_passphrase()
 
 do_ask_passphrase()
 {
-	local CHAR DEL="$(printf "\x7F")" ca=() c=0
+	local CHAR DEL="$(printf "\x7F")" ca=() c=0 x
 	if [[ -z "${__fd_user[@]}" ]]; then
 		# Query for the passphrase in the background, record pid so we can kill if passphrase is received from server.
 		exec {fd_askpp}< <(NOTIFY_SOCKET= systemd-ask-password --timeout=0 --id=${pp} "$1" {__fd_up}>&-)
@@ -1543,18 +1556,20 @@ do_ask_passphrase()
 		passphrase="" CHAR=""
 		echo -ne "\r${BOLD}$1${NOR}" >&${__fd_user[1]}
 		until [[ "${CHAR}" == $'\r' || "${CHAR}" == $'\n' ]]; do
+			[[ $((RANDOM%100)) -le 50 ]] && x=1 || x=$((RANDOM%3+2))
 		   	read -t${conf[USER_TIMEOUT]} -rsN1 -u${__fd_user[0]} CHAR || return 1
 			if [[ "${CHAR}" == "${DEL}" && "${#passphrase}" -ge 1 ]]; then
 				for (( c=0; c<${ca[${#passphrase}]}; c++ )); do echo -ne "\b \b" >&${__fd_user[1]}; done
 				passphrase="${passphrase::-1}"
 			elif [[ "${CHAR}" != $'\r' && "${CHAR}" != $'\n' && "${CHAR}" != "${DEL}" ]]; then
 				passphrase+="${CHAR}"
-				for (( c=0; c<$((RANDOM%4)); c++ )); do echo -n "*" >&${__fd_user[1]}; done
+				for (( c=0; c<x; c++ )); do echo -n "*" >&${__fd_user[1]}; done
 				ca[${#passphrase}]=${c}
 			fi
 		done
-		echo -e "\r" >&${__fd_user[1]}
+		[[ -z "${POS}" ]] && echo -e "\r" >&${__fd_user[1]}
 	fi
+	return 0
 }
 
 # [END OF SHARED FUNCTIONS]
@@ -1775,7 +1790,6 @@ key_clnt()
 		do_log debug "${myname} ${cmd} ${pp} key ${to} ${srv}"
 		coproc _ssh ( ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} ${bootconf[BOOTUSER]}@${srv} "${cmd^^}" "${pp}" "${kto}" )
 		[[ ${cmd} =~ ^(put|add)$ ]] && echo "${passphrase}" >&${_ssh[1]} 
-		_pid_ssh=$!
 		if ! IFS= read -t${timeout} -ru${_ssh[0]} res || [[ ( "${cmd}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ) || ( "${cmd}" == "get" && $(do_check_passphrase "${myname}" "${pp}" "${res}")$? -eq 1 ) ]]; then
 			[[ $? -eq 142 ]] && ts="timeout" || ts="failed"
 			[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}${NOR} " >&${__fd_user}
@@ -1829,7 +1843,7 @@ key_clnt()
 
 do_sanboot()
 {
-	local myname="${MYNAME}-boot" passphrase fd_fifo res r=0
+	local myname="${MYNAME}-boot" passphrase fd_fifo res r=0 msg="$$ ${cmd} ${pp} ${timeout}"
 	if ! do_init_conf keyserver || ! mkfifo ${CONFDIR}/${cmd}.$$.res || ! chgrp ${conf[KEYSRV_GROUP]} ${CONFDIR}/${cmd}.$$.res || ! chmod 620 ${CONFDIR}/${cmd}.$$.res; then
 		logger -p user.error "${myname}: initialization failed"
 		return 1
@@ -1838,8 +1852,8 @@ do_sanboot()
 		return 1
 	fi
 	exec {fd_fifo}<>${CONFDIR}/${cmd}.$$.res
-	echo "$$ ${cmd}" "${pp}" "${timeout}" >${conf[KEYSRV_FIFO]}
-	[[ ${cmd} =~ ^(put|add)$ ]] && echo "${passphrase}" >${conf[KEYSRV_FIFO]}
+	[[ ${cmd} =~ ^(put|add)$ ]] && msg+=$'\n'"${passphrase}"
+	echo "${msg}" >${conf[KEYSRV_FIFO]}
 	if ! read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} res; then
 		logger -p user.error "${myname}: no response received from keyserver"
 		r=1
@@ -1853,7 +1867,7 @@ do_sanboot()
 			logger -p user.error "${myname}: received ${pp} passphrase from keyserver"
 			echo "${passphrase}" >&${out}
 		fi
-	elif [[ "${cmd}" == "put" || "${cmd}" == "del" ]]; then
+	elif [[ "${cmd}" == "put" ]]; then
 		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname}: put ${pp} passphrase on keyserver equal to stored passhrase"
 		[[ "${res,,}" == "nok" ]]  && r=1 && logger -p user.warning "${myname}: failed to put ${pp} passphrase to keyserver"
 		[[ "${res,,}" == "ok" ]]   && r=0 && logger -p user.info "${myname}: put ${pp} passphrase to keyserver succeeded"
@@ -1916,7 +1930,6 @@ do_cryptdisksd_udev()
 	fi
 
 	# Enter a loop to check if any of the arguments specified is a command, error exit if so, add parameter to message if ok.
-	shift
 	while [[ ! -z "$1" ]]; do
 		do_parse_opt $@
 		[[ $? -eq 0 ]] && msg+="$1 " || logger -p daemon.error "${MYNAME} cannot name crypt or dev \"$1\""
@@ -1924,7 +1937,25 @@ do_cryptdisksd_udev()
 	done
 
 	# Put the message (if any) on the queue.
-	[[ "${msg}" == "${ACTION} " ]] && exit 1 || echo "${msg}" >${conf[FIFO]} 
+	[[ "${msg}" == "${ACTION} " ]] && exit 1
+	echo "${msg}" >${conf[FIFO]} 
+}
+
+do_udev_start_network()
+{
+	if [[ "${bootconf[MAC],,}" == "${1,,}" && -n "${bootconf[IP]}" ]]; then
+		ip addr add ${bootconf[IP]} dev $2 >/dev/null 2>&1 || exit 1
+	else
+		exit 1
+	fi
+	ip link set dev $2 up >/dev/null 2>&1 || exit 1
+	echo $2 >${CONFDIR}/network
+	[[ -n "${bootconf[GATEWAY]}" ]] && ip route add default via ${bootconf[GATEWAY]} dev $2 >/dev/null 2>&1
+	echo "#######" >/etc/resolv.conf
+	for nameserver in ${bootconf[NAMESERVERS]}; do
+		echo "nameserver ${nameserver}" >> /etc/resolv.conf
+	done
+	[[ -n "${bootconf[DOMAIN]}" ]] && echo "search ${bootconf[DOMAIN]}" >> /etc/resolv.conf
 }
 
 # [END OF UDEV PROCESSING FUNCTIONS]
@@ -1933,8 +1964,9 @@ do_cryptdisksd_udev()
 
 do_reset()
 {
+	do_unmount
 	do_initrd_log "RESETTING"
-	do_cecho -e "\n\033[9C\033[91m\033[1m$1\n\033[9CResetting!\033[0m"
+	do_cecho -e "\n${PI}${BOLD}${RED}$1\n${PI}Resetting!${NOR}"
 	sleep 5
 	echo 1 >/proc/sys/kernel/sysrq
 	echo b >/proc/sysrq-trigger
@@ -1946,12 +1978,34 @@ do_initrd()
 	# Initialize System Paramters. Parameters from boot.conf are CAPS.
 	local myname="uglylinux-boot:" version="$(< /version)" tmpdir="/tmp" network=0 bootconfinfw=0 rootdir="/.root" logdev="/dev/zram0"
 	local etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=0 logdev="/dev/zram0" logdir="${rootdir}/var/log" libmd="/dev/md/lib" libsz=0
-	local sysimg="/sysimg-uglylinux-${version}.sqfs" init=/lib/systemd/systemd recovery="no" fd_logwriter CONFDIR=/tmp
+	local sysimg="/sysimg-uglylinux-${version}.sqfs" init=/lib/systemd/systemd recovery="no" fd_logwriter CONFDIR=/tmp starting=0 FOREGROUND=1
 	set -o pipefail
 	PATH=/bin:/sbin
 
 	do_initrd_log "starting system initialization"
-	do_cecho -e "\033[9C\033[1mStarting System Initialization\033[0m"
+	do_cecho -e "${PI}${BOLD}Starting System Initialization.${NOR}"
+	cat >/usr/lib/udev/rules.d/99-uglylinux-net.rules << 'EOF'
+ACTION!="change", GOTO="net_end"
+SUBSYSTEM!="net", GOTO="net_end"
+
+IMPORT{builtin}="net_id"
+ACTION=="change", RUN+="/sbin/cryptdisksd udev start_network $attr{address} $name"
+
+LABEL="net_end"
+EOF
+
+	cat > /.bashrc << 'EOF'
+if [ -f /etc/bashrc ]; then
+        . /etc/bashrc
+fi
+alias reboot="umount /mnt; umount /boot; echo b >/proc/sysrq-trigger"
+EOF
+
+	cat > /.bash_profile << 'EOF'
+if [ -f /.bashrc ]; then
+        . /.bashrc
+fi
+EOF
 
 	touch /etc/mtab
 	dmesg -n 1
@@ -1983,7 +2037,7 @@ do_initrd()
 
 	if [[ $recovery = yes ]] ; then
     	do_initrd_cmd "Mounting boot filesystem." do_mount_boot
-		do_cecho -e "\033[9C\033[91m\033[1mEntering Recovery Mode.\033[0m"
+		do_cecho -e "${PI}${RED}${BOLD}Entering Recovery Mode.${NOR}"
 		setsid cttyhack bash -i
 	fi
 
@@ -2007,7 +2061,7 @@ do_initrd()
 
 	# Check for default config
 	if [[ -f /default ]]; then
-    	do_make_default_config
+    	do_initrd_cmd "Creating Default Config." do_make_default_config
 	else
 	    do_mount_etc
 	fi
@@ -2035,31 +2089,32 @@ do_cecho()
 
 do_problem()
 {
+	do_initrd_cmd "Mounting boot filesystem." do_mount_boot
 	do_initrd_log "$@"
-	do_cecho -e "\033[9C\033[91m\033[1mEncountered a do_problem! Dropping you to a shell\033[0m"
-	do_cecho -e "\033[9C\033[91m\033[1mThe error encountered (if any given):\033[0m"
-	do_cecho -e "\033[9C\033[93m\033[1m$@\033[0m"
+	do_cecho -e "${PI}${RED}${BOLD}Encountered a do_problem! Dropping you to a shell.${NOR}"
+	do_cecho -e "${PI}${RED}${BOLD}The error encountered (if any given):${NOR}"
+	do_cecho -e "${PI}${RED}${BOLD}$@${NOR}"
 	setsid cttyhack bash -i
 }
 
 do_initrd_cmd()
 {
-	local msg="$1" cmd="$2" output="" result=1
+	local msg="$1" cmd="$2" result=1
+	do_cecho -ne "\r${PI}${BOLD}${msg}${NOR}"
 	shift 2
-	do_cecho -ne "\033[9C\033[1m${msg}\033[0m"
 	${cmd} $@
 	result=$?
+	[[ -n "${pid}" ]] && kill -SIGTERM ${pid} && wait ${pid} && pid=
 	if [[ ${result} -eq 0 ]]; then
 		do_initrd_log "${cmd} ${msg} - OK"
-		do_cecho -e "\033[200D\033[92m\033[1m[  OK  ]\033[0m"
+		do_cecho -e "${OK}"
 	elif [[ ${result} -eq 2 ]]; then
 		do_initrd_log "${cmd} ${msg} - WARN"
-		do_cecho -e "\033[200D\033[93m\033[1m[ WARN ]\033[0m"
+		do_cecho -e "${WARN}"
 	else 
 		do_initrd_log "${cmd} ${msg} - FAIL"
-		do_cecho -e "\033[200D\033[91m\033[1m[ FAIL ]\033[0m"
+		do_cecho -e "${FAIL}"
 	fi
-	[[ ! -z "${output}" ]] && echo "${output}"
 	return ${result}
 }
 
@@ -2091,7 +2146,7 @@ do_make_zram_fs()
 
 do_parse_fwconf()
 {
-	[[ ! -s ${conf[FWBOOTCONF]} ]] && touch /default && do_cecho -ne "\033[93m Not found. Starting with default config." && return 2
+	[[ ! -s ${conf[FWBOOTCONF]} ]] && touch /default && do_cecho -ne "${RED}${conf[FWBOOTCONF]} Not found. Starting with default config.${NOR}" && return 2
 	cat ${conf[FWBOOTCONF]} |tail -c +5 |grep -ve "^\s*#" >${conf[BOOTCONF]}
 	do_reload_bootconf
 	[[ -z "${bootconf[STORAGEPOOL]}" ]] && bootconf[STORAGEPOOL]=storage
@@ -2102,7 +2157,7 @@ do_parse_fwconf()
 	[[ -z "${bootconf[LOGSIZE]}" ]] && bootconf[LOGSIZE]=2GiB
 	if [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} ]] && cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTSERVERKEYS]}; then 
 		if [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} ]] && cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTUSERKEY]}; then
-			chmod 400 ${CONFIDR}/${bootconf[BOOTUSERKEY]}
+			chmod 400 ${CONFDIR}/${bootconf[BOOTUSERKEY]}
 		else
 			network=2
 			return 2
@@ -2159,25 +2214,22 @@ do_init_log()
 
 do_start_network()
 {
-	if [[ ! -f ${tmpdir}/network ]]; then
-		return 1
-	fi
-	return 0
+	[[ ! -f ${tmpdir}/network ]] && return 1 || return 0
 }
 
 do_read_passphrase()
 {
-	local pp="$1" passphrase key fd_pp
+	local pp="$1" passphrase key fd_pp pid
 	key="$(keyctl request user "${pp}" 2>/dev/null)"
 	if [[ -n "${key}" ]]; then
 		passphrase="$(keyctl print "${key}" 2>/dev/null)"
 	else
 		if [[ "${network}" -eq 1 ]]; then
-			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- ${__fd_user}>/dev/console)
-			IFS= read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && key=1
+			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- {__fd_user}>/dev/console); pid=$!
+			IFS= do_initrd_cmd "Getting ${pp} Passphrase from Boot Servers: " read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && key=1
 		fi
 		if [[ "${key}" != "1" ]]; then
-			exec {fd_pp}< <(query_passphrase "${pp}" {__fd_up}>&1- {__fd_user[0]}<&0- {__fd_user[1]}>/dev/console)
+			exec {fd_pp}< <(query_passphrase "${pp}" "\r${PI}" "${OK}" "${WARN}" "${FAIL}"  {__fd_up}>&1- {__fd_user[0]}<&0- {__fd_user[1]}>/dev/console)
 			! IFS= read -ru${fd_pp} passphrase && do_reset "Query Passphrase Timeout"
 		fi
 		key=$(keyctl add user "${pp}" "${passphrase}" @u 2>/dev/null)
@@ -2189,16 +2241,15 @@ do_read_passphrase()
 
 do_import_storage()
 {
-	local nr i storagedev storagetrim status
+	local nr=1 i=1 status=0 storagedev storagetrim dev
 	if [[ ! -z "${bootconf[STORAGEDEVS]}" ]]; then
-		nr=1 i=0 storagedev storagetrim  status=0
 		for storagedev in ${bootconf[STORAGEDEVS]}; do
-			local ___dev="$(findfs ${storagedev} 2>/dev/null)" 
+			dev="$(findfs ${storagedev} 2>/dev/null)" 
 			if [[ $? -ne 0 ]] ; then
 				do_initrd_log "incorrect storage device entry (${storagedev}) in bootconf"
 			elif [[ ! -b /dev/mapper/${2}${nr} ]]; then
-				[[ ${bootconf[STORAGETRIM]} -eq 1 && "$(lsblk -rD ${___dev} |head -n2 |tail -n1| cut -d " " -f3)" != "0B" ]] && storagetrim="--allow-discards"
-				/sbin/cryptsetup open --type plain ${storagetrim} ${___dev} ${2}${nr} <<<"$3" >/dev/null 2>&1
+				[[ ${bootconf[STORAGETRIM]} -eq 1 && "$(lsblk -rD ${dev} |head -n2 |tail -n1| cut -d " " -f3)" != "0B" ]] && storagetrim="--allow-discards"
+				/sbin/cryptsetup open --type plain ${storagetrim} ${dev} ${2}${nr} <<<"$3" >/dev/null 2>&1
 				if [[ "$?" -eq 0 ]]; then
 					nr=$((nr+1))
 				else
@@ -2212,12 +2263,12 @@ do_import_storage()
 		done 
 		if [[ "${nr}" -eq 1 ]]; then
 			do_initrd_log "no usable storage devices in bootconf, starting with default config"
-			do_cecho -ne "\033[91mNo Usable Storage Devices in Bootconf, Starting with Default Config\033[0m"
+			do_cecho -ne "${YEL}No Usable Storage Devices in Bootconf, Starting with Default Config.${NOR}"
 			return 1
 		else
 			if ! zpool import $1 -f >/dev/null 2>&1; then
 				do_initrd_log "unable to import storage pool $1, starting with default config"
-				do_cecho -ne "\033[91mUnable to Import Storage Pool $1, Starting with Default Config\033[0m"
+				do_cecho -ne "${YEL}Unable to Import Storage Pool $1, Starting with Default Config.${NOR}"
 				return 1
 			fi
 			while [[ "${i}" -le ${bootconf[TIMEOUT]} ]]; do
@@ -2228,7 +2279,7 @@ do_import_storage()
 			done
 			if [[ ! -b ${etcmd} || ! -b ${libmd} ]]; then
 				do_initrd_log "etc or lib zvol not found starting with default config"
-				do_cecho -ne "\033[91mNo lib or etc Zvol Found. Starting with Default Config\033[0m"
+				do_cecho -ne "${YEL}No lib or etc Zvol Found. Starting with Default Config.${NOR}"
 				return 1
 			fi
 			etcsz=$(($(blockdev --getsize64 /dev/zvol/$1/etc) + 1))
@@ -2236,7 +2287,7 @@ do_import_storage()
 		fi
 	else
 		do_initrd_log "no persistent storage devices in bootconf. starting with default config"
-		do_cecho -ne "\033[91mNo Persistent Storage Devices in Bootconf. Starting with Default Config\033[0m"
+		do_cecho -ne "${YEL}No Persistent Storage Devices in Bootconf. Starting with Default Config.${NOR}"
 		return 1
 	fi
 	return ${status}
@@ -2284,7 +2335,10 @@ do_unmount()
 {
 	cd /
 	/bin/umount /sys/firmware/efi/efivars || do_problem "Could not unmount efivarfs"
+	mountpoint -q /boot && /bin/umount /boot
+	mountpoint -q /mnt && /bin/umount /mnt
 }
+
 # [END OF INITRD FUNCTIONS]
 
 # [START OF INTERACTIVE CONTROL FUNCTIONS]
@@ -2578,8 +2632,16 @@ do_parse_cmd()
 	udev)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
+		shift
+		[[ "$1" == "start_network" ]] && CONFDIR=/tmp
 		do_init_conf udev || return 1
-		do_cryptdisksd_udev $@
+		if [[ "$1" == "start_network" ]]; then
+			do_reload_bootconf
+			shift
+			do_udev_start_network $@
+		else
+			do_cryptdisksd_udev $@
+		fi
 		return $#;;
 	stop)
 		[[ ${check} -eq 1 ]] && return 1
@@ -2655,13 +2717,12 @@ trap_term_cryptdisksd_cmd()
 do_cryptdisksd_cmd()
 {
 	trap 'trap_term_cryptdisksd_cmd' SIGINT SIGTERM
-
 	local crypttab=0 confirm=0 smartall=0 smarttest=0 cache="" srv="" add="" fw=0 loc=0 trim=0 ks="" stty_opt="-echo" msg="$1 " s sock pid_socat stdin passphrase _passphrase=x
-	[[ -n "${ks}" ]] && HOME=$(getent passwd "${ks}" |cut -d':' -f6 2>/dev/null)
 
 	# Parse the options to the command and store the nr. of paramters to shift for next command n s. Check provided paramters and innitialize config.
 	do_cmd_parseopt $@
 	s=$?
+	[[ -n "${ks}" ]] && HOME=$(getent passwd "${ks}" |cut -d':' -f6 2>/dev/null)
 	[[ -z "${srv}" ]] && srv=0; [[ -z "${cache}" ]] && cache=-2; [[ -z "${add}" ]] && add=-3; [[ ${add} -eq -1 && ${loc} -eq 1 ]] && add=-2; pp="$(do_eval_pp ${msg#* })"
 	[[ "${command,,}" == "rmkey" && ( $(wc -w <<<"${msg}") -ne 2 || ( ${add} == "-1" && "${srv}" == "0" && -z "${ks}" ) || ${cache} -ge 0 ) ]] && do_echo_use "${command}"
 	[[ "${command,,}" == "putkey" && ( $(wc -w <<<"${msg}") -ne 2 || ( ${loc} -eq 1 && ( ${add} -eq -3 || ${add} -ge 0 ) ) || ( ${add} -ne -3 && "${srv}" == "0" && -z "${ks}" ) ) ]] && do_echo_use "${command}"
@@ -2730,7 +2791,7 @@ do_cryptdisksd_cmd()
 
 do_keysrv_cmd()
 {
-	local cmd="${1,,}" host="$2" pp="$(do_eval_pp "$3")" timeout="$4" key="$5" fd_fifo res
+	local cmd="${1,,}" host="$2" pp="$(do_eval_pp "$3")" timeout="$4" key="$5" fd_fifo res msg
 
 	## For add or put we need a passphrase first.
 	if [[ ${cmd} =~ ^(put|add)$ && ${_passphrase} != "1" ]]; then
@@ -2752,8 +2813,8 @@ do_keysrv_cmd()
 
 	# Get result.
 	exec {fd_fifo}<>${CONFDIR}/${cmd}.$$.res
-	echo "$$" "${cmd}" "${pp}" "${timeout}" >${conf[KEYSRV_FIFO]}
-	[[ ${cmd} =~ ^(put|add)$ ]] && echo "${passphrase}" >${conf[KEYSRV_FIFO]}
+	msg="$$ ${cmd} ${pp} ${timeout}"; [[ ${cmd} =~ ^(put|add)$ ]] && msg+=$'\n'"${passphrase}"
+	echo "${msg}" >${conf[KEYSRV_FIFO]}
 	until ! read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} res || [[ ${res} == . ]]; do
 		if [[ "${cmd}" == "status" ]]; then
 			echo -e "${res}"
