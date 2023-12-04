@@ -43,6 +43,7 @@ do_init_conf()
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
 	[[ -z "${conf[NET_RETRIES]}" ]] && conf[NET_RETRIES]=2
 	[[ -z "${conf[USER_TIEMOUT]}" ]] && conf[USER_TIMEOUT]=10
+	[[ -z "${conf[CMD_TIMEOUT]}" ]] && conf[CMD_TIMEOUT]=3
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" == "keyserver" ]]; then
@@ -581,7 +582,6 @@ do_daemon_check_conf()
 do_daemon_cleanup()
 {
 	local myname="daemon cleanup (${BASHPID}):" _time_start=$(do_timer) tab_crypt="" pp crypt_arr crypt _crypt dev trim time pid mnt_crypt
-	cleanup=$(do_timer ${time_start})
 	do_log debug "${myname} cleanup starting at ${time_active}"
 
 	# Ping systemd.
@@ -682,6 +682,7 @@ do_daemon_cleanup()
 		unset cached_pp[${_pp}]
 	fi done
 
+	cleanup=$(do_timer ${time_start})
 	do_log debug2 "${myname} cleanup took $(do_timer ${_time_start})s, cached passphrases: ${!cached_pp[@]} - active mounts: ${!active_mnt[@]} - waiting mounts: ${!waiting_mnt[@]}"
 }
 
@@ -1363,6 +1364,40 @@ do_control_get_passphrase()
 
 # [BEGIN SHARED FUNCTIONS]
 
+# Executo a command with or without timeout and relay response. Using this will keep main process interuptable and prevents stalls due to hanging commands.
+# Paramter 1 Timeout 0 if no timeout. Parameter 2 Relay response. or not. An associative array wait_cmd is expected to exist to keep pid and name off command.
+do_wait_cmd()
+{
+	local to="$([[ $1 -eq -1 ]] && echo ${conf[CMD_TIMEOUT]} || echo $1)" res="$2" cmd="$3" r=0 tn fd_cmd line _time_start=$(do_timer)
+	shift 3; exec {fd_cmd[0]}< <(${cmd} $@); wait_cmd[${cmd::15}]=$!
+
+	# Set timeout to use with read. Read the first line of output from command and echo it if required.
+	[[ ${to} -ne 0 ]] && line="-t${to}"
+	IFS= read ${line} -ru${fd_cmd[0]} line; r=$?
+	[[ ${res} -ne 0 && ${r} -eq 0 ]] && echo "${line}"
+	# Set new timeout, and evaluate if timeout has already been reached.
+	[[ ${to} -ne 0 ]] && tn=$((to-$(do_timer ${_time_start} |cut -d'.' -f1)+1)) || tn=1
+	[[ ${r} -eq 142 || ${tn} -le 0 ]] && r=142 && kill -SIGKILL ${wait_cmd[${cmd::15}]} >/dev/null 2>&1
+	if [[ ${r} -ne 142 && ${r} -ne 1 ]]; then
+		# Relay response from command if required. Do this in the background so we can again guard the (new) timeout.
+		[[ ${to} -ne 0 ]] && line="-t${tn}" || line=""
+		[[ ${res} -eq 0 ]] && exec {out}>/dev/null || exec {out}>&1
+		exec {fd_cmd[1]}< <(while IFS= read -N2048 -ru${fd_cmd} line; do r=$?; echo -n "${line}" >&${out}; done; echo -n "${line}" >&${out}; echo ${r})
+		# If the command ends successfully the reads exit status will be on the fd, 0 or 1 means normal exit of command. Anything else or a read error below is a timeout.
+		IFS= read ${line} -ru${fd_cmd[1]} line
+		[[ $? -ne 0 || -z "${line}" || ( ${line} -ne 0 && ${line} -ne 1 ) ]] && r=142 && kill -SIGKILL ${wait_cmd[${cmd::15}]} $! >/dev/null 2>&1
+	fi
+	# If the command did not timeout, get its result.
+	if [[ ${r} -ne 142 ]]; then
+		wait ${wait_cmd[${cmd::15}]}; r=$?
+	fi
+
+	# Unset wait_cmd, since we're done and close fds. Return the result.
+	unset wait_cmd[${cmd::15}]
+	[[ -n "${fd_cmd[0]}" ]] && exec {fd_cmd[0]}>&-; [[ -n "${fd_cmd[1]}" ]] && exec {fd_cmd[1]}>&-; [[ -n "${out}" ]] && exec {out}>&-
+	return ${r}
+}
+
 do_xcrypt_fromtab()
 {
 	# Extract the line for the device received in the udev command from the crypttab into crypt_arr array.
@@ -2034,7 +2069,7 @@ EOF
 	fi
 
 	if [[ $recovery = yes ]] ; then
-    	do_initrd_cmd "Mounting boot filesystem." do_mount_boot
+		do_initrd_cmd "Mounting boot filesystem." do_mount_boot
 		do_cecho -e "${PI}${RED}${BOLD}Entering Recovery Mode.${NOR}"
 		setsid cttyhack bash -i
 	fi
@@ -2059,12 +2094,12 @@ EOF
 
 	# Check for default config
 	if [[ -f /default ]]; then
-		do_make_default_config
+		do_initrd_cmd "$([[ -f /boot/storage ]] && echo Loading || echo Creating) Default Config." do_make_default_config
 	else
 	    do_mount_etc
 	fi
 
-	[[ "${network}" -eq 1 ]] && do_initrd_cmd "Stopping Network" do_stop_network && network=0
+	[[ "${network}" -eq 1 ]] && do_initrd_cmd "Stopping Network" do_stop_network
 
 	killall -15 ssh systemd-udevd haveged >/dev/null 2>&1
 
@@ -2160,7 +2195,7 @@ do_parse_fwconf()
 	if [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} ]] && \
 	   cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTSERVERKEYS]} && \
 	   [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} ]] && \
-	   cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTUSERKEY]} &&
+	   cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTUSERKEY]} && \
 	   [[ -n "${bootconf[BOOTUSER]}" && -n "${bootconf[BOOTSERVERS]}" ]]; then
 		chmod 400 ${CONFDIR}/${bootconf[BOOTUSERKEY]}
 	else
@@ -2172,8 +2207,8 @@ do_parse_fwconf()
 
 do_mount_boot()
 {
-    [[ ! -d /boot ]] && mkdir /boot
-    mount /dev/disk/by-label/boot /boot || do_problem "Unable to mount boot"
+	[[ ! -d /boot ]] && mkdir /boot
+	mount /dev/disk/by-label/boot /boot || do_problem "Unable to mount boot"
 }
 
 do_mount_root()
@@ -2185,31 +2220,31 @@ do_mount_root()
 	else 
 		cp ${sysimg} /squashfs/${sysimg##*/}
 	fi
-   	mount -t squashfs /squashfs/${sysimg##*/} ${rootdir} > /dev/null 2>&1 || do_problem "Unable to mount Squashfs root"
+	mount -t squashfs /squashfs/${sysimg##*/} ${rootdir} > /dev/null 2>&1 || do_problem "Unable to mount Squashfs root"
 }
 
 do_mount_etc()
 {
-   [[ ! -d ${etcdir} ]] && mkdir ${etcdir}
-   mount -n ${etcmd} ${etcdir} > /dev/null 2>&1 || do_problem "Unable to Mount etc"
+	[[ ! -d ${etcdir} ]] && mkdir ${etcdir}
+	mount -n ${etcmd} ${etcdir} > /dev/null 2>&1 || do_problem "Unable to Mount etc"
 }
 
 do_init_log()
 {
-   mkdir -p ${logdir}
-   mount -n ${logdev} ${logdir} > /dev/null 2>&1 || do_problem "Unable to Mount log ram drive"
-   ln -s /var/storage/logarchive ${logdir}/archive
-   mkdir ${logdir}/samba
-   chmod 750 ${logdir}/samba
-   mkdir ${logdir}/journal
-   chgrp 10 ${logdir}/journal
-   chmod 2755 ${logdir}/journal
-   mkdir ${logdir}/sa
-   chmod 750 ${logdir}/sa
-   mkdir ${logdir}/clamav
-   chown clamav:clamav ${logdir}/clamav
-   chmod 750 ${logdir}/clamav
-   umount ${logdir}
+	mkdir -p ${logdir}
+	mount -n ${logdev} ${logdir} > /dev/null 2>&1 || do_problem "Unable to Mount log ram drive"
+	ln -s /var/storage/logarchive ${logdir}/archive
+	mkdir ${logdir}/samba
+	chmod 750 ${logdir}/samba
+	mkdir ${logdir}/journal
+	chgrp 10 ${logdir}/journal
+	chmod 2755 ${logdir}/journal
+	mkdir ${logdir}/sa
+	chmod 750 ${logdir}/sa
+	mkdir ${logdir}/clamav
+	chown clamav:clamav ${logdir}/clamav
+	chmod 750 ${logdir}/clamav
+	umount ${logdir}
 }
 
 do_start_network()
@@ -2295,33 +2330,33 @@ do_import_storage()
 
 do_make_default_config()
 {
-    local passphrase=""
-    mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
-    ln -s /etc/bashrc ${rootdir}/root/.bashrc
-    mkdir ${rootdir}/root/quarantine
-    do_initrd_cmd "Mounting boot filesystem." do_mount_boot
-    [[ "${imgtype,,}" =~ ^openssl ]] && passphrase="$(do_read_passphrase "${conf[MASTERPP]}")"
-    if [[ ! -f /boot/storage ]]; then
-        touch /boot/storage
-        truncate -s 1G /boot/storage
-        cryptsetup create --type plain storage /boot/storage <<<"${passphrase}" >/dev/null 2>&1
-        do_initrd_cmd "Creating new storage filesystem on /boot." mkfs.ext4 ${conf[DMDIR]}/storage
-        mount ${conf[DMDIR]}/storage /mnt
-        cp -a ${rootdir}/var/storage/* /mnt
-        cp -a ${rootdir}/etc /mnt
-        cp -a ${rootdir}/var/lib /mnt
+	local passphrase=""
+	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
+	ln -s /etc/bashrc ${rootdir}/root/.bashrc
+	mkdir ${rootdir}/root/quarantine
+	do_mount_boot || do_problem "Unable to Mount Boot."
+	[[ "${imgtype,,}" =~ ^openssl ]] && passphrase="$(do_read_passphrase "${conf[MASTERPP]}")"
+	if [[ ! -f /boot/storage ]]; then
+		touch /boot/storage
+		truncate -s 1G /boot/storage
+		cryptsetup create --type plain storage /boot/storage <<<"${passphrase}" >/dev/null 2>&1 || do_problem "Unable to Create Storage Device."
+		mkfs.ext4 ${conf[DMDIR]}/storage
+		mount ${conf[DMDIR]}/storage /mnt
+		cp -a ${rootdir}/var/storage/* /mnt
+		cp -a ${rootdir}/etc /mnt
+		cp -a ${rootdir}/var/lib /mnt
 		rm -rf /mnt/clamav
-        ssh-keygen -A -f /mnt >/dev/null 2>&1
-        ${rootdir}/bin/systemd-machine-id-setup >/dev/null 2>&1
-        cp /etc/machine-id /mnt/etc/
-        umount /mnt
-    else
-        cryptsetup open --type plain /boot/storage storage <<<"${passphrase}" >/dev/null 2>&1
-    fi
-    do_initrd_cmd "Mounting storage filesystem." mount ${conf[DMDIR]}/storage ${rootdir}/var/storage
-    mount -o bind ${rootdir}/var/storage/etc ${rootdir}/etc
-    mount -o bind ${rootdir}/var/storage/lib ${rootdir}/var/lib
-	mount -t tmpfs tmpfs -o size=2G ${rootdir}/var/lib/clamav
+		ssh-keygen -A -f /mnt >/dev/null 2>&1
+		${rootdir}/bin/systemd-machine-id-setup >/dev/null 2>&1
+		cp /etc/machine-id /mnt/etc/
+		umount /mnt
+	else
+		cryptsetup open --type plain /boot/storage storage <<<"${passphrase}" >/dev/null 2>&1 || do_problem "Unable to Open Storage Device."
+	fi
+	mount ${conf[DMDIR]}/storage ${rootdir}/var/storage || do_problem "Unable to Mount Storage."
+	mount -t tmpfs tmpfs -o size=2G ${rootdir}/var/storage/lib/clamav
+	mount -o bind ${rootdir}/var/storage/etc ${rootdir}/etc
+	mount -o bind ${rootdir}/var/storage/lib ${rootdir}/var/lib
 }
 
 do_stop_network()
