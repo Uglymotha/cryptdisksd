@@ -102,7 +102,7 @@ do_reload_bootconf()
 	unset bootconf crypttab systemdconf
 	declare -gA bootconf
 	# Load the crypttab and systemd conf into memory.
-	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(cat ${conf[CRYPTTAB]} | grep -ve "^\s*#"|tr "\t" " " |tr -s " ")" 
+	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(do_cmd_timeout -1 1 cat ${conf[CRYPTTAB]} | grep -ve "^\s*#"|tr "\t" " " |tr -s " ")" 
 	[[ -s ${CONF} ]] && systemdconf="$(cat ${CONF} |grep -ve "^\s*#")"
 
 	# Source the boot config if necessary.
@@ -195,23 +195,23 @@ trap_term_daemon()
 	do_daemon_check_conf
 	for pid in ${!ctrl[@]}; do if [[ "$(cat /proc/$(echo ${pid} |cut -d ' ' -f 2)/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM $(echo ${pid} |cut -d ' ' -f 2)
-		wait $(echo ${pid} |cut -d ' ' -f 2)
 		do_log debug "${myname} killed control process (PID: $(echo ${pid} |cut -d ' ' -f 2))"
+		wait $(echo ${pid} |cut -d ' ' -f 2)
 	fi done
 	for crypt in ${!mount[@]}; do if [[ "$(cat /proc/${mount[${crypt}]%% *}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${mount[${crypt}]%% *}
-		wait ${mount[${crypt}]%% *}
 		do_log debug "${myname} killed mount process (PID: ${mount[${crypt}]%% *})"
+		wait ${mount[${crypt}]%% *}
 	fi done
 	for pid in ${!pid_getpp[@]}; do if [[ ! -z "${pid_getpp[${pid}]}" && "$(cat /proc/${pid_getpp[${pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${pid_getpp[${pid}]}
-		wait ${pid_getpp[${pid}]}
 		do_log debug "${myname} killed passphrase worker for ${pid} (PID: ${pid_getpp[${pid}]})"
+		wait ${pid_getpp[${pid}]}
 	fi done
 	for pid in ${!pid_putkey[@]}; do if [[ ! -z "${pid_putkey[${pid}]}" && "$(cat /proc/${pid_putkey[${pid}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${pid_putkey[${pid}]}
-		wait ${pid_putkey[${pid}]}
 		do_log debug "${myname} killed putkey worker for ${pid} (PID: ${pid_putkey[${pid}]})"
+		wait ${pid_putkey[${pid}]}
 	fi done
 	if [[ ! -z "${pid_logwriter}" && "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${pid_logwriter}
@@ -271,7 +271,7 @@ systemd_daemon()
 		[[ ${starting} -eq 0 ]] && read_to=$((conf[CLEANUP_TIMER]-(${time_active::-4}-${cleanup::-4})))
 		[[ ${starting} -eq 1 ]] && read_to=${conf[QUEUE_TIMEOUT]}
 		[[ ${starting} -eq 2 ]] && read_to=$((conf[START_TIMEOUT]-${time_active::-4}+conf[QUEUE_TIMEOUT]))
-		read -t${read_to} -ru${fd_fifo} -a msg
+		IFS=' ' read -t${read_to} -ru${fd_fifo} -a msg
 		res=$?
 		
 		# Evaluate the exit status of the message queue read and act accordingly.
@@ -334,7 +334,7 @@ systemd_daemon()
 			[[ ! -z ${mount[${crypt_arr[0]}]} ]] && do_log debug "${myname} ignoring ${msg[1]} for ${crypt_arr[0]}, active worker (PID: ${mount[${crypt_arr[0]}]%% *})";;
 		add|change)
 			[[ -z "${crypt_arr[@]}" ]] && continue
-			key="$(keyctl search @u user "${crypt_arr[2]}" 2>/dev/null)"; passphrase="$(keyctl pipe "${key}" 2>/dev/null)"; dev="$(do_find_dev "${myname}" "${crypt_arr[1]}")"
+			key="$(tkeyctl 1 search @u user "${crypt_arr[2]}")"; passphrase="$(tkeyctl 1 pipe "${key}")"; dev="$(do_find_dev "${myname}" "${crypt_arr[1]}")"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
 			do_log debug "${myname} adding ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${crypt_arr[2]} passphrase"
 			if [[ -n "${active_mnt[${crypt_arr[0]}]}" ]]; then
@@ -342,7 +342,7 @@ systemd_daemon()
 			elif [[ -z "${dev}" ]]; then
 				do_log warning "${myname} ${crypt_arr[1]} not found in ${conf[BLOCKDEVSDIRS]}"
 				[[ start_status -eq 0 ]] && start_status=2
-			elif [[ -n "${key}" || -n "$(keyctl request user "${crypt_arr[2]}" @s 2>/dev/null)" ]]; then
+			elif [[ -n "${key}" || -n "$(tkeyctl 1 request user "${crypt_arr[2]}" @s)" ]]; then
 				do_log info "${myname} found cached ${crypt_arr[2]} passphrase" 
 				[[  -n "${key}" ]] && do_move_passphrase "${crypt_arr[2]}" "${key}" "${passphrase}"
 				[[ ! -z ${mount[${crypt_arr[0]}]} ]] && do_log debug "${myname} ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${mount[${crypt_arr[0]}]%% *})" && continue
@@ -352,7 +352,7 @@ systemd_daemon()
 				do_log debug "${myname} ${dev} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} already on waiting list"
 			else
 				# No worker and no passphrase cached, start new worker. If the crypt is already active the user will not be asked for passphrase.
-				dmsetup info "${crypt_arr[0]}" >/dev/null 2>&1 && user=0
+				tdmsetup 0 info "${crypt_arr[0]}" && user=0
 				do_log debug "${myname} adding ${dev} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} to waiting list for ${crypt_arr[2]} passphrase"
 				waiting_mnt[${crypt_arr[0]}]="${crypt_arr[2]} ${dev} ${crypt_arr[3]} $(do_timer)"
 				if [[ -z "${pid_getpp[${crypt_arr[2]}]}" ]]; then
@@ -375,7 +375,10 @@ systemd_daemon()
 					daemon_mount_crypt "${crypt_arr[0]}" "0" "$(do_find_dev "${myname}" "${crypt_arr[1]}")" "${crypt_arr[2]}" "${crypt_arr[3]}" & mount[${crypt_arr[0]}]="$! $(do_timer)"
 				fi
 			fi done
-			[[ ${msg[2]} -ne 2 && "${msg[3]}" != "0" && -n "${pid_getpp[${msg[1]}]}" && "$(cat /proc/${pid_getpp[${msg[1]}]}/comm 2>/dev/null)" == "${MYNAME}" ]] && kill -SIGTERM ${pid_getpp[${msg[1]}]}
+			if [[ ${msg[2]} -ne 2 && "${msg[4]}" != "0" && -n "${pid_getpp[${msg[1]}]}" && "$(cat /proc/${pid_getpp[${msg[1]}]}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+				kill -SIGTERM ${pid_getpp[${msg[1]}]}
+				do_log debug "${myname} killed passphrase worker (PID: ${pid_getpp[${msg[1]}]})"
+			fi
 			[[ ${msg[2]} -ne 2 ]] && unset pid_getpp[${msg[1]}]
 			[[ ${msg[2]} -eq 1 ]] && cached_pp[${msg[1]}]="$(do_timer),${msg[3]}" || unset cached_pp[${msg[1]}];;
 		*)	
@@ -393,8 +396,8 @@ systemd_daemon()
 do_move_passphrase()
 {
 	do_log info "${myname} found cached $1 passphrase in user keyring"
-	keyctl revoke "$2" 2>/dev/null
-	keyctl unlink "$2" @u 2>/dev/null
+	tkeyctl 0 revoke "$2" 2>/dev/null
+	tkeyctl 0 unlink "$2" @u 2>/dev/null
 	key_clnt "PUT" "$1" "$3" & pid_putkey[$1]=$!
 	do_cache_pp "$1" "-1" "$3" && cached_pp[${1}]="$(do_timer),$([[ -n "${keylife[$1]}" ]] && echo ${keylife[$1]} || echo ${conf[KEYLIFE]})" || unset cached_pp[$1]
 }
@@ -450,7 +453,7 @@ do_daemon_check_conf()
 		cat ${conf[FWBOOTCONF]} | tail -c +5 >${conf[BOOTCONF]} || return 1
 	elif [[ -s ${conf[FWBOOTCONF]} && -s ${conf[BOOTCONF]} ]]; then
 		# Compare the firmware config to confdir.
-		diff="$(cat ${conf[FWBOOTCONF]} | tail -c +5)" _diff="$(cat ${conf[BOOTCONF]})"
+		diff="$(do_cmd_timeout -1 1 cat ${conf[FWBOOTCONF]} |tail -c +5)" _diff="$(do_cmd_timeout -1 1 cat ${conf[BOOTCONF]})"
 		if ! diff -q <(echo "${diff}") <(echo "${_diff}") >/dev/null; then
 			# Configs are different, overwrite confdir on startup firmware config otherwise.
 			[[ ${confok} -eq 0 ]] && confok=1
@@ -513,7 +516,7 @@ do_daemon_check_conf()
 	srvkey="${CONFDIR}/${bootconf[BOOTSERVERKEYS]}"                 usrkey="${CONFDIR}/${bootconf[BOOTUSERKEY]}"
 	if [[ -s ${fwsrvkey} && -s ${srvkey} ]]; then
 		# compare the keys, overwrite if necessary
-		diff="$(cat ${fwsrvkey} | tail -c +5)" _diff="$(cat ${srvkey})"
+		diff="$(do_cmd_timeout -1 1 cat ${fwsrvkey} |do_cmd_timeout -1 1 tail -c +5)" _diff="$(do_cmd_timeout -1 1 cat ${srvkey})"
 		if ! diff -q <(echo "${diff}") <(echo "${_diff}") >/dev/null; then
 			# Configs are different, overwrite firmware config
 			do_log warning "${myname} ${fwsrvkey} and ${srvkey} differ, replacing ${fwsrvkey}"
@@ -622,7 +625,7 @@ do_daemon_cleanup()
 		time="$(do_timer ${waiting_mnt[${crypt}]##* })"
 		if [[ ${time::-4} -ge $([[ ${starting} -eq 0 ]] && echo ${conf[PP_TIMEOUT]} || echo $((conf[START_TIMEOUT]+conf[PP_TIMEOUT]))) ]]; then
 			do_log debug "${myname} cleanup removed waiting mount for ${crypt}: ${waiting_mnt[${crypt}]}"
-			if [[ -n "${pid_getpp[${waiting_mnt[${crypt}]%% *}]}" && "$(cat /proc/${pid_getpp[${waiting_mnt[${crypt}]%% *}]}/comm) 2>/dev/null" == "$MYNAME}" ]]; then
+			if [[ -n "${pid_getpp[${waiting_mnt[${crypt}]%% *}]}" && "$(cat /proc/${pid_getpp[${waiting_mnt[${crypt}]%% *}]}/comm 2>/dev/null)" == "$MYNAME}" ]]; then
 				kill -SIGTERM ${pid_getpp[${waiting_mnt[${crypt}]%% *}]}
 				unset pid_getpp[${waiting_mnt[${crypt}]%% *}]
 				do_log debug "${myname} killed passhprase worker (PID: ${crypt}: ${waiting_mnt[${crypt}]})"
@@ -639,15 +642,15 @@ do_daemon_cleanup()
 	fi done
 	
 	# Check the active crypts and add to active list if not already present.
-	mnt_crypt="$(dmsetup ls --target crypt |cut -f1 |grep -vi "No devices found" 2>/dev/null)"
+	mnt_crypt="$(tdmsetup 1 ls --target crypt |cut -f1 |grep -vi "No devices found")"
 	for crypt in ${mnt_crypt}; do if [[ -z "${active_mnt[${crypt}]}" ]]; then
 		crypt_arr=($(do_xcrypt_fromtab "${crypt}"))
-		[[ "$(lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d" " -f3 2>/dev/null)" == "0B" ]] && trim=0 || trim=1
+		[[ "$(tlsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && trim=0 || trim=1
 		if [[ ! -z "${crypt_arr[@]}" ]]; then
 			dev="${crypt_arr[1]}" pp="$(do_eval_pp "${crypt_arr[2]}")"
 			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		else
-			dev=/dev/"$(dmsetup deps ${crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2 2>/dev/null)"
+			dev=/dev/"$(tdmsetup 1 deps ${crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2 2>/dev/null)"
 			active_mnt[${crypt}]="${dev} - ${trim} $(do_timer)"
 		fi
 		do_log debug "${myname} found ${dev} as ${crypt} TRIM ${trim} passphrase ${pp} adding to active list"
@@ -676,7 +679,7 @@ do_daemon_cleanup()
 	done fi
 
 	# Check Cached Passphrases
-	for _pp in ${!cached_pp[@]}; do if ! keyctl request user "${_pp}" @s >/dev/null 2>&1; then
+	for _pp in ${!cached_pp[@]}; do if ! tkeyctl 0 request user "${_pp}" @s; then
 		do_log info "${myname} ${_pp} passphrase no longer cached"
 		unset cached_pp[${_pp}]
 	fi done
@@ -695,7 +698,7 @@ daemon_mount_crypt()
 {
 	trap 'trap_term_mount' SIGINT SIGTERM
 	local _add_crypt="$1" _pid_ctrl=$2 _add_dev="$3" _add_pp="$(do_eval_pp "$4")" _add_trim="$5" _add_time=$(do_timer) _cmd _pid_cmd _fd_cmd
-	local _crypt_arr _key="$(keyctl request user "$4" @s 2>/dev/null)" _passphrase="" _res=0 _fd_cmd
+	local _crypt_arr _key="$(tkeyctl 1 request user "$4" @s)" _passphrase="" _res=0 _fd_cmd
 	do_log debug "${myname} mounting ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} with ${_add_pp} passphrase"
 
 	if [[ -z "${_key}" ]]; then
@@ -703,26 +706,21 @@ daemon_mount_crypt()
 		do_log error "${myname} passphrase ${_add_pp} not cached!" 
 		echo "passphrase ${_add_pp} 0 0" >${conf[FIFO]} 
 		_res=4
-	elif dmsetup info "${_add_crypt}" >/dev/null 2>&1 & _cmd=dmsetup _pid_cmd=$!; wait ${_pid_cmd}; then
+	elif tdmsetup 0 info "${_add_crypt}"; then
 		# First check if the crypt is already mounted. If so, check if it's on the active list and add if not.	
-		exec {_fd_cmd}< <(lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d" " -f3); _cmd=lsblk _pid_cmd=$!
-		if ! read -t${conf[QUEUE_TIMEOUT]} -ru${_fd_cmd} _fd_cmd; then
-			_res=1
-		elif [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
-			[[ "${_fd_cmd}" == "0B" ]] && _add_trim=0 || _add_trim=1
+		if [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
+			[[ "$(tlsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
 			_crypt_arr=(${active_mnt[${_add_crypt}]})
 			do_log info "${myname} ${_crypt_arr[0]} already active as ${_add_crypt} TRIM ${_crypt_arr[2]} passphrase ${_crypt_arr[1]} since $(do_timer date ${_crypt_arr[3]})"
 			_res=2
 		fi
 	else
-		_passphrase="$(keyctl pipe "${_key}" 2>/dev/null)"
-		exec {_fd_cmd}< <(lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d" " -f3); _cmd=lsblk _pid_cmd=$!
-		read -t${conf[QUEUE_TIMEOUT]} -ru${_fd_cmd} _fd_cmd
-		if [[ $? -ne 0 || "${_fd_cmd}" == "0B" ]]; then
+		_passphrase="$(tkeyctl 1 pipe "${_key}")"
+		if [[ "$(tlsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]]; then
 			do_log info "${myname} requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
 			_add_trim=0 _res=3
 		fi
-		if cryptsetup open --type plain $([[ ${_add_trim} -eq 1 ]] && echo "--allow-discards") "${_add_dev}" "${_add_crypt}" <<<"${_passphrase}" & _cmd=cryptsetup _pid_cmd=$!; wait ${_pid_cmd}; then
+		if tcryptsetup open --type plain $([[ ${_add_trim} -eq 1 ]] && echo "--allow-discards") "${_add_dev}" "${_add_crypt}" <<<"${_passphrase}"; then
 			do_log info "${myname} mounted ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} passphrase ${_add_pp}"
 			do_log debug2 "${myname} mounting ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} passphrase took $(do_timer ${_add_time})s"
 		else
@@ -740,9 +738,9 @@ daemon_unmount_crypt()
 	trap 'trap_term_mount' SIGINT SIGTERM
 	local _time_start=$(do_timer) _del_crypt="$1" _pid_ctrl=$2 _cmd _pid_cmd _crypt_arr=() _res=0
 
-	if dmsetup info "${_del_crypt}" >/dev/null 2>&1 & _cmd=dmsetup _pid_cmd=$!; wait ${_pid_cmd}; then
+	if tdmsetup 0 info "${_del_crypt}"; then
 		_crypt_arr=(${active_mnt[${_del_crypt}]})
-		if { kpartx -d ${conf[DMDIR]}/${_del_crypt} & _cmd=kpartx _pid_cmd=$!; wait ${_pid_cmd}; } && { cryptsetup remove "${_del_crypt}" & _cmd=cryptsetup _pid_cmd=$!; wait ${_pid_cmd}; }; then
+		if tkpartx -d ${conf[DMDIR]}/${_del_crypt} && tcryptsetup remove "${_del_crypt}"; then
 			do_log info "${myname} removed ${_crypt_arr[0]} as ${_del_crypt} TRIM ${_crypt_arr[2]} passphrase ${_crypt_arr[1]} mounted since $(do_timer date ${_crypt_arr[3]})"
 			do_log debug2 "${myname} removing ${_del_crypt} took $(do_timer ${_time_start})s"
 		else
@@ -760,34 +758,34 @@ daemon_unmount_crypt()
 
 trap_term_get_passphrase()
 {
-	do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s - 1 $1 - p ${BASHPID} - pg ${_pid_getpp}"
-	trap 'do_log warning "${myname} unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
+	do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s"
+	trap 'do_log warning "${myname} $1 ${BASHPID} unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 
 	# Kill the workers and exit.
 	if [[ ! -z ${__pid_keyclnt} && "$(cat /proc/${__pid_keyclnt}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${__pid_keyclnt}
+		do_log debug "${myname} killed key client worker (PID: ${__pid_keyclnt})"
 		wait ${__pid_keyclnt}
-		do_log debug2 "${myname} killed key client worker (PID: ${__pid_keyclnt})"
 	fi
 	if [[ ! -z ${__pid_querypp} && "$(cat /proc/${__pid_querypp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${__pid_querypp}
+		do_log debug "${myname} killed query worker (PID: ${__pid_querypp})"
 		wait ${__pid_querypp}
-		do_log debug2 "${myname} killed query worker (PID: ${__pid_querypp})"
 	fi
-	if [[ ! -z ${_pid_getpp} && "$(cat /proc/${_pid_getpp}/comm)" == "${MYNAME}" ]]; then
+	if [[ ! -z ${_pid_getpp} && "$(cat /proc/${_pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${_pid_getpp}
-		do_log debug2 "${myname} killed get worker (PID: ${_pid_getpp})"
+		do_log debug "${myname} killed get worker (PID: ${_pid_getpp})"
 		wait ${_pid_getpp}
 	fi
 	if [[ ! -z "${_pid_logwriter}" && "$(cat /proc/${_pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		do_log debug "${myname} killed log writer (PID: ${_pid_logwriter})"
 		kill -SIGTERM ${_pid_logwriter}
 		wait ${_pid_logwriter}
-		do_log debug2 "${myname} killed log writer (PID: ${_pid_logwriter})"
 	fi
 	if [[ ! -z ${_pid_putkey} && "$(cat /proc/${_pid_putkey}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		[[ $1 -ne 0 ]] && kill -SIGTERM ${_pid_putkey}
+		do_log debug "${myname} killed put key worker (PID: ${_pid_putkey})"
 		wait ${_pid_putkey}
-		do_log debug2 "${myname} killed put key worker (PID: ${_pid_putkey})"
 	fi
 
 	exit $1
@@ -801,7 +799,7 @@ get_passphrase()
 	# and a worker to ask for the passphrase using systemd-ask-password after a few seconds.
 	# We call ourselves first to provide the two workors with a common {__fd_up} to relay the passphrase.
 	# If first parameter is 0 wel will not bother the user for a passphrase.
-	local _pid_getpp=${BASHPID} myname="passphrase:${crypt_arr[2]} (${BASHPID}):" _time_start=$(do_timer) _time_active __pid_keyclnt __pid_querypp
+	local _pid_getpp=${BASHPID} myname="passphrase:${crypt_arr[2]} (${BASHPID}):" _time_start=$(do_timer) _time_active=0 __pid_keyclnt __pid_querypp
 
 	if [[ $# -eq 2 ]]; then
 		# Start key client, wait for a little bit if appropriate, start the query worker and wait.
@@ -809,7 +807,7 @@ get_passphrase()
 		if [[ ${conf[NET_ONLINE]} -eq 0 || "$(NOTIFY_SOCKET= networkctl status | grep "Online state")" =~ (online|partial)$ ]]; then 
 			key_clnt "GET" "${crypt_arr[2]}" & __pid_keyclnt=$!
 			do_log debug "${myname} started key client (PID: ${__pid_keyclnt})"
-			sleept $((2*conf[QUEUE_TIMEOUT]))
+			tsleep $((2*conf[QUEUE_TIMEOUT]))
 		fi
 		if [[ $2 -eq 1 ]]; then
 			query_passphrase ${crypt_arr[2]} & __pid_querypp=$!
@@ -827,14 +825,13 @@ get_passphrase()
 	do_log debug "${myname} started"
 
 	# When starting we will wait max PP_TIMEOUT for the network to come up, or fail.
-	[[ ${conf[NET_ONLINE]} -eq 1 && ${starting} -ne 0 ]] && until [[ "$(NOTIFY_SOCKET= networkctl status | grep "Online state")" =~ (online|partial)$ ]]; do
-		sleept ${conf[QUEUE_TIMEOUT]}
+	[[ ${conf[NET_ONLINE]} -eq 1 && ${starting} -ne 0 ]] && until [[ ${_time_active%%.*} -ge ${conf[PP_TIMEOUT]} || "$(NOTIFY_SOCKET= networkctl status | grep "Online state")" =~ (online|partial)$ ]]; do
+		tsleep ${conf[QUEUE_TIMEOUT]}
 		_time_active=$(do_timer ${_time_start})
-		[[ ${_time_active%%.*} -ge ${conf[PP_TIMEOUT]} || "$(NOTIFY_SOCKET= networkctl status | grep "Online state")" =~ offline$ ]] && break
 	done
 
 	# Start the worker to get the passphrase from the boot servers or from the user. fd 4 will point back to us.
-	exec {_fd_getpp}< <(get_passphrase "$1" 1 {__fd_up}>&1-)
+	exec {_fd_getpp}< <(get_passphrase "$1" 1 {__fd_up}>&1- 1>&2)
 	_pid_getpp=$!
 	do_log debug "${myname} started get passphrase worker (PID: ${_pid_getpp})"
 
@@ -862,28 +859,28 @@ trap_term_control()
 {
 	trap 'do_log warning "${myname} unclean exit after ${_time_start})s"; exit 1;' SIGINT SIGTERM
 
-	[[ "$(cat /proc/${pid_socat}/comm)" == "socat" ]] && kill -SIGTERM ${pid_socat}
+	[[ "$(cat /proc/${pid_socat}/comm 2>/dev/null)" == "socat" ]] && kill -SIGTERM ${pid_socat}
 	[[ $1 -eq 0 ]] && do_log debug2 "${myname} finished after $(do_timer ${_time_start})s"
 	if [[ $1 -ne 0 ]]; then
-		do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s"
+		do_log debug "${myname} terminating after $(do_timer ${_time_start})s"
 		if [[ ! -z "${_socat_PID}" && "$(cat /proc/${_socat_PID}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 			kill -SIGTERM ${_socat_PID}
+			do_log debug "${myname} killed socat coproc (PID: ${_socat_PID})"
 			wait ${_socat_PID}
-			do_log debug2 "${myname} killed socat coproc (PID: ${_socat_PID})"
 		fi
 		if [[ ! -z "${_pid_putkey}" && "$(cat /proc/${_pid_putkey}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 			kill -SIGTERM ${_pid_putkey}
+			do_log debug "${myname} killed putkey worker (PID: ${_pid_putkey})"
 			wait ${_pid_putkey}
-			do_log debug2 "${myname} killed putkey worker (PID: ${_pid_putkey})"
 		fi
-		if [[ ! -z "${_pid_getpp}" ]]; then
+		if [[ ! -z "${_pid_getpp}" && "$(cat /proc/${_pid_getpp}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 			kill -SIGTERM ${_pid_getpp}
+			do_log debug "${myname} killed getpp worker (PID: ${_pid_getpp})"
 			wait ${_pid_getpp}
-			do_log debug2 "${myname} killed getpp worker (PID: ${_pid_getpp})"
 		fi
-		if [[ ! -z "${_pid_logwriter}" &&"$(cat /proc/${_pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+		if [[ ! -z "${_pid_logwriter}" && "$(cat /proc/${_pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 			exec {fd_logwriter}>&-
-			#kill -SIGTERM ${_pid_logwriter}
+			kill -SIGTERM ${_pid_logwriter}
 			wait ${_pid_logwriter}
 		fi
 	fi
@@ -896,14 +893,14 @@ daemon_control_status()
 {
 	# Connect to control socket and blurt status in some form of a pretty fashion.
 	do_control_init "status" "Status Report"
-	local _key _passphrase="" _waiting_mnt=${msg[5]} _tab_crypt __crypt_arr ___crypt_arr _crypt __crypt _pp _trim _time _status
+	local _key _passphrase="" _waiting_mnt=${msg[5]} _tab_crypt __crypt_arr ___crypt_arr _crypt __crypt _pp _trim _time _status _timeout
 
 	# Output the status to the coproc, which will transfer it to stdout of the requestor. First al active mounts.
 	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}ACTIVE SINCE${PS}STATUS${NOR}\r" >&${_socat[1]}
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for _crypt in ${!active_mnt[@]}; do
 		_status="" __crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
-		_pp=${__crypt_arr[1]} _trim="$(lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d " " -f3)"
+		_pp=${__crypt_arr[1]} _trim="$(tlsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d " " -f3)"
 		if [[ "${__crypt_arr[2]}" == "1" ]]; then
 			[[ "${_trim}" == "0B" ]] && _trim="${BOLD}${RED}Off" || _trim="On"
 		elif [[ "${_trim}" != "0B" ]]; then
@@ -942,14 +939,16 @@ daemon_control_status()
 		# Output passphrases.
 		echo -e "${PR}${GREY}${BOLD}PASSPHRASE${PK}VALUE${PE}TIMEOUT${NOR}\r" >&${_socat[1]}
 		for _pp in ${!cached_pp[@]}; do
-			_key="$(keyctl request user "${_pp}" @s 2>/dev/null)"; _passphrase="$(keyctl pipe "${_key}" 2>/dev/null)"
+			_key="$(tkeyctl 1 request user "${_pp}" @s)"; _passphrase="$(tkeyctl 1 pipe "${_key}")"
 			echo -ne "\r${_pp}${PK}" >&${_socat[1]}
 			if [[ -z "${_key}" ]]; then
 				echo -e "${RED}${BOLD}FAIL${NOR}" >&${_socat[1]}
 				echo "passphrase ${_pp} 2 0" >${conf[FIFO]}
 			else
 				echo -ne "\"${_passphrase}\"${PE}" >&${_socat[1]}
-				echo -e "$([[ ${cached_pp[${_pp}]##*,} -eq 0 ]] && echo - || echo "$((${cached_pp[${_pp}]##*,}-$(do_timer ${cached_pp[${_pp}]%%,*} |cut -d'.' -f1)))s")${NOR}" >&${_socat[1]}
+				[[ ${cached_pp[${_pp}]##*,} -eq 0 ]] && _timeout="-" || _timeout=$((${cached_pp[${_pp}]##*,}-$(do_timer ${cached_pp[${_pp}]%%,*} |cut -d'.' -f1)))
+				[[ "${_timeout}" != "-" ]] && _timeout="$((_timeout/86400))d $((_timeout/3600%24))h $((_timeout/60%60))m $((_timeout%60))s"
+				echo -e "${_timeout}${NOR}" >&${_socat[1]}
 			fi
 		done
 		echo >&${_socat[1]}
@@ -976,7 +975,7 @@ daemon_control_smarterase()
 	fi
 
 	[[ ${_smartall} -eq 1 ]] && smartctl -x ${_dev} >&${_socat[1]} 2>&1 || smartctl -A ${_dev} >&${_socat[1]} 2>&1
-	if [[ ${_smarttest} -eq 1 || "${cmd}" == "erase" ]] && dmsetup info "${_crypt}" >/dev/null 2>&1; then
+	if [[ ${_smarttest} -eq 1 || "${cmd}" == "erase" ]] && tdmsetup 0 info "${_crypt}"; then
 		echo -e "\r${RED}${BOLD}${_crypt} Still Active.${NOR}\r" >&${_socat[1]}
 		do_log debug "${myname} ${_crypt} still active"
 		trap_term_control 1
@@ -1004,7 +1003,7 @@ daemon_control_putrmkey()
 {
 	# Remove the key file for the passphrase.
 	[[ "${cmd}" == "rmkey" ]] && do_control_init "rmkey" "Removing Key File" || do_control_init "putkey" "Putting Key File"
-	local _pp="$(do_eval_pp "${msg[3]}")" _res=0; local _keyfile="${conf[FWDIR]}/UglyLinux${_pp}.key-${conf[FWGUID]}" _key="$(keyctl request user "${_pp}" @s 2>/dev/null)" _passphrase _t _s
+	local _pp="$(do_eval_pp "${msg[3]}")" _res=0; local _keyfile="${conf[FWDIR]}/UglyLinux${_pp}.key-${conf[FWGUID]}" _key="$(tkeyctl 1 request user "${_pp}" @s)" _passphrase _t _s
 	if [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 0 ]]; then
 		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
 		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=1
@@ -1045,7 +1044,7 @@ daemon_control_putrmkey()
 	elif [[ ${_cache} -ne -2 ]]; then
 		[[ ${_confirm} -eq 1 ]] && do_control_confirm "Continue ${_s} ${_pp} ${_t} Cache? (Y/n)" "y" || _res="y"
 		if [[ ${_res} == "y" ]]; then
-			if [[ "${cmd}" == "rmkey" ]] && keyctl revoke "${_key}" >dev/null 2>&1 && keyctl unlink "${_key}" @s >/dev/null 2>&1; then
+			if [[ "${cmd}" == "rmkey" ]] && tkeyctl 0 revoke "${_key}" && tkeyctl 0 unlink "${_key}" @s; then
 				echo "passphrase ${_pp} 2 0" >${conf[FIFO]}
 				echo -e "\r${BOLD}${GRN}Removed ${_pp} from Cache.${NOR}\r" >&${_socat[1]}
 				do_log debug "${myname} removed ${_pp} from cache"
@@ -1110,7 +1109,7 @@ daemon_control_del()
 		echo -e "\r${BOLD}${GRN}Removed ${_del_dev##*/} as ${_del_crypt} Using ${_del_pp} TRIM ${_del_trim} Passphrase, Active Since $(do_timer date ${_del_time})${NOR}\r" >&${_socat[1]};;
 	2)
 		do_log debug "${myname} ${_del_crypt} not active"
-		echo -e "\r${BOLD}${YEL}${_del_crypt} not active${NOR}\r" >&${_socat[1]};;
+		echo -e "\r${BOLD}${YEL}${_del_crypt} not Active${NOR}\r" >&${_socat[1]};;
 	*)
 		do_log debug "${myname} failed to remove ${_del_dev##*/} as ${_del_crypt} using ${_del_pp} passphrase trim ${_del_trim}"
 		echo -e "\r${BOLD}${RED}Failed to Remove ${_del_dev##*/} as ${_del_crypt} Using ${_del_pp} Passphrase TRIM ${_del_trim}${NOR}\r" >&${_socat[1]};;
@@ -1232,7 +1231,7 @@ daemon_control_add()
 daemon_control_shell()
 {
 	trap 'trap_term_control' SIGINT SIGTERM 
-	local myname="daemon-shell (${BASHPID}:${pid_ctrl},${_pid_socat}):" _time_start=$(do_timer) _socat_PID _pid_logwriter
+	local myname="daemon-shell (${BASHPID}:${pid_ctrl},${pid_socat}):" _time_start=$(do_timer) _socat_PID _pid_logwriter
 
 	# Start logwriter with dedicated logfile when LOGLEVEL=2 or = 4. When level = 4 redirect out stdout and stderr to the logwriter.
 	if [[ ${FOREGROUND} -ne 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]]; then
@@ -1270,7 +1269,7 @@ do_control_init()
 	[[ "${cmd,,}" =~ ^(add|del|smarterase)$ ]] && _crypt_arr=($(do_xcrypt_fromtab "${msg[3]}"))
 	
 	# Check if socket exists first.
-	if [[ ! -S ${sock_ctrl} ]] && sleept .05 && [[ ! -S ${sock_ctrl} ]]; then
+	if [[ ! -S ${sock_ctrl} ]] && tsleep 0.05 && [[ ! -S ${sock_ctrl} ]]; then
 		do_log error "${myname} ${sock_ctrl} is not a socket, pocket rocket or a locket"
 		trap_term_control 1
 	fi
@@ -1303,10 +1302,10 @@ do_control_confirm()
 do_control_get_passphrase()
 {
 	# Ask to get passphrase from network, if not cached, or query the user for the passphrase.
-	local _key="$(keyctl request user "$1" @s 2>/dev/null)" _pp=$1 _res _fd_getpp _pid_getpp __fd_up __fd_user
+	local _key="$(tkeyctl 1 request user "$1" @s)" _pp=$1 _res _fd_getpp _pid_getpp __fd_up __fd_user
 	if [[ -n "${_key}" ]]; then
 		# Passphrase is still cached, use it and notify the daemon about the crypt.
-		_passphrase="$(keyctl pipe "${_key}" 2>/dev/null)"
+		_passphrase="$(tkeyctl 1 pipe "${_key}")"
 		do_log "${myname} found cached ${_pp} passphrase"
 		echo -e "\r${BOLD}${GRN}Found Cached ${_pp} Passphrase${NOR}\r" >&${_socat[1]}
 	else
@@ -1363,8 +1362,9 @@ do_control_get_passphrase()
 # Paramter 1 Timeout 0 if no timeout. Parameter 2 Relay output of command. or not.
 trap_term_cmd_timeout()
 {
-	[[ -n "${pid[@]}" ]] && kill -SIGKILL ${pid[@]} >/dev/null 2>&1 && do_log debug "${myname} killed ${cmd} (PID: ${pid[1]})"
-	[[ "$1" == "SIGINT" ]] && ${ti[0]} ${ti[@]:1} || ${tt[0]} ${tt[@]:1}
+	[[ -n "${pid[@]}" && "$(cat /proc/${pid[1]}/comm 2>/dev/null)" == "${cmd::15}" ]] && kill -SIGKILL ${pid[@]} >/dev/null 2>&1 && do_log debug "${myname} killed ${cmd} (PID: ${pid[1]})"
+	[[ "$1" == "SIGINT" && -n "${ti[@]}" ]] && ${ti[0]} ${ti[@]:1}
+	[[ "$1" == "SIGTERM" && -n "${tt[@]}" ]] && ${tt[0]} ${tt[@]:1}
 }
 
 do_cmd_timeout()
@@ -1372,10 +1372,10 @@ do_cmd_timeout()
 	local to="$([[ $1 -eq -1 ]] && echo ${conf[CMD_TIMEOUT]} || echo $1)" res="$2" cmd="$3" ti tt pid r in out fd_cmd _time_start=$(do_timer)
 
 	# Redirect input to command, output according to result parameter, save current traps and set new ones, start the command in the background.
-	[[ ${res} -eq 0 ]] && exec {out}>/dev/null || exec {out}>&1
+	[[ ${res} -eq 0 ]] && exec {out}>/dev/null {err}>/dev/null; [[ ${res} -eq 1 ]] && exec {out}>&1 {err}>/dev/null; [[ ${res} -eq 2 ]] && exec {out}>&1 {err}>&1
 	ti="$(trap -p SIGINT)"; ti="${ti%\'*}"; ti="${ti##*\'}"; ti=(${ti}); tt="$(trap -p SIGTERM)"; tt="${tt%\'*}"; tt="${tt##*\'}"; tt=(${tt})
 	trap 'trap_term_cmd_timeout SIGINT' SIGINT; trap 'trap_term_cmd_timeout SIGTERM' SIGTERM
-	shift 3; exec {in}<&0 {fd_cmd}< <(${cmd} $@ 0<&${in} >&${out} & echo $!; wait $!; echo $?); pid[0]=$!
+	shift 3; exec {in}<&0- {stdout}>&1- {stderr}>&2- {fd_cmd}< <(${cmd} $@ 0<&${in}- >&${out}- 2>&${err}- & echo $!; wait $!; echo $?); pid[0]=$!
 	do_log debug2 "${myname} running \"${cmd} ${@}\" (PID: ${pid[0]}) with $([[ ${to} -eq 0 ]] && echo no || echo ${to}s) timeout"
 
 	# Read the PID of the command an error means subshell killed or worse. Set new timeout, and evaluate if timeout has already been reached.
@@ -1390,9 +1390,15 @@ do_cmd_timeout()
 
 	# Restore traps and close fds. Return the result.
 	res=${ti[@]}; trap "${res}" SIGINT; res=${tt[@]}; trap "${res}" SIGTERM
-	exec {fd_cmd}>&- {out}>&-
+	exec {fd_cmd}>&- {out}>&- {err}>&- 0<&${in}- 1>&${stdout}- 2>&${stderr}-
 	return ${r}
 }
+tsleep() { do_cmd_timeout $((${1%%.*}+1)) 0 sleep $@; }
+tkeyctl() { do_cmd_timeout -1 $1 keyctl ${@:2}; }
+tdmsetup() { do_cmd_timeout -1 $1 dmsetup ${@:2}; }
+tlsblk() { do_cmd_timeout -1 1 lsblk ${@}; }
+tcryptsetup() { do_cmd_timeout $((2*conf[CMD_TIMEOUT])) 0 cryptsetup ${@}; }
+tkpartx() { do_cmd_timeout $((2*conf[CMD_TIMEOUT])) 0 kpartx ${@}; }
 
 do_xcrypt_fromtab()
 {
@@ -1484,15 +1490,14 @@ do_write_keyfile()
 
 do_cache_pp()
 {
-	local pp="$1" key="$(keyctl request user "$1" @s 2>/dev/null)" timeout="$2" passphrase="$3"
+	local pp="$1" key="$(tkeyctl 1 request user "$1" @s)" timeout="$2" passphrase="$3"
 	[[ ${timeout} -eq -1 && -n "${keylife[${pp}]}" ]] && timeout=${keylife[${pp}]}
 	[[ ${timeout} -eq -1 ]] && timeout=${conf[KEYLIFE]}
 	
 	# Cache if the passphrase is already cached.
 	if [[ -z "${key}" ]]; then
 		key="$(keyctl padd user "${pp}" @s <<<"${passphrase}" 2>/dev/null)"
-		#[[ ${timeout} -ne 0 ]] && do_cmd_timeout -1 0 keyctl timeout "${key}" "${timeout}"
-		[[ ${timeout} -ne 0 ]] && keyctl timeout "${key}" "${timeout}"
+		[[ ${timeout} -ne 0 ]] && tkeyctl 0 timeout "${key}" "${timeout}"
 	else
 		do_log info "${myname} ${pp} passphrase already cached"
 		return 2
@@ -1513,10 +1518,10 @@ trap_term_query_passphrase()
 
 	if [[ ! -z "${pid_askpp}" && "$(cat /proc/${pid_askpp}/comm 2>/dev/null)" == "systemd-ask-pas" ]]; then
 		kill -SIGKILL ${pid_askpp}
-		do_log debug2 "${myname} killed ask worker (PID: ${pid_askpp})"
+		do_log debug "${myname} killed ask worker (PID: ${pid_askpp})"
 	fi
 
-	do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s"
+	do_log debug "${myname} terminating after $(do_timer ${_time_start})s"
 
 	exit 0
 }
@@ -1617,8 +1622,8 @@ trap_term_systemd_keysrv()
 	do_log warning "${myname} terminating after $(do_timer ${time_start})s"
 	if [[ ! -z "${pid_logwriter}" && "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${pid_logwriter}
+		do_log debug "${myname} killed log writer (PID: ${pid_logwriter})"
 		wait ${pid_logwriter}
-		do_log debug2 "${myname} killed log writer (PID: ${pid_logwriter})"
 	fi
 	rm -f ${CONFDIR}/*.res
 
@@ -1637,12 +1642,12 @@ do_systemd_keysrv()
 	while true; do 
 		do_log debug "${myname} running since $(do_timer date ${time_start})"
 		systemd-notify WATCHDOG=1 WATCHDOG_USEC=$(((2*conf[CLEANUP_TIMER])*1000000))
-		[[ "$(cat ${CONF})" != "${_conf}" ]] && break
+		[[ "$(cat ${CONF})" != "${_conf}" ]] && do_log error "${myname} config changed, terminating" && break
 
 		# Read new message from queue, when add or put also read the passphrase. Clean up expired passphrases before handling command.
 		read -t${conf[CLEANUP_TIMER]} -d$'\r' -ru${fd_fifo} -a msg
 		r=$? res=0
-		for pp in ${!cached_pp[@]}; do if ! keyctl request user "${pp}" @s >/dev/null 2>&1; then
+		for pp in ${!cached_pp[@]}; do if ! tkeyctl 0 request user "${pp}" @s; then
 			do_log info "${myname} ${pp} passphrase has expired"
 			unset cached_pp[${pp}]
 		fi done
@@ -1668,18 +1673,18 @@ do_systemd_keysrv()
 				res=$(do_write_keyfile "${pp}" "${passphrase}" "1")$?
 			fi
 			[[ ${res} -eq 0 ]] && res=$(do_cache_pp "${pp}" "${timeout}" "${passphrase}")$?
-			key="$(keyctl request user ${pp} @s 2>/dev/null)"
+			key="$(tkeyctl 1 request user ${pp} @s)"
 			if [[ ${res} -eq 0 ]]; then
 				cached_pp[${pp}]="$(do_timer),${timeout}"
 				do_keysrv_send "OK"
 			elif [[ ${res} -eq 1 ]]; then
 				do_keysrv_send "NOK"
-			elif [[ ${res} -eq 2 && "$(keyctl pipe "${key}" 2>/dev/null)" == "${passphrase}" ]]; then
+			elif [[ ${res} -eq 2 && "$(tkeyctl 1 pipe "${key}")" == "${passphrase}" ]]; then
 				do_keysrv_send "SAME"
 			elif [[ ${res} -eq 2 ]]; then
 				do_log warning "${myname} ${pp} passphrase differs from cached passphrase, revoking"
-				keyctl revoke "${key}" >/dev/null 2>&1
-				keyctl unlimk "${key}" @s >/dev/null 2>&1
+				tkeyctl revoke 0 "${key}"
+				tkeyctl unlimk 0 "${key}" @s
 				if [[ $(do_cache_pp "${pp}" "${timeout}" "${passphrase}")$? -eq 0 ]]; then
 					cached_pp[${pp}]="$(do_timer),${timeout}"
 					do_keysrv_send "OK"
@@ -1690,11 +1695,11 @@ do_systemd_keysrv()
 			fi;;
 		rem)
 			do_log debug "${myname} removing ${pp} key"
-			key="$(keyctl request user "${pp}" @s 2>/dev/null)"
+			key="$(tkeyctl request user "${pp}" @s)"
 			if [[ -z "${key}" ]]; then
 				do_log warning "${myname} REM of ${pp} passphrase not cached"
 				do_keysrv_send "SAME"
-			elif ! keyctl revoke "${key}" || ! keyctl unlink "${key}" @s; then
+			elif ! tkeyctl 0 revoke "${key}" || ! tkeyctl 0 unlink "${key}" @s; then
 				do_log warning "${myname} REM of ${pp} passphrase from cache failed"
 				do_keysrv_send "NOK"
 			else
@@ -1704,16 +1709,16 @@ do_systemd_keysrv()
 			fi;;
 		get)
 			do_log debug "${myname} getting ${pp} key"
-			key="$(keyctl request user ${pp} @s 2>/dev/null)"
-			[[ ! -z "${key}" ]] && passphrase="$(keyctl pipe ${key} 2>/dev/null)"
+			key="$(tkeyctl 1 request user ${pp} @s)"
+			[[ ! -z "${key}" ]] && passphrase="$(tkeyctl 1 pipe ${key})"
 			if [[ -z "${key}" ]] || ! openssl aes-256-cbc -d -salt -pbkdf2 -in ${conf[KEYDIR]}/${pp}.key -out /dev/null -k "${passphrase}"; then
 				if [[ -z "${key}" ]]; then
 					do_log info "${myname} did not find ${pp} passphrase for ${host}"
 				else
 					#The requstor has probably updated the key since it was loaded, revoke it.
 					do_log warning "${myname} ${pp} passphrase for ${host} does not match stored key file, revoking."
-					keyctl revoke ${key}
-					keyctl unlink ${key} @s
+					tkeyctl 0 revoke ${key}
+					tkeyctl 0 unlink ${key} @s
 				fi
 				do_keysrv_send "NOK"
 			else
@@ -1751,14 +1756,15 @@ do_systemd_keysrv()
 			[[ ${conf[LOGLEVEL]} -ge 1 ]] && do_keysrv_send "${PR}" && for pp in ${!cached_pp[@]}; do
 				timeout=${cached_pp[${pp}]##*,}
 				[[ ${timeout} -ne 0 ]] && timeout=$((timeout-$(do_timer ${cached_pp[${pp}]%%,*} |cut -d'.' -f1)))
-				do_keysrv_send "${BOLD}${pp}:${PK}\"${RED}$([[ ${conf[LOGLEVEL]} -ge 3 ]] && keyctl pipe "$(keyctl request user "${pp}" @s)")${NOR}${BOLD}\"${PE}timeout: ${timeout}s${NOR}"
+				[[ ${timeout} -eq 0 ]] && timeout="-" || timeout="$((timeout/86400))d $((timeout/3600%24))h $((timeout/60%60))m $((timeout%60))s"
+				do_keysrv_send "${BOLD}${pp}${PK}\"${RED}$([[ ${conf[LOGLEVEL]} -ge 3 ]] && tkeyctl 1 pipe "$(keyctl request user "${pp}" @s)")${NOR}${BOLD}\"${PE}timeout: ${timeout}${NOR}"
 			done
 			do_keysrv_send ".";;
 		esac
 		rm -f ${cmd}.${pid}.res
 	done
 
-	systemd-notify --stopping --status="${myname}: Read Error ($?), terminating after $(do_timer ${time_start})s"
+	systemd-notify --status="${myname}: Read Error ($?), terminating after $(do_timer ${time_start})s"
 	trap_term_keysrv
 }
 
@@ -1778,16 +1784,16 @@ trap_term_key_clnt()
 	trap 'do_log warning "${myname} unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 
 	# Reader received SIGTERM or SIGINT. See if we have any workers to kill and remove the queue.
-	do_log debug2 "${myname} terminating after $(do_timer ${_time_start})s"
+	do_log debug "${myname} terminating after $(do_timer ${_time_start})s"
 
 	for ts in ${pid_cmd}; do if [[ "$(cat /proc/${ts}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${ts}
-		do_log debug2 "${myname} killed ${cmd} (PID: ${ts})"
+		do_log debug "${myname} killed ${cmd} (PID: ${ts})"
 		wait ${ts}
 	fi done
 	if [[ -n "${_ssh_PID}" && "$(cat /proc/${_ssh_PID}/comm 2>/dev/null)" == "ssh" ]]; then
 		kill -SIGTERM ${_ssh_PID}
-		do_log debug2 "${myname} killed ssh (PID: ${_ssh_PID})"
+		do_log debug "${myname} killed ssh (PID: ${_ssh_PID})"
 		wait ${_ssh_PID}
 	fi
 	if [[ "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
@@ -1838,7 +1844,7 @@ key_clnt()
 	if [[ ${starting} -ne 0 && ${conf[NET_ONLINE]} -eq 1 ]]; then
 		ts=$(do_timer) ret=0
 		until [[ ${ret} -ge ${conf[START_TIMEOUT]} || "$(NOTIFY_SOCKET= networkctl status | grep "Online state")" =~ (online|partial)$ ]]; do
-			sleept ${conf[QUEUE_TIMEOUT]}
+			tsleep ${conf[QUEUE_TIMEOUT]}
 			ret=$((ret+$(do_timer ${ts} |cut -d. -f1)))
 		done
 	fi
@@ -1860,7 +1866,7 @@ key_clnt()
 		done
 		wait ${pid_cmd}
 		[[ "${cmd}" != "get" || -n "${__fd_user}" ]] && unset srv || ret=$((ret+1))
-		[[ "${cmd}" == "get" && -z "${__fd_user}" && ${ret} -le ${conf[NET_RETRIES]} ]] && sleept $((timeout-$(do_timer ${to} |cut -d'.' -f1)))
+		[[ "${cmd}" == "get" && -z "${__fd_user}" && ${ret} -le ${conf[NET_RETRIES]} ]] && tsleep $((timeout-$(do_timer ${to} |cut -d'.' -f1)))
 	done
 
 	do_log debug2 "${myname} finished after $(do_timer ${_time_start})s"
@@ -2004,7 +2010,6 @@ do_initrd()
 	local etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=1 logdev="/dev/zram0" logdir="${rootdir}/var/log" libmd="/dev/md/lib" libsz=1
 	local sysimg="/sysimg-uglylinux-${version}.sqfs" init=/lib/systemd/systemd recovery="no" fd_logwriter CONFDIR=/tmp starting=0 FOREGROUND=1
 	set -o pipefail
-	stty -echo isig
 	PATH=/bin:/sbin
 
 	do_initrd_log "starting system initialization"
@@ -2041,14 +2046,15 @@ EOF
 	mount -n -t efivarfs efivarfs /sys/firmware/efi/efivars
 	[[ ! -L /dev/fd ]] && ln -s /proc/self/fd /dev/fd
 	exec 1>&- 2>&- {fd}< <(haveged -F 1>&- 2>&- 0<&-) >/dev/null 2>&1
-	exec {fd_logwriter}>/dev/null
 	read -r cmdline < /proc/cmdline
 	for param in $cmdline ; do
 		[[ "${param}" == "recovery" ]] && recovery="yes"
 	done
+	exec {fd_logwriter}>/dev/null
 	do_init_conf initrd
 	[[ ! -d ${CONFDIR} ]] && mkdir -pv ${CONFDIR}
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -pv ${conf[CRYPTDISKSDDIR]}
+	exec {fd_logwriter}>&- {fd_logwriter}>${CONFDIR}/${myname::-1}.log
 
 	do_initrd_cmd "Reading Boot Config from Firmware" do_parse_fwconf && bootconfinfw=1
 
@@ -2072,7 +2078,6 @@ EOF
 	fi
 
 	do_initrd_cmd "Creating zram Drives" do_make_zram_fs "lz4hc,${bootconf[LOGSIZE]},log" "lz4hc,${etcsz},etc" "lz4hc,${libsz},lib"
-	do_init_log
 
 	imgtype="$(file -b ${sysimg})"
 	if [[ "${imgtype,,}" =~ ^openssl ]]; then
@@ -2083,6 +2088,8 @@ EOF
 		do_initrd_log "unsupported system image type"
 		do_problem "Unsupported System Image Type"
 	fi
+
+	do_initrd_cmd "Initializing Log Ram Drive" do_init_log
 
 	# Check for default config
 	if [[ -f /default ]]; then
@@ -2236,7 +2243,6 @@ do_init_log()
 	mkdir ${logdir}/clamav
 	chown clamav:clamav ${logdir}/clamav
 	chmod 750 ${logdir}/clamav
-	umount ${logdir}
 }
 
 do_start_network()
@@ -2247,9 +2253,9 @@ do_start_network()
 do_read_passphrase()
 {
 	local pp="$1" passphrase key fd_pp pid
-	key="$(keyctl request user "${pp}" 2>/dev/null)"
+	key="$(tkeyctl 1 request user "${pp}")"
 	if [[ -n "${key}" ]]; then
-		passphrase="$(keyctl print "${key}" 2>/dev/null)"
+		passphrase="$(tkeyctl 1 print "${key}")"
 	else
 		if [[ "${network}" -eq 1 ]]; then
 			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- {__fd_user}>/dev/console); pid=$!
@@ -2259,8 +2265,8 @@ do_read_passphrase()
 			exec {fd_pp}< <(query_passphrase "${pp}" "${PI}" "${OK}" "${WARN}" "${FAIL}"  {__fd_up}>&1- {__fd_user[0]}<&0- {__fd_user[1]}>/dev/console)
 			! IFS= read -ru${fd_pp} passphrase && do_reset "Query Passphrase Timeout"
 		fi
-		key=$(keyctl add user "${pp}" "${passphrase}" @u 2>/dev/null)
-		keyctl timeout ${_key} $((2*conf[START_TIMEOUT])) 2>/dev/null
+		key="$(tkeyctl 1 add user "${pp}" "${passphrase}" @u)"
+		tkeyctl 0 timeout ${_key} $((2*conf[START_TIMEOUT]))
 	fi
 	echo "${passphrase}"
 	return 0
@@ -2275,8 +2281,8 @@ do_import_storage()
 			if [[ $? -ne 0 ]] ; then
 				do_initrd_log "incorrect storage device entry (${storagedev}) in bootconf"
 			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
-				[[ ${bootconf[STORAGETRIM]} -eq 1 && "$(lsblk -rD ${dev} |head -n2 |tail -n1| cut -d " " -f3)" != "0B" ]] && storagetrim="--allow-discards"
-				/sbin/cryptsetup open --type plain ${storagetrim} ${dev} ${2}${nr} <<<"$3" >/dev/null 2>&1
+				[[ ${bootconf[STORAGETRIM]} -eq 1 && "$(tlsblk -rD ${dev} |head -n2 |tail -n1| cut -d " " -f3)" != "0B" ]] && storagetrim="--allow-discards"
+				tcryptsetup open --type plain ${storagetrim} ${dev} ${2}${nr} <<<"$3"
 				if [[ "$?" -eq 0 ]]; then
 					nr=$((nr+1))
 				else
@@ -2331,7 +2337,7 @@ do_make_default_config()
 	if [[ ! -f /boot/storage ]]; then
 		touch /boot/storage
 		truncate -s 1G /boot/storage
-		cryptsetup create --type plain storage /boot/storage <<<"${passphrase}" >/dev/null 2>&1 || do_problem "Unable to Create Storage Device."
+		tcryptsetup create --type plain storage /boot/storage <<<"${passphrase}" || do_problem "Unable to Create Storage Device."
 		mkfs.ext4 ${conf[DMDIR]}/storage
 		mount ${conf[DMDIR]}/storage /mnt
 		cp -a ${rootdir}/var/storage/* /mnt
@@ -2343,7 +2349,7 @@ do_make_default_config()
 		cp /etc/machine-id /mnt/etc/
 		umount /mnt
 	else
-		cryptsetup open --type plain /boot/storage storage <<<"${passphrase}" >/dev/null 2>&1 || do_problem "Unable to Open Storage Device."
+		tcryptsetup open --type plain /boot/storage storage <<<"${passphrase}" || do_problem "Unable to Open Storage Device."
 	fi
 	mount ${conf[DMDIR]}/storage ${rootdir}/var/storage || do_problem "Unable to Mount Storage."
 	mount -t tmpfs tmpfs -o size=2G ${rootdir}/var/storage/lib/clamav
@@ -2363,9 +2369,10 @@ do_stop_network()
 do_unmount()
 {
 	cd /
-	/bin/umount /sys/firmware/efi/efivars || do_problem "Could not unmount efivarfs"
-	mountpoint -q /boot && /bin/umount /boot
-	mountpoint -q /mnt && /bin/umount /mnt
+	mountpoint -q ${logdir} && { umount ${logdir} || do_problem "Could not unmount ${logdir}"; }
+	mountpoint -q /sys/firmware/efi/efivars && { /bin/umount /sys/firmware/efi/efivars || do_problem "Could not unmount efivarfs"; }
+	mountpoint -q /boot && { /bin/umount /boot || do_problem "Could not unmount /boot"; }
+	mountpoint -q /mnt && { /bin/umount /mnt || do_problem "Could not unmount /mnt"; }
 }
 
 # [END OF INITRD FUNCTIONS]
@@ -2880,6 +2887,7 @@ do_systemd_daemon_start()
 	[[ ( ! "${UID}" -eq 0 || ! ${PPID} -eq 1 ) && ${FOREGROUND} -eq 0 ]] && do_echo_use
 	local myname="daemon (${BASHPID}):" hostname="$(hostname)" pid_daemon=${BASHPID} starting=1 start_status=0 time_start=$(do_timer)
 	local systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal
+	set -mo pipefail
 
 	# Close stdin, fd3 to stdout (systemd journald) for worker processes. Redirect stdout and stderr to /dev/null.
 	# If we are running in foreground mode evrything goes to stdout of the user's terminal. And we wish him or her good luck with that.
@@ -2887,8 +2895,6 @@ do_systemd_daemon_start()
 	[[ ${FOREGROUND} -eq 1 ]] && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
 
 	# Load config and start new key session and link the user key ring to the session key ring. On boot keys will be cached in user key ring. 
-	set -mo pipefail
-	shopt -s expand_aliases
 	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: "
 	keyctl new_session
 	keyctl link @u @s
@@ -2957,7 +2963,7 @@ do_systemd_keysrv_start()
 	chmod 750 ${conf[KEYDIR]}
 
 	# Start Log Writer
-	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- {fd_journal}>&1- 1>/dev/null 2>&1
+	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 0</dev/null {fd_journal}>&1- 1>/dev/null 2>&1
 	[[ ${FOREGROUND} -eq 1 ]] && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
 	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
 	[[ ! -e ${conf[LOGFILE]} ]] && touch ${conf[LOGFILE]}
@@ -3005,8 +3011,6 @@ if [[ "${MYNAME}" == "init" ]]; then
 	exit $?
 elif [[ $# -eq 0 ]]; then
 	# No command line options specified. check if we're started from systemd, start daemon if so.
-	sleept() { do_cmd_timeout 0 0 sleep $@; }
-	alias cat='do_cmd_timeout -1 1 cat' keyctl='do_cmd_timeout -1 1 keyctl' sleep='do_cmd_timeout 0 0 sleep'
 	do_systemd_daemon_start
 	exit 1
 elif [[ "$1" == "keyserver" && $(($#-2)) -le 1 ]]; then
