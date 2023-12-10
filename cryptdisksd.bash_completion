@@ -1,6 +1,7 @@
+#!/bin/bash
 _cryptdisksd_completion()
 {
-	local commands="status add del put rmkey erase smart stop reload shell" cur=${COMP_WORDS[COMP_CWORD]} keys="" crypts="" devs="" cmd=""
+	local commands="status add del putkey rmkey erase smart stop keyserver bootsan reload shell" cur=${COMP_WORDS[COMP_CWORD]} keys="" crypts="" devs="" cmd=""
 	[[ ${COMP_CWORD} -eq 1 ]] && COMPREPLY=( $( compgen -W '-h -d -f ${commands}' -- ${cur}) ) && return
 
 	args=(); COMPREPLY=()
@@ -21,6 +22,25 @@ _cryptdisksd_completion()
 				*)
 					[[ ${args[@]} =~ (^| )-f( |$) ]] && return
 					[[ ${args[@]} =~ (^| )-d( |$) ]] && { COMPREPLY=( $(compgen -W "-f ${commands}" -- ${cur}) ); return; };;
+			esac
+			return;;
+		keyserver)
+			case ${args[1]} in
+				keyserver)
+					COMPREPLY=( $(compgen -W "-f status ${keysrv}" -- ${cur}) )
+					return;;
+				*)
+					return;;
+			esac
+			return;;
+		bootsan)
+			case ${args[1]} in
+				bootsan)
+					COMPREPLY=( $(compgen -W "-t ${keysrv}" -- ${cur}) )
+					return;;
+				-t)
+					COMPREPLY=( $(compgen -W "${keysrv}" -- ${cur}) )
+					return;;
 			esac
 			return;;
 		stop)
@@ -55,7 +75,7 @@ _cryptdisksd_completion()
 					COMPREPLY=( $(compgen -W "-h -a -t ${crypts}" -- ${cur}) ); return;;
 				-h)
 					return;;
-				-a|-t)
+				-a|-t|-x)
 					if [[ ${args[0]} -eq 3 ]]; then
 						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
 					else
@@ -72,11 +92,12 @@ _cryptdisksd_completion()
 			esac
 			return;;
 		add)
-			local opt_c=0 opt_p=0 opt_crypt=0 opt_dev=0 i=0 j=0 compreply=""
+			local opt_c=0 opt_p=0 opt_t=0 opt_crypt=0 opt_dev=0 i=0 j=0 compreply=""
 			for (( i=1;i<${args[0]};i++ )); do
 				case ${args[i]} in
 					-p) [[ ${opt_p} -eq 0 ]] && opt_p=1 || return;;
 					-c) [[ ${opt_c} -eq 0 ]] && opt_c=1 || return;;
+					-t) [[ ${opt_t} -eq 0 ]] && opt_t=1 || return;;
 					*)
 						if [[ ! ${args[i+1]} == "-p" ]]; then
 							j=$((j+1)); [[ ${j} -gt 2 ]] && return
@@ -87,11 +108,14 @@ _cryptdisksd_completion()
 			done
 			case ${args[1]} in
 				add)
-					COMPREPLY=( $(compgen -W "-h -c -p ${crypts} ${devs}" -- ${cur}) ); return;;
+					COMPREPLY=( $(compgen -W "-h -c -t -p ${crypts} ${devs}" -- ${cur}) ); return;;
 				-h)
 					return;;
 				-p)
 					COMPREPLY=( $(compgen -W "${keys}" -- ${cur}) )
+					return;;
+				-t)
+					COMPREPLY=( $(compgen -W "0 1" -- ${cur}) )
 					return;;
 				*)
 					[[ ${opt_c} -eq 0 ]] && compreply+="-c "
@@ -166,17 +190,20 @@ _cryptdisksd_completion()
 					return;;
 			esac
 			return;;
-		put|rmkey)
+		putkey|rmkey)
 			case ${args[1]} in
-				rmkey|put)
-					COMPREPLY=( $(compgen -W "-h -c ${keys}" -- ${cur}) ); return;;
+				rmkey|putkey)
+					COMPREPLY=( $(compgen -W "-h -c -f -s -a -l ${keys}" -- ${cur}) ); return;;
 				-h) return;;
-				-c|-a|-t) 
-					if [[ ${args[0]} -eq 3 ]]; then
+				-c|-a|-t|-l) 
+					if [[ ${args[0]} -eq 7 ]]; then
 						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
 					else
 						COMPREPLY=( $(compgen -W "${keys}" -- ${cur}) )
 					fi
+					return;;
+				-s)
+					COMPREPLY=( $(compgen -W "${bootsrv}" -- ${cur}) )
 					return;;
 				*)
 					if [[ ${args[0]} -eq 2 ]]; then
@@ -225,6 +252,8 @@ _cryptdisksd_init_conf()
 	keys="$(cat ${conf[CRYPTTAB]} |tr -s "\t" |cut -f3 |sort -u)"
 	crypts="$(cat ${conf[CRYPTTAB]} |cut -f1)"
 	devs="$(for dir in ${conf[BLOCKDEVSDIRS]}; do ls ${dir};done |sort -u)"
+	keysrv="$(getent passwd |grep cryptdisksd |cut -d':' -f1)"
+	bootsrv="$(grep "BOOTSERVERS=" /etc/cryptdisks.d/boot.conf 2>/dev/null |cut -d'=' -f2)"
 }
 
 complete -F _cryptdisksd_completion cryptdisksd

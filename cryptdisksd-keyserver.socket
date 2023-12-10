@@ -1,0 +1,17 @@
+[Unit]
+Description=Cryptdisks Keyserver FiFo
+After=systemd-journald.service
+Before=systemd-udevd.service
+DefaultDependencies=no
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Socket]
+ListenFIFO=%h/%N/queue
+PipeSize=1M
+ExecStartPre=/bin/rm -f %h/%N/queue
+ExecStartPost=/bin/bash -c '/bin/chmod 0620 %h/%N/queue; /bin/chmod 770 %h/%N'
+ExecStopPost=/bin/rm -f %h/%N/queue
+
+[Install]
+WantedBy=basic.target

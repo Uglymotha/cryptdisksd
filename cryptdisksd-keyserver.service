@@ -1,0 +1,12 @@
+[Unit]
+Description=Cryptdisks Key Server
+
+[Service]
+Type=notify
+NotifyAccess=all
+EnvironmentFile=-/etc/systemd/cryptdisksd.conf
+ExecStart=/sbin/cryptdisksd keyserver
+ExecReload=/bin/kill -SIGHUP $MAINPID
+ExecStop=/bin/bash -c '/bin/kill -SIGTERM $MAINPID; /bin/waitpid $MAINPID'
+TimeoutStopSec=15
+Restart=on-abnormal

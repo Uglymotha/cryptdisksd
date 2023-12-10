@@ -1,15 +1,15 @@
 [Unit]
 Description=Cryptdisks Daemon
+Wants=systemd-networkd.service
+After=systemd-networkd.service
 
 [Service]
-EnvironmentFile=/etc/systemd/cryptdisksd.conf
-ExecStartPre=/bin/bash -c 'if [[ ! -L /root/.bashrc ]]; then /bin/ln -sf /etc/bashrc /root/.bashrc; fi'
-ExecStart=/usr/sbin/cryptdisksd
-KillMode=process
-TimeoutStopSec=15
-ExecReload=/bin/kill -SIGHUP $MAINPID
-Restart=on-failure
 Type=notify
 NotifyAccess=main
-
-[Install]
+EnvironmentFile=-/etc/systemd/cryptdisksd.conf
+ExecStartPre=/bin/bash -c 'if [[ ! -L /root/.bashrc ]]; then /bin/ln -sf /etc/bashrc /root/.bashrc; fi'
+ExecStart=/usr/sbin/cryptdisksd
+ExecReload=/bin/kill -SIGHUP $MAINPID
+ExecStop=/bin/bash -c '/bin/kill -SIGTERM $MAINPID; /bin/waitpid $MAINPID'
+TimeoutStopSec=15
+Restart=on-abnormal
