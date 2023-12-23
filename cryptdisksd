@@ -131,8 +131,8 @@ do_reload_bootconf()
 # The log write will parse lines from stdin, sent by various workers. The lines are written to log and sent to syslog.
 logwriter()
 {
-	trap 'logger -p daemon.warning "${MYNAME}: ${myname} terminating"; exit 1' SIGINT SIGTERM
 	local myname="logger (${BASHPID}):" _time_start=$(do_timer) lf line
+	trap 'logger -p daemon.warning "${MYNAME}: ${myname} terminating"; exit 1' SIGINT SIGTERM
 
 	# Initialize the log file. Set the correct access rights.
 	if [[ ! -z "$1" ]]; then
@@ -255,9 +255,13 @@ systemd_daemon()
 		time_active=$(do_timer ${time_start}) passphrase="" _jobs="$(echo $(jobs -rp))"
 		for key in ${!job[@]}; do
 			res=$(cut -d'|' -f1 <<<"${key}") cmd=$(cut -d'|' -f2 <<<"${key}") pid=$(cut -d'|' -f3 <<<"${key}")
-			if [[ ! ${_jobs} =~ ^(|.*[[:space:]])${pid}(|[[:space:]].*)$ || "${job[${key}]}" == "-1" ]]; then
-				[[ "${job[${key}]}" == "-1" ]]	&& { kill -SIGKILL ${pid}; do_log warning "${res} worker for ${cmd} (PID: ${pid}) not terminated"; } \
-												|| { wait ${pid}; do_log debug "${res} worker for ${cmd} finished (PID: ${pid}: $?)"; }
+			if [[ ! ${_jobs} =~ ^(|.*[[:space:]])${pid}(|[[:space:]].*)$ ]]; then
+				do_log debug "${res} worker for ${cmd} finished (PID: ${pid}: $?)"
+				wait ${pid}
+				unset job[${key}]
+			elif [[ "${job[${key}]}" == "-1" ]]; then
+				do_log warning "${res} worker for ${cmd} (PID: ${pid}) not terminated"
+				kill -SIGKILL ${pid} 2>/dev/null
 				unset job[${key}]
 			elif   [[ "${res}" == "passphrase" && $(do_timer ${job[${key}]} |cut -d'.' -f1) -gt $([[ ${starting} -eq 0 ]] && echo ${conf[PP_TIMEOUT]} || echo ${conf[START_TIMEOUT]}) ]] \
 				|| [[ "${res}" == "control" && "${cmd}" != "erase" && $(do_timer ${job[${key}]} |cut -d'.' -f1) -gt $((2*conf[START_TIMEOUT])) ]] \
@@ -323,7 +327,7 @@ systemd_daemon()
 			[[ "${msg[2],,}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase; [[ "${msg[2],,}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey 
 			if [[ ${msg[2],,} =~ ^(add|del|putrmkey|status|smarterase|shell)$ ]]; then
 				daemon_control ${msg[2],,} & job[control|${cmd}|$!]="$(do_timer)"
-				do_log debug "started control connection (PID: $!)"
+				do_log debug "started control worker for ${cmd} (PID: $!)"
 			fi;;
 		remove)
 			[[ ! -z "${crypt_arr[@]}" && ! ${!job[@]} =~ mount\|${crypt_arr[0]} ]] && daemon_unmount_crypt "${crypt_arr[0]}" & job[mount|${crypt_arr[0]}|$!]="$(do_timer)"
