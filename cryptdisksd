@@ -231,13 +231,9 @@ trap_hup_daemon()
 
 systemd_daemon()
 {
-	trap 'trap_term_daemon' SIGINT SIGTERM; trap 'trap_hup_daemon' SIGHUP
-
-	# The workers will be started with the following fds:
-	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
-	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
 	local time_active=0.000 cleanup=0.000 msg confok=0 fd_fifo key passphrase read_to res _time_start crypt_arr crypt pid_ctrl pid_socat sock_ctrl cmd dev pid _jobs
 	declare -gA active_mnt waiting_mnt cached_pp job
+	trap 'trap_term_daemon' SIGINT SIGTERM; trap 'trap_hup_daemon' SIGHUP
 
 	# If we are booting up the master passphrase may be in the user keyring, revoke and cache in session keyring.
 	key="$(keyctl search @u user "system:master" 2>/dev/null)" && passphrase="$(keyctl pipe "${key}" 2>/dev/null)" && do_move_passphrase "system:master" "${key}"
@@ -256,8 +252,8 @@ systemd_daemon()
 		for key in ${!job[@]}; do
 			res=$(cut -d'|' -f1 <<<"${key}") cmd=$(cut -d'|' -f2 <<<"${key}") pid=$(cut -d'|' -f3 <<<"${key}")
 			if [[ ! ${_jobs} =~ ^(|.*[[:space:]])${pid}(|[[:space:]].*)$ ]]; then
-				do_log debug "${res} worker for ${cmd} finished (PID: ${pid}: $?)"
 				wait ${pid}
+				do_log debug "${res} worker for ${cmd} finished (PID: ${pid}: $?)"
 				unset job[${key}]
 			elif [[ "${job[${key}]}" == "-1" ]]; then
 				do_log warning "${res} worker for ${cmd} (PID: ${pid}) not terminated"
@@ -315,9 +311,9 @@ systemd_daemon()
 			if [[ "${msg[0],,}" == "unmount" && ${msg[2]} -ne 1 ]]; then
 				do_log debug "removed ${msg[1]} from active mounts"
 				unset active_mnt[${msg[1]}]
-			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 ) ]]; then
+			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
 				do_log debug "added ${msg[1]} to active mounts"
-				active_mnt[${msg[1]}]="${crypt_arr[1]} ${crypt_arr[2]} $([[ ${msg[2]} -eq 3 ]] && echo 0 || echo ${crypt_arr[3]}) $(do_timer)"
+				active_mnt[${msg[1]}]="${crypt_arr[1]} ${crypt_arr[2]} $([[ ${msg[2]} -eq 3 ]] && echo 0 || [[ ${msg[2]} -eq 4 ]] && echo 1 || echo ${crypt_arr[3]}) $(do_timer)"
 			fi
 			[[ ${msg[2]} -eq 1 || ${msg[2]} -eq 4 ]] && start_status=1
 			[[ ${start_status} -eq 0 && ( ( "${msg[0],,}" == "unmount" && ${msg[2]} -eq 2 ) || ${msg[2]} -eq 3 ) ]] && start_status=2
@@ -645,9 +641,9 @@ do_daemon_cleanup()
 
 daemon_mount_crypt()
 {
-	trap 'do_log debug "terminating after $(do_timer ${_add_time})s"; exit 1' SIGINT SIGTERM
 	local myname="daemon mount (${BASHPID})" _add_crypt="$1" _add_dev="$2" _add_pp="$(do_eval_pp "$3")" _add_trim="$4" _add_time=$(do_timer)
 	local _crypt_arr _key="$(t_keyctl 1 request user "${_add_pp}" @s)" _passphrase="" _res=0 _cmd _pid_cmd _fd_cmd
+	trap 'do_log debug "terminating after $(do_timer ${_add_time})s"; exit 1' SIGINT SIGTERM
 	exec {fd_fifo}>&-
 	do_log debug "mounting ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} with ${_add_pp} passphrase"
 
@@ -656,15 +652,7 @@ daemon_mount_crypt()
 		do_log warning "passphrase ${_add_pp} not cached!" 
 		echo "passphrase ${_add_pp} 0 0" >${conf[FIFO]} 
 		_res=4
-	elif t_dmsetup 0 info "${_add_crypt}"; then
-		# First check if the crypt is already mounted. If so, check if it's on the active list and add if not.	
-		if [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
-			[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
-			_crypt_arr=(${active_mnt[${_add_crypt}]})
-			do_log info "${_crypt_arr[0]} already active as ${_add_crypt} TRIM ${_crypt_arr[2]} passphrase ${_crypt_arr[1]} since $(do_timer date ${_crypt_arr[3]})"
-			_res=2
-		fi
-	else
+	elif ! t_dmsetup 0 info "${_add_crypt}"; then
 		if [[ "$(t_lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]]; then
 			do_log warning "requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
 			_add_trim=0 _res=3
@@ -676,6 +664,17 @@ daemon_mount_crypt()
 			do_log error "error mounting ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} after $(do_timer ${_add_time})s"
 			_res=1
 		fi
+		# First check if the crypt is already mounted. If so, check if it's on the active list and add if not.	
+	else
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
+		if [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
+			_crypt_arr=($(echo "${_add_crypt} ${active_mnt[${_add_crypt}]}"))
+			_res=2
+		else
+			_crypt_arr=($(do_xcrypt_fromtab ${_add_crypt}) $(do_timer))
+			_res=$([[ ${_add_trim} -eq ${_crypt_arr[3]} ]] && echo 0 || [[ ${_add_trim} -eq 0 ]] && echo 3 || [[ ${_add_trim} -eq 1 ]] && echo 4)
+		fi
+		do_log info "${_crypt_arr[1]} already active as ${_add_crypt} TRIM ${_add_trim} passphrase ${_crypt_arr[2]} since $(do_timer date ${_crypt_arr[4]})"
 	fi
 
 	echo "mount ${_add_crypt} ${_res}" >${conf[FIFO]} 
@@ -684,25 +683,24 @@ daemon_mount_crypt()
 
 daemon_unmount_crypt()
 {
+	local myname="daemon unmount (${BASHPID})" _time_start=$(do_timer) _cmd _pid_cmd _res=0 _del_crypt=$1
+	local _crypt_arr=($([[ -n "${active_mnt[${_del_crypt}]}" ]] && echo "${_del_crypt} ${active_mnt[${_del_crypt}]}" || echo "$(do_xcrypt_fromtab "${_del_crypt}") $(do_timer)"))
 	trap 'do_log debug "terminating after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
-	local myname="daemon unmount (${BASHPID})" _time_start=$(do_timer) _del_crypt="$1" _cmd _pid_cmd _crypt_arr=() _res=0
 	exec {fd_fifo}>&-
+	do_log debug "unmounting ${_crypt_arr[1]} as ${_crypt_arr[0]} TRIM ${_crypt_arr[3]} with ${_crypt_arr[2]} passphrase"
 
-	if t_dmsetup 0 info "${_del_crypt}"; then
-		_crypt_arr=(${active_mnt[${_del_crypt}]})
-		if t_kpartx -d ${conf[DMDIR]}/${_del_crypt} && t_cryptsetup remove "${_del_crypt}"; then
-			do_log info "removed ${_crypt_arr[0]} as ${_del_crypt} TRIM ${_crypt_arr[2]} passphrase ${_crypt_arr[1]} mounted since $(do_timer date ${_crypt_arr[3]})"
-			do_log debug2 "removing ${_del_crypt} took $(do_timer ${_time_start})s"
-		else
-			do_log warning "failed to remove ${_crypt_arr[0]} as ${_del_crypt} TRIM ${_crypt_arr[2]} passphrase ${_crypt_arr[1]} mounted since $(do_timer date ${_crypt_arr[3]})"
-			_res=1
-		fi
-	else
-		do_log debug "crypt ${_del_crypt} not present, skipping"
+	if ! t_dmsetup 0 info "${_del_crypt}"; then
+		do_log debug "crypt ${_crypt_arr[0]} not present"
 		_res=2
+	elif t_kpartx -d ${conf[DMDIR]}/${_crypt_arr[0]} && t_cryptsetup remove "${_crypt_arr[0]}"; then
+		do_log info "removed ${_crypt_arr[1]} as ${_crypt_arr[0]} TRIM ${_crypt_arr[3]} passphrase ${_crypt_arr[2]} mounted since $(do_timer date ${_crypt_arr[4]})"
+		do_log debug2 "removing ${_crypt_arr[0]} took $(do_timer ${_time_start})s"
+	else
+		do_log warning "failed to remove ${_crypt_arr[1]} as ${_crypt_arr[0]} TRIM ${_crypt_arr[3]} passphrase ${_crypt_arr[2]} mounted since $(do_timer date ${_crypt_arr[4]})"
+		_res=1
 	fi
 
-	echo "unmount ${_del_crypt} ${_res}" >${conf[FIFO]}
+	echo "unmount ${_crypt_arr[0]} ${_res}" >${conf[FIFO]}
 	exit ${_res}
 }
 
@@ -742,13 +740,12 @@ trap_term_get_passphrase()
 
 get_passphrase()
 {
-	trap 'trap_term_get_passphrase' SIGINT SIGTERM
-
 	# We need to get a passphrase. We will start a worker to get the passphrase from the boot servers
 	# and a worker to ask for the passphrase using systemd-ask-password after a few seconds.
 	# We call ourselves first to provide the two workors with a common {__fd_up} to relay the passphrase.
 	# If first parameter is 0 wel will not bother the user for a passphrase.
 	local _pid_getpp=${BASHPID} myname="passphrase:${crypt_arr[2]} (${BASHPID}):" _time_start=$(do_timer) _time_active=0 __pid_keyclnt __pid_querypp
+	trap 'trap_term_get_passphrase' SIGINT SIGTERM
 
 	if [[ $# -eq 2 ]]; then
 		# Start key client, wait for a little bit if appropriate, start the query worker and wait.
@@ -835,13 +832,13 @@ trap_term_control()
 	[[ "$(cat /proc/${pid_socat}/comm 2>/dev/null)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
 	[[ $1 -ne 0 || -z "${_pid_putkey}" ]] && exit $1
 	wait ${_pid_putkey}
-	exit $?
+	exit $!
 }
 
 daemon_control()
 {
-	trap 'trap_term_control' SIGINT SIGTERM
 	local myname="daemon-${cmd} (${BASHPID}:${pid_ctrl}):" _crypt_arr _pid_logwriter _pid_putkey _confirm _crypttab _trim _smartall _smarttest _cache _fw _srv _add _socat
+	trap 'trap_term_control' SIGINT SIGTERM
 
 	# Start logwriter with dedicated logfile when LOGLEVEL=2 or = 4. When level = 4 redirect out stdout and stderr to the logwriter.
 	if [[ ${FOREGROUND} -ne 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]]; then
@@ -1101,6 +1098,7 @@ do_control_del()
 		do_log info "removed ${_del_dev##*/} as ${_del_crypt} using ${_del_pp} passphrase trim ${_del_trim}"
 		echo -e "\r${BOLD}${GRN}Removed ${_del_dev##*/} as ${_del_crypt} Using ${_del_pp} TRIM ${_del_trim} Passphrase, Active Since $(do_timer date ${_del_time})${NOR}\r" >&${_socat[1]};;
 	2)
+		_r=2
 		do_log debug "${_del_crypt} not active"
 		echo -e "\r${BOLD}${YEL}${_del_crypt} not Active${NOR}\r" >&${_socat[1]};;
 	*)
@@ -1465,10 +1463,9 @@ trap_term_query_passphrase()
 
 query_passphrase()
 {
-	trap 'trap_term_query_passphrase' SIGINT SIGTERM
-
 	# Ask for a pssphrase input by user through systemd-ask-password
 	local myname="query:$1 (${BASHPID}):" _time_start=$(do_timer) pp="$1" POS="$2" OK="$3" WARN="$4" FAIL="$5" pid_askpp fd_askpp passphrase _passphrase ppchk
+	trap 'trap_term_query_passphrase' SIGINT SIGTERM
 	do_log debug "query for ${pp} passphrase started"
 
 	do_ask_passphrase "${POS}Enter ${pp} Passphrase: " || trap_term_query_passphrase
@@ -1568,9 +1565,9 @@ trap_term_systemd_keysrv()
 
 do_systemd_keysrv()
 {
-	trap 'trap_term_systemd_keysrv' SIGINT SIGTERM SIGHUP
 	local fd_fifo pid msg cmd pp passphrase _passphrase key timeout _conf="$(cat ${CONF})" res=0 r IFS=' '
 	declare -A cached_pp
+	trap 'trap_term_systemd_keysrv' SIGINT SIGTERM SIGHUP
 	systemd-notify --ready --status="${myname}: Started on $(do_timer date ${time_start})"
 	
 	do_log debug "started on $(do_timer date ${time_start})"
@@ -1709,8 +1706,6 @@ do_keysrv_send()
 trap_term_key_clnt()
 {
 	trap 'do_log warning "unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
-
-	# Reader received SIGTERM or SIGINT. See if we have any workers to kill and remove the queue.
 	do_log debug "terminating after $(do_timer ${_time_start})s"
 
 	for ts in ${pid_cmd}; do if [[ "$(cat /proc/${ts}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
@@ -1733,8 +1728,8 @@ trap_term_key_clnt()
 
 key_clnt()
 {
-	trap 'trap_term_key_clnt' SIGINT SIGTERM
 	local myname="${1,,}:$2 (${BASHPID}):" _time_start=$(do_timer) cmd="${1,,}" pp="$(do_eval_pp "$2")" timeout kto to ts pid_logwriter pid_cmd passphrase="" srv res ret=${BASHPID} _ssh
+	trap 'trap_term_key_clnt' SIGINT SIGTERM
 	[[ "${cmd}" == "add" ]] && kto="$3" passphrase="$4" srv="$5" to="to"; [[ "${cmd}" == "put" ]] && passphrase="$3" srv="$4" to="to"; [[ ! ${cmd} =~ ^(put|add)$ ]] && srv="$3" to="from"
 	[[ ${starting} -eq 0 ]] && timeout=${conf[PP_TIMEOUT]} || timeout=${conf[START_TIMEOUT]}; [[ "${cmd}" == "get" ]] && timeout=$((timeout/(conf[NET_RETRIES]+1)))
 
@@ -2673,8 +2668,8 @@ trap_term_cryptdisksd_cmd()
 
 do_cryptdisksd_cmd()
 {
-	trap 'trap_term_cryptdisksd_cmd' SIGINT SIGTERM
 	local crypttab=0 confirm=0 smartall=0 smarttest=0 cache="" srv="" add="" fw=0 loc=0 trim=0 ks="" stty_opt="-echo" msg="$1 " s sock pid_socat stdin passphrase _passphrase=x
+	trap 'trap_term_cryptdisksd_cmd' SIGINT SIGTERM
 
 	# Parse the options to the command and store the nr. of paramters to shift for next command n s. Check provided paramters and innitialize config.
 	do_cmd_parseopt $@
@@ -2810,7 +2805,8 @@ do_systemd_daemon_start()
 	local systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal
 	set -mo pipefail
 
-	# Close stdin, fd3 to stdout (systemd journald) for worker processes. Redirect stdout and stderr to /dev/null.
+	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
+	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
 	# If we are running in foreground mode evrything goes to stdout of the user's terminal. And we wish him or her good luck with that.
 	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 0</dev/null {fd_journal}>&1- 1>/dev/null 2>&1
 	[[ ${FOREGROUND} -eq 1 ]] && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
