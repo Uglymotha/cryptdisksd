@@ -7,7 +7,7 @@ Before=shutdown.target
 Conflicts=shutdown.target
 
 [Socket]
-ListenFIFO=/run/%N/%N.queue
+ListenFIFO=/run/%N/queue
 DirectoryMode=700
 SocketUser=root
 SocketMode=0600
