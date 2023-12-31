@@ -1720,16 +1720,19 @@ do_term_key_clnt()
 	trap 'do_log warning "unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 	do_log debug "terminating after $(do_timer ${_time_start})s"
 
-	for ts in ${pid_cmd}; do 
-		[[ "$(cat /proc/${ts}/comm 2>/dev/null)" == "${MYNAME}" ]] && do_log debug "killed ${cmd} (PID: ${ts})" && kill -SIGTERM ${ts} 2>/dev/null
+	for ts in ${pid_cmd}; do
+		if [[ "$(cat /proc/${ts}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
+			do_log debug "killed ${cmd} (PID: ${ts})"
+			kill -SIGTERM ${ts} 2>/dev/null
+		fi
 		wait ${ts}
 	done
-	if [[ -n "${_ssh_PID}" ]]; then
-		"$(cat /proc/${_ssh_PID}/comm 2>/dev/null)" == "ssh" ]] && do_log debug "killed ssh (PID: ${_ssh_PID})" && kill -SIGTERM ${_ssh_PID} 2>/dev/null
+	if [[ -n "${_ssh_PID}" && "$(cat /proc/${_ssh_PID}/comm 2>/dev/null)" == "ssh" ]]; then
+		do_log debug "killed ssh (PID: ${_ssh_PID})"
+		kill -SIGTERM ${_ssh_PID} 2>/dev/null
 		wait ${_ssh_PID}
 	fi
 	if [[ "$(cat /proc/${pid_logwriter}/comm 2>/dev/null)" == "${MYNAME}" ]]; then
-		do_log debug2 "stopping log writer (PID: ${pid_logwriter})"
 		exec {fd_logwriter}>&-
 	fi
 
@@ -1797,10 +1800,12 @@ key_clnt()
 	while [[ ${ret} -le ${conf[NET_RETRIES]} ]]; do
 		to=$(do_timer)
 		for ts in ${srv}; do
-			[[ "${cmd}" == "update" ]] && key_clnt "${cmd}" "${ts}" & pid_cmd+="$! "
-			[[ "${cmd}" == "add" ]] && key_clnt "${cmd}" "${pp}" "${kto}" "${passphrase}" "${ts}" & pid_cmd+="$! "
-			[[ "${cmd}" == "put" ]] && key_clnt "${cmd}" "${pp}" "${passphrase}" "${ts}" & pid_cmd+="$! "
-			[[ ! ${cmd} =~ ^(put|add|update)$ ]] && key_clnt "${cmd}" "${pp}" "${ts}" & pid_cmd+="$! "
+			if [[ "${cmd}" == "update" ]]; then key_clnt "${cmd}" "${ts}" &
+			elif [[ "${cmd}" == "add" ]]; then key_clnt "${cmd}" "${pp}" "${kto}" "${passphrase}" "${ts}" &
+			elif [[ "${cmd}" == "put" ]]; then key_clnt "${cmd}" "${pp}" "${passphrase}" "${ts}" &
+			elif [[ ! ${cmd} =~ ^(put|add|update)$ ]]; then key_clnt "${cmd}" "${pp}" "${ts}" &
+			fi
+			pid_cmd+="$! "
 		done
 		wait ${pid_cmd}
 		[[ "${cmd}" != "get" || -n "${__fd_user}" ]] && ret=$((conf[NET_RETRIES]+1)) || ret=$((ret+1))
@@ -2092,6 +2097,7 @@ do_initrd_cmd()
 	result=$?
 	if [[ -n "${pid}" ]]; then
 		kill -SIGTERM ${pid} 2>/dev/null
+		wait ${pid}
 		pid=
 	fi
 	if [[ ${result} -eq 0 ]]; then
