@@ -7,15 +7,14 @@ do_init_conf()
 	local var val _conf _keylife IFS=$'\n'
 	declare -gA conf keyserverconf keylife
 	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME:0:-1}.d"
-	if [[ ! -d "${CONFDIR}" && -z "$1" ]]; then
-		do_log error "${CONFDIR} not found"
-		return 1
-	fi
+	[[ ! -d "${CONFDIR}" ]] && do_log debug "creating ${CONFDIR} and using default config" && mkdir -p ${CONFDIR}
 	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
 	if [[ -s ${CONF} ]]; then for var in $(cat ${CONF} |grep -ve "^\s*#"); do
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
 	done fi
+	[[ -z "${ID}" ]] && conf[DISTNAME]="unknown-linux" || conf[DISTNAME]="${ID}"
+	[[ -z "${VERSION_ID}" ]] && conf[DISTVERSION]="0.00.000" || conf[DISTVERSION]="${VERSION_ID}"
 	[[ -z "${conf[MASTERPP]}" ]] && conf[MASTERPP]=system:master 
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
 	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
@@ -39,7 +38,7 @@ do_init_conf()
 	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
 	[[ -z "${conf[FWDIR]}" ]] && conf[FWDIR]="/sys/firmware/efi/efivars"
 	[[ -z "${conf[FWGUID]}" ]] && conf[FWGUID]="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
-	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${conf[FWDIR]}/UglyLinuxBootCFG-${conf[FWGUID]}"
+	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${conf[FWDIR]}/${conf[DISTNAME]}BootCFG-${conf[FWGUID]}"
 	[[ -z "${conf[BOOTCONF]}" ]] && conf[BOOTCONF]="${CONFDIR}/boot.conf"
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
 	[[ -z "${conf[NET_RETRIES]}" ]] && conf[NET_RETRIES]=2
@@ -115,7 +114,6 @@ do_reload_bootconf()
 	# Load the crypttab and systemd conf into memory.
 	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")" 
 	[[ -s ${CONF} ]] && systemdconf="$(t_cat ${CONF} |grep -ve "^\s*#")"
-
 	# Source the boot config if necessary.
 	if [[ -s ${conf[BOOTCONF]} ]]; then for var in $(t_cat ${conf[BOOTCONF]} |grep -ve "^\s*#"); do
 		val=${var#*=} var=${var%%=*}
@@ -448,7 +446,7 @@ do_daemon_check_conf()
 					do_log warning "${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} differ, replacing ${conf[FWBOOTCONF]}"
 					[[ -e ${conf[FWBOOTCONF]} ]] && t_chattr -i ${conf[FWBOOTCONF]}
 					t_printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]} || do_log error "error creating ${conf[FWBOOTCONF]}"
-					t_efivar -n ${conf[FWGUID]}-UglyLinuxBootCFG -w -f ${conf[BOOTCONF]} || do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
+					t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}BootCFG -w -f ${conf[BOOTCONF]} || do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
 					t_chattr +i ${conf[FWBOOTCONF]}
 				else
 					do_log warning "${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} differ, replacing ${conf[BOOTCONF]}"
@@ -466,7 +464,7 @@ do_daemon_check_conf()
 		do_log info "no firmware config, copying from ${conf[BOOTCONF]}"
 		[[ -e ${conf[FWBOOTCONF]} ]] && t_chattr -i ${conf[FWBOOTCONF]}
 		t_printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]} || do_log error "error creating ${conf[FWBOOTCONF]}"
-		t_efivar -n ${conf[FWGUID]}-UglyLinuxBootCFG -w -f ${conf[BOOTCONF]} || do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
+		t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}BootCFG -w -f ${conf[BOOTCONF]} || do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
 		t_chattr +i ${conf[FWBOOTCONF]}
 	else
 		# No bootconf at all.
@@ -501,8 +499,8 @@ do_daemon_check_conf()
 
 	# Check the bootserver and user keys if present.
 	[[ -z ${bootconf[BOOTSERVERS]} ]] && return
-	fwsrvvar="${conf[FWGUID]}-UglyLinux${bootconf[BOOTSERVERKEYS]}" fwsrvkey="${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]}"
-	fwusrvar="${conf[FWGUID]}-UglyLinux${bootconf[BOOTUSERKEY]}"    fwusrkey="${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]}"
+	fwsrvvar="${conf[FWGUID]}-${conf[DISTNAME]}${bootconf[BOOTSERVERKEYS]}" fwsrvkey="${conf[FWDIR]}/${conf[DISTNAME]}${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]}"
+	fwusrvar="${conf[FWGUID]}-${conf[DISTNAME]}${bootconf[BOOTUSERKEY]}"    fwusrkey="${conf[FWDIR]}/${conf[DISTNAME]}${bootconf[BOOTUSERKEY]}-${conf[FWGUID]}"
 	srvkey="${CONFDIR}/${bootconf[BOOTSERVERKEYS]}"                 usrkey="${CONFDIR}/${bootconf[BOOTUSERKEY]}"
 	if [[ -s ${fwsrvkey} && -s ${srvkey} ]]; then
 		# compare the keys, overwrite if necessary
@@ -673,7 +671,10 @@ daemon_mount_crypt()
 			_res=2
 		else
 			_crypt_arr=($(do_xcrypt_fromtab ${_add_crypt}) $(do_timer))
-			_res=$([[ ${_add_trim} -eq ${_crypt_arr[3]} ]] && echo 0 || [[ ${_add_trim} -eq 0 ]] && echo 3 || [[ ${_add_trim} -eq 1 ]] && echo 4)
+			if [[ ${_add_trim} -ne ${_crypt_arr[3]} ]]; then
+				[[ ${_add_trim} -eq 0 ]] && _res=3
+				[[ ${_add_trim} -eq 1 ]] && _res=4
+			fi
 		fi
 		do_log info "${_crypt_arr[1]} already active as ${_add_crypt} TRIM ${_add_trim} passphrase ${_crypt_arr[2]} since $(do_timer date ${_crypt_arr[4]})"
 	fi
@@ -995,7 +996,7 @@ do_control_smarterase()
 do_control_putrmkey()
 {
 	# Remove the key file for the passphrase.
-	local _pp="$(do_eval_pp "${msg[3]}")" _res=0; local _keyfile="${conf[FWDIR]}/UglyLinux${_pp}.key-${conf[FWGUID]}" _key="$(t_keyctl 1 request user "${_pp}" @s)" _passphrase _t _s
+	local _pp="$(do_eval_pp "${msg[3]}")" _res=0; local _keyfile="${conf[FWDIR]}/${conf[DISTNAME]}${_pp}.key-${conf[FWGUID]}" _key="$(t_keyctl 1 request user "${_pp}" @s)" _passphrase _t _s
 	if [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 0 && ${_upd} -eq 0 ]]; then
 		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
 		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=1
@@ -1301,7 +1302,10 @@ do_control_get_passphrase()
 # Paramter 1 Timeout 0 if no timeout. Parameter 2 Relay output of command. or not.
 do_term_cmd_timeout()
 {
-	[[ -n "${pid[@]}" && "$(cat /proc/${pid[1]}/comm 2>/dev/null)" == "${cmd::15}" ]] && kill -SIGKILL ${pid[@]} 2>&1 && do_log debug "killed ${cmd} (PID: ${pid[1]})"
+	if [[ -n "${pid[@]}" && ( "$(cat /proc/${pid[0]}/comm 2>/dev/null)" == "${cmd::15}" || "$(cat /proc/${pid[1]}/comm 2>/dev/null)" == "${cmd::15}" ) ]]; then
+		kill -SIGTERM ${pid[@]} 2>&1
+		do_log debug "killed ${cmd} (PID: ${pid[1]})"
+	fi
 	[[ "$1" == "SIGINT" && -n "${ti[@]}" ]] && ${ti[0]} ${ti[@]:1}
 	[[ "$1" == "SIGTERM" && -n "${tt[@]}" ]] && ${tt[0]} ${tt[@]:1}
 }
@@ -1398,15 +1402,15 @@ do_check_passphrase()
 {
 	# Check the received passphrase against the stored key in firmware. Write key if it doesn't exist.
 	local pp="$1" passphrase="$2" rmkey="$3"
-	if [ -s ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]} ]; then
-		if  $(t_cat ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]} |tail -c +5 |t_openssl aes-256-cbc -d -salt -pbkdf2 -in - -out /dev/null); then
+	if [ -s ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]} ]; then
+		if  $(t_cat ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]} |tail -c +5 |t_openssl aes-256-cbc -d -salt -pbkdf2 -in - -out /dev/null); then
 			do_log debug "passphrase check ok"
 			return 0
 		else
 			do_log debug "passphrase check fail"
 			if [[ "${rmkey}" == "rmkey" ]]; then 
-				t_chattr -i ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]}
-				t_rm -f ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]} || do_log error "unable te remove ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]}"
+				t_chattr -i ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]}
+				t_rm -f ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]} || do_log error "unable te remove ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]}"
 			fi
 			return 1
 		fi
@@ -1424,12 +1428,12 @@ do_write_keyfile()
 	if ! head -c256 /dev/urandom |t_openssl aes-256-cbc -e -salt -pbkdf2 -in - -out ${keydir}/${pp}.key; then
 		res=1
 		do_log error "error creating ${keydir}/${pp}.key"
-	elif [[ -z "${srv}" ]] && ! t_efivar -n ${conf[FWGUID]}-UglyLinux${pp}.key -w -f ${conf[CRYPTDISKSDDIR]}/${pp}.key; then
+	elif [[ -z "${srv}" ]] && ! t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}${pp}.key -w -f ${conf[CRYPTDISKSDDIR]}/${pp}.key; then
 		res=2
-		do_log error "error writing ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]}"
+		do_log error "error writing ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]}"
 	else
 		res=0
-		do_log debug "wrote $([[ -z "${srv}" ]] && echo ${conf[FWDIR]}/UglyLinux${pp}.key-${conf[FWGUID]} || echo ${keydir}/${pp}.key)"
+		do_log debug "wrote $([[ -z "${srv}" ]] && echo ${conf[FWDIR]}/${conf[DISTNAME]}${pp}.key-${conf[FWGUID]} || echo ${keydir}/${pp}.key)"
 	fi
 	[[ -z "${srv}" ]] && t_rm -f ${conf[CRYPTDISKSDDIR]}/${pp}.key
 	return ${res}
@@ -1954,17 +1958,15 @@ do_reset()
 do_initrd()
 {
 	trap 'do_problem "Caught SIGINT or SIGTERM"' SIGINT SIGTERM
-	local myname="uglylinux-boot:" version="$(< /version)" network=0 bootconfinfw=0 rootdir="/.root" logdev="/dev/zram0" keeplog=0 pid
-	local etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=1 logdev="/dev/zram0" logdir="${rootdir}/var/log" libmd="/dev/md/lib" libsz=1
-	local sysimg="/sysimg-uglylinux-${version}.sqfs" init=/lib/systemd/systemd recovery="no" fd_logwriter CONFDIR=/tmp starting=0 FOREGROUND=1
+	local myname="${conf[DISTNAME]}-boot:" version="${conf[DISTVERSION]}" network=0 bootconfinfw=0 rootdir="/.root" logdev="/dev/zram0" keeplog=0 pid pid_logwriter
+	local MYNAME=init etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=1 logdev="/dev/zram0" logdir="${rootdir}/var/log" libmd="/dev/md/lib" libsz=1
+	local sysimg="/sysimg-${conf[DISTNAME]}-${conf[DISTVERSION]}.sqfs" init=/lib/systemd/systemd recovery="no" fd_logwriter starting=0 FOREGROUND=1
 	set -o pipefail
 	PATH=/bin:/sbin
-	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
-	do_init_conf initrd
 
 	do_initrd_log "starting system initialization"
 	do_cecho -e "${PI}${BOLD}Starting System Initialization.${NOR}"
-	cat >/usr/lib/udev/rules.d/99-uglylinux-net.rules << 'EOF'
+	cat >/usr/lib/udev/rules.d/99-net.rules << 'EOF'
 ACTION!="change", GOTO="net_end"
 SUBSYSTEM!="net", GOTO="net_end"
 
@@ -1978,7 +1980,7 @@ EOF
 if [ -f /etc/bashrc ]; then
         . /etc/bashrc
 fi
-alias reboot="umount /mnt; umount /boot; echo b >/proc/sysrq-trigger"
+alias reboot="cd /; umount /mnt; umount /boot; echo b >/proc/sysrq-trigger"
 EOF
 
 	cat > /.bash_profile << 'EOF'
@@ -1999,11 +2001,11 @@ EOF
 	read -r cmdline < /proc/cmdline
 	for param in $cmdline ; do
 		[[ "${param}" == "recovery" ]] && recovery="yes"
-		[[ "${param}" == "keeplog" ]] && keeplog=1
+		[[ "${param}" =~ ^keeplog ]] && keeplog=1 && conf[LOGLEVEL]="${param%%*=}"
 	done
-	[[ ! -d ${CONFDIR} ]] && mkdir -pv ${CONFDIR}
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -pv ${conf[CRYPTDISKSDDIR]}
-	exec {fd_logwriter}>&- {fd_logwriter}>${CONFDIR}/${myname::-1}.log
+	conf[LOGFILE]=${CONFDIR}/${myname::-1}.log
+	exec {fd_logwriter}>&-; exec {fd_logwriter}> >(logwriter); pid_logwriter=$!
 
 	do_initrd_cmd "Reading Boot Config from Firmware" do_parse_fwconf && bootconfinfw=1
 
@@ -2044,14 +2046,16 @@ EOF
 	if [[ -f /default ]]; then
 		do_initrd_cmd "$([[ -f /boot/storage ]] && echo Loading || echo Creating) Default Config." do_make_default_config
 	else
-	    do_mount_etc
+		do_mount_etc
 	fi
 
 	[[ "${network}" -eq 1 ]] && do_initrd_cmd "Stopping Network" do_stop_network
 
-	killall -15 ssh systemd-udevd haveged >/dev/null 2>&1
+	killall -SIGTERM ssh systemd-udevd haveged >/dev/null 2>&1
+	kill -SIGTERM ${pid_logwriter}
+	exec {fd_logwriter}>&-
 
-	[[ ${keeplog} -eq 1 ]] && cp ${CONFDIR}/${myname::-1}.log ${logdir}/ && chmod 600 ${logdir}/${myname::-1}.log
+	[[ ${keeplog} -eq 1 ]] && cp ${CONFDIR}/${myname::-1}.log ${logdir}/
 	do_unmount
 
 	echo 3 >/proc/sys/vm/drop_caches
@@ -2061,7 +2065,7 @@ EOF
 
 do_initrd_log()
 {
-	echo "uglylinux-boot: $@" >dev/kmsg
+	echo "${myname}: $@" >dev/kmsg
 }
 
 do_cecho()
@@ -2087,9 +2091,7 @@ do_initrd_cmd()
 	${cmd} $@
 	result=$?
 	if [[ -n "${pid}" ]]; then
-		do_log "BLABLABLA ${pid}"
 		kill -SIGTERM ${pid} 2>/dev/null
-		wait ${pid}
 		pid=
 	fi
 	if [[ ${result} -eq 0 ]]; then
@@ -2134,9 +2136,8 @@ do_make_zram_fs()
 do_parse_fwconf()
 {
 	if [[ ! -s ${conf[FWBOOTCONF]} ]]; then
-		do_cecho -ne "${RED}${conf[FWBOOTCONF]} Not found. Starting with default config.${NOR}"
+		do_cecho -ne "${RED}  Not Found! Starting with default config.${NOR}"
 		touch /default
-		return 1
 	fi
 	cat ${conf[FWBOOTCONF]} |tail -c +5 |grep -ve "^\s*#" >${conf[BOOTCONF]}
 	do_reload_bootconf
@@ -2146,17 +2147,17 @@ do_parse_fwconf()
 	[[ "${bootconf[STORAGETRIM]}" == "1" || "${bootconf[STORAGETRIM],,}" == "y" || "${bootconf[STORAGETRIM],,}" == "yes" ]] && bootconf[STORAGETRIM]=1 || bootconf[STORAGETRIM]=0
 	[[ -z "${bootconf[TIMEOUT]}" ]] && bootconf[TIMEOUT]=30
 	[[ -z "${bootconf[LOGSIZE]}" ]] && bootconf[LOGSIZE]=2GiB
-	if [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} ]] && \
-	   cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTSERVERKEYS]} && \
-	   [[ -s ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} ]] && \
-	   cat ${conf[FWDIR]}/UglyLinux${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTUSERKEY]} && \
+	if [[ -s ${conf[FWDIR]}/${conf[DISTNAME]}${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} ]] && \
+	   cat ${conf[FWDIR]}/${conf[DISTNAME]}${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTSERVERKEYS]} && \
+	   [[ -s ${conf[FWDIR]}/${conf[DISTNAME]}${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} ]] && \
+	   cat ${conf[FWDIR]}/${conf[DISTNAME]}${bootconf[BOOTUSERKEY]}-${conf[FWGUID]} |tail -c +5 >${CONFDIR}/${bootconf[BOOTUSERKEY]} && \
 	   [[ -n "${bootconf[BOOTUSER]}" && -n "${bootconf[BOOTSERVERS]}" ]]; then
 		chmod 400 ${CONFDIR}/${bootconf[BOOTUSERKEY]}
 	else
 		network=2
-		return 1
+		return 2
 	fi
-	return 0
+	return $([[ ! -e /default ]])$?
 }
 
 do_mount_boot()
@@ -2280,7 +2281,8 @@ do_import_storage()
 
 do_make_default_config()
 {
-	local passphrase=""
+	local passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d ' ' -f4)"
+	[[ ${size} -lt $((1024*1024)) ]] && do_problem "Need at Least 1GB Free Space on /boot"
 	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
 	ln -s /etc/bashrc ${rootdir}/root/.bashrc
 	mkdir ${rootdir}/root/quarantine
@@ -2288,7 +2290,7 @@ do_make_default_config()
 	[[ "${imgtype,,}" =~ ^openssl ]] && passphrase="$(do_read_passphrase "${conf[MASTERPP]}")"
 	if [[ ! -f /boot/storage ]]; then
 		touch /boot/storage
-		truncate -s 1G /boot/storage
+		truncate -s $((size/2*1024)) /boot/storage
 		t_cryptsetup create --type plain storage /boot/storage <<<"${passphrase}" || do_problem "Unable to Create Storage Device."
 		mkfs.ext4 ${conf[DMDIR]}/storage
 		mount ${conf[DMDIR]}/storage /mnt
@@ -2311,7 +2313,7 @@ do_make_default_config()
 
 do_stop_network()
 {
-	local interface="$(</tmp/network)"
+	local interface="$(</${CONFDIR}/network)"
 	ip route del default via ${bootconf[GATEWAY]} >/dev/null 2>&1 || return 1
 	ip addr del ${bootconf[IP]} dev ${interface} >/dev/null 2>&1 || return 1
 	ip link set dev ${interface} down >/dev/null 2>&1 || return 1
@@ -2323,7 +2325,7 @@ do_unmount()
 	cd /
 	mountpoint -q ${logdir} && { umount ${logdir} || do_problem "Could not unmount ${logdir}"; }
 	mountpoint -q /sys/firmware/efi/efivars && { /bin/umount /sys/firmware/efi/efivars || do_problem "Could not unmount efivarfs"; }
-	mountpoint -q /boot && { /bin/umount /boot || do_problem "Could not unmount /boot"; }
+	[[ ! -e /default ]] && mountpoint -q /boot && { /bin/umount /boot || do_problem "Could not unmount /boot"; }
 	mountpoint -q /mnt && { /bin/umount /mnt || do_problem "Could not unmount /mnt"; }
 }
 
@@ -2631,7 +2633,6 @@ do_parse_cmd()
 		[[ ${check} -eq 1 ]] && return 1
 		do_cmd_parseopt $@
 		shift
-		[[ "$1" == "start_network" ]] && CONFDIR=/tmp
 		do_init_conf udev || return 1
 		if [[ "$1" == "start_network" ]]; then
 			do_reload_bootconf
@@ -2966,12 +2967,21 @@ do_cryptdisksd_cli()
 	done
 }
 
+if [[ -e /etc/os-release ]]; then 
+	. /etc/os-release
+else
+	. /usr/lib/os-release
+fi
 MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin
-[[ ! -z "${LC_NUMERIC}" ]] && unset LC_NUMERIC
+unset LC_NUMERIC=
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
 if [[ "${MYNAME}" == "init" ]]; then
-	MYNAME=$(basename $(readlink $0))
+	set -a
+	MYNAME=$(basename $(readlink $0)) CONFIDR=""
+	[[ -e /etc/initrd-release ]] && . /etc/initrd-release
+	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
+	do_init_conf initrd || do_problem "Failed to Load Config!"
 	do_initrd
 	exit $?
 elif [[ $# -eq 0 ]]; then
