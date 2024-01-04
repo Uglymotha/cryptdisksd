@@ -1,18 +1,13 @@
 [Unit]
 Description=Cryptdisks Key Server
-After=%N.socket
-BindsTo=%N.socket
 
 [Service]
+EnvironmentFile=/etc/systemd/cryptdisksd.conf
+EnvironmentFile=-%h/.config/systemd/%N.conf
+ExecStart=/sbin/cryptdisksd keyserver
 Type=notify
 NotifyAccess=all
-EnvironmentFile=-/etc/systemd/cryptdisksd.conf
-ExecStart=/usr/sbin/cryptdisksd keyserver
-ExecStartPost=/bin/bash -c '/bin/chgrp bootsan %h/%N/queue; /bin/chmod 0620 %h/%N/queue; /bin/chmod 770 %h/%N'
-ExecReload=/bin/kill -SIGHUP $MAINPID
 ExecStop=/bin/bash -c '/bin/kill -SIGTERM $MAINPID; /bin/waitpid $MAINPID'
 TimeoutStopSec=15
-Restart=on-abnormal
-
-[Install]
-WantedBy=basic.target
+ExecReload=/bin/kill -SIGHUP $MAINPID
+Restart=on-failure
