@@ -160,6 +160,7 @@ logwriter()
 {
 	local myname="logger:${BASHPID}:" _time_start=$(do_timer) ll line
 	trap 'logger -p daemon.warning "${MYNAME}: ${myname} terminating"; exit 1' SIGINT SIGTERM
+	exec 1>/dev/null 2>&1
 
 	# Initialize the log file. Set the correct access rights.
 	[[ -n "$1" ]] && conf[LOGFILE]="${conf[LOGDIR]}/$1"
@@ -172,11 +173,12 @@ logwriter()
 
 	# Prepend every line recieved with date and time and write to logfile.
 	while read -r ll line; do
+	echo "${ll} - ${line}" >> /tmp/kut
 		local _date="$(date '+%d-%m %H:%M:%S.%3N')"
 		if [[ ( "${ll}" == "debug" && ${conf[LOGLEVEL]} -ge 1 ) || ( "${ll}" == "debug2" && ${conf[LOGLEVEL]} -ge 3 ) ]]; then
 			echo "${_date} ${hostname} ${line}" >>${conf[LOGFILE]}
 		elif [[ ! ${ll} =~ debug ]]; then
-			logger -p daemon.${ll} "${MYNAME}: ${line}"
+			[[ ${ll} =~ ^(info|warning|error)$ ]] && logger -p daemon.${ll} "${MYNAME}: ${line}"
 			[[ ${conf[LOGLEVEL]} -ge 1 ]] && echo "${_date} ${hostname} ${line}" >>${conf[LOGFILE]}
 		fi
 	done
@@ -270,7 +272,7 @@ do_hup_daemon()
 do_systemd_daemon()
 {
 	local time_active=0 cleanup=0 msg fd_fifo key read_to res _time_start crypt_arr crypt
-	local pid_ctrl pid_socat sock_ctrl cmd pp dev pid _jobs to _time_active
+	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to _time_active
 	declare -gA active_mnt waiting_mnt cached_pp job
 	trap 'do_term_daemon' SIGINT SIGTERM; trap 'do_hup_daemon' SIGHUP
 
@@ -349,8 +351,10 @@ do_systemd_daemon()
 		do_log debug "processing \"${msg[@]}\"" 
 		_time_start=$(do_timer)
 
-		if [[ ${msg[0],,} =~ ^(mount|unmount|add|change|remove)$ ]]; then
-			crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")) && pp="$(do_eval_pp ${crypt_arr[2]})" || pp="-"
+		if [[ ${msg[0],,} =~ ^(mount|unmount|add|change|remove)$ ]] && crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
+			pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}")"
+		else
+			pp="-"
 		fi
 		case ${msg[0],,} in
 		reload)
@@ -362,7 +366,12 @@ do_systemd_daemon()
 			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
 				do_log debug "added ${msg[1]} to active mounts"
 				[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
-				active_mnt[${msg[1]}]="${crypt_arr[1]} ${pp} ${crypt_arr[3]} $(do_timer)"
+				if [[ ${pp} == "-" ]]; then
+					dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2)"
+					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && crypt_arr[3]=0 \
+																											   || crypt_arr[3]=1
+				fi
+				active_mnt[${msg[1]}]="${dev} ${pp} ${crypt_arr[3]} $(do_timer)"
 			fi
 			if [[ ${msg[2]} -eq 1 || ${msg[2]} -eq 5 ]]; then
 				start_status=1
@@ -424,10 +433,8 @@ do_systemd_daemon()
 		passphrase)
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
-			if [[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]]; then
-				msg[3]=${keylife[${pp}]}
-				[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
-			fi
+			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
+			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
 				crypt_arr=($(do_xcrypt_fromtab "${crypt}")); crypt_arr[4]="$(do_timer ${waiting_mnt[${crypt}]##* })s"
 				unset waiting_mnt[${crypt}]
@@ -808,9 +815,14 @@ daemon_unmount_crypt()
 	trap 'do_log debug "terminating after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
 	if [[ -n "${active_mnt[${_del_crypt}]}" ]]; then
 		_crypt_arr=(${_del_crypt} ${active_mnt[${_del_crypt}]})
-	else
-		_crypt_arr=($(do_xcrypt_fromtab "${_del_crypt}") $(do_timer))
+	elif ! _crypt_arr=($(do_xcrypt_fromtab "${_del_crypt}")); then
+		_crypt_arr[0]="${_del_crypt}"
+		_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2 2>/dev/null)"
+		_crypt_arr[2]="-"
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _crypt_arr[3]=0 \
+																									   || _crypt_arr[4]=1
 	fi
+	[[ -z "${_crypt_arr[4]}" ]] && _crypt_arr[4]="$(do_timer)"
 	do_log debug "unmounting ${_crypt_arr[1]} as ${_crypt_arr[0]} TRIM ${_crypt_arr[3]} with ${_crypt_arr[2]} passphrase"
 
 	if ! t_dmsetup 0 info "${_del_crypt}"; then
@@ -833,7 +845,7 @@ daemon_unmount_crypt()
 do_term_get_passphrase()
 {
 	do_log debug "terminating after $(do_timer ${_time_start})s"
-	trap 'do_log warning "$1 ${BASHPID} unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
+	trap 'do_log warning "unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 
 	# Kill the workers and exit.
 	if [[ ! -z ${__pid_keyclnt} && "$(</proc/${__pid_keyclnt}/comm)" == "${MYNAME}" ]]; then
@@ -1011,7 +1023,7 @@ daemon_control()
 		_confirm=${msg[$((${#msg[@]}-6))]} _add=${msg[$((${#msg[@]}-5))]} _cache=${msg[$((${#msg[@]}-4))]}
 		_fw=${msg[$((${#msg[@]}-3))]} _upd=${msg[$((${#msg[@]}-2))]} _srv=$(IFS=','; echo ${msg[$((${#msg[@]}-1))]})
 	elif [[ ${cmd} =~ ^(add|del)$ ]]; then
-		_trim=${msg[$((${#msg[@]}-3))]} _confirm=${msg[$((${#msg[@]}-2))]} _crypttab=${msg[$((${#msg[@]}-1))]} 
+		_confirm=${msg[$((${#msg[@]}-2))]} _crypttab=${msg[$((${#msg[@]}-1))]} 
 	fi
 	do_log debug "control ${cmd} connection initialized (PID: ${_socat_PID} SOCK:${sock_ctrl})"
 	do_control_$1
@@ -1042,8 +1054,8 @@ do_control_status()
 		elif [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ && -z "${bootconf[STORAGEPP]}" ]]; then
 			_pp="${conf[SYSTEMPP]}"
 		fi
-		[[ "${__crypt_arr[1]}" == "-" ]] && _status="${YEL}Online (U)" || _status="${GRN}Online (M)"
-		echo -e "${PR}${_crypt}${PD}${__crypt_arr[0]##*/}${PE}${_trim}${NOR}${PP}${_pp}${PT}$(do_timer date ${__crypt_arr[3]})${PS}${_status}${NOR}\r" >&${_socat[1]}
+		[[ "${__crypt_arr[1]}" == "-" ]] && _status="${YEL}Online" || _status="${GRN}Online"
+		echo -e "${PR}${_crypt}${PD}${__crypt_arr[0]}${PE}${_trim}${NOR}${PP}${_pp##${conf[PP_PREFIX]}:}${PT}$(do_timer date ${__crypt_arr[3]})${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
 
 	# Output all unmounted and waiting crypts.
@@ -1059,7 +1071,8 @@ do_control_status()
 		[[ ! "${_status}" == "${YEL}Waiting" ]] && _status="${RED}Offline" _time="-"
 		__crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
 		[[ "${__crypt_arr[3]}" == "1" ]] && _trim="On" || _trim="Off"
-		echo -e "${PR}${_crypt}${PD}${__crypt_arr[1]##*/}${PE}${_trim}${PP}$(do_eval_pp ${__crypt_arr[2]})${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
+		pp="$(do_eval_pp ${__crypt_arr[2]})"
+		echo -e "${PR}${_crypt}${PD}${__crypt_arr[1]}${PE}${_trim}${PP}${_pp##${conf[PP_PREFIX]}:}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
 	echo >&${_socat[1]}
 
@@ -1266,24 +1279,36 @@ do_control_putrmkey()
 do_control_del()
 {
 	local _del_crypt="${_crypt_arr[0]}" _del_dev="${_crypt_arr[1]}" _del_pp="${_crypt_arr[2]}" _del_trim="${_crypt_arr[3]}"
-	local  _del_time="$(do_timer)" _res="" _r=0
+	local _del_time="$(do_timer)" _res="" _r=0
 
 	# Check if specified crypt is on tab, user decides to exit or continue if it's not.
 	if [[ -z "${_crypt_arr[@]}" ]]; then
-		_del_crypt=${msg[5]} _del_dev="?" _del_pp="?" _del_trim="?"
-		do_log debug "${msg[5]} not found in Crypttab.${NOR}"
+		_del_crypt=${msg[3]}
+		if [[ -n "${active_mnt[${_del_crypt}]}" ]]; then
+			_crypt_arr=(${_del_crypt} ${active_mnt[${_del_crypt}]})
+		else
+			_crypt_arr[0]="${_del_crypt}"
+			_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2)"
+			_crypt_arr[2]="-"
+			[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _crypt_arr[3]=0 \
+																										   || _crypt_arr[3]=1
+		fi
+		[[ -z "${_crypt_arr[4]}" ]] && _crypt_arr[4]="$(do_timer)"
+		_del_dev="${_crypt_arr[1]}" _del_pp="${_crypt_arr[2]}" _del_trim="${_crypt_arr[3]}" _del_time="${_crypt_arr[4]}"
+		do_log debug "${_del_crypt} not found in Crypttab.${NOR}"
 		echo -ne "\r${RED}${BOLD}${_del_crypt} not on Crypttab, Continue Removing (y/N)? ${NOR}" >&${_socat[1]}
 		read -t${conf[USER_TIMEOUT]} -rsn1 -u ${_socat[0]} _res
 		[[ "${_res,,}" == $'\r' || -z "${_res,,}" ]] && _res=n
 		echo -e "${BOLD}${_res}${NOR}\r" >&${_socat[1]}
 		[[ "${_res,,}" != "y" ]] && do_term_control 0
-		_crypttab=0 _del_dev="-" _del_pp="-"
+		_crypttab=0
 	fi
-	daemon_unmount_crypt "${_del_crypt}" & wait $!; _r=$?
-	case ${_r} in
+	
+	daemon_unmount_crypt "${_del_crypt}" &
+	wait $!; _r=$?; case ${_r} in
 	0)
 		do_log info "removed ${_del_dev##*/} as ${_del_crypt} using ${_del_pp} passphrase trim ${_del_trim}"
-		echo -e "\r${BOLD}${GRN}Removed ${_del_dev##*/} as ${_del_crypt} Using ${_del_pp} TRIM ${_del_trim} Passphrase,"\
+		echo -e "\r${BOLD}${GRN}Removed ${_del_dev##*/} as ${_del_crypt} TRIM ${_del_trim} Using ${_del_pp} Passphrase,"\
 				"Active Since $(do_timer date ${_del_time})${NOR}\r" >&${_socat[1]};;
 	2)
 		_r=2
@@ -1304,7 +1329,7 @@ do_control_del()
 	fi
 	if [[ ${_crypttab} -eq 1 && "${_res}" == "y" ]]; then
 		sed -i "/^${_del_crypt}\\s/D" ${conf[CRYPTTAB]}
-		kill -SIGHUP ${pid_daemon}
+		echo "reload" >${conf[FIFO]}
 		do_log warning "removed ${_del_dev##*/} as ${_del_crypt} using ${_del_pp} passphrase trim ${_del_trim} from crypttab"
 		echo -e "\r${BOLD}${GRN}Removed ${_del_dev} as ${_del_crypt} TRIM ${_del_trim} from Crypttab${NOR}\r" >&${_socat[1]}
 	fi
@@ -1314,8 +1339,8 @@ do_control_del()
 
 do_control_add()
 {
-	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[5]}" _add_dev2="${msg[6]}" _add_pp="$(do_eval_pp "${msg[7]}")"
-	local  _add_trim="${msg[8]}" _res="" _r=0 __crypt_arr _passphrase=""
+	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[3]}" _add_dev2="${msg[4]}" _add_pp="$(do_eval_pp "${msg[5]}")"
+	local _add_trim="${msg[6]}" _res="" _r=0 __crypt_arr _passphrase=""
 	
 	if [[ ${_crypttab} -eq 0 && -z "${_crypt_arr[0]}" ]]; then
 		# Recevied add with just a crypt, if it's not on the tab exit.
@@ -1341,7 +1366,7 @@ do_control_add()
 						 "${conf[BLOCKDEVDIRS]}'.${NOR}\r" >&${_socat[1]}
 				do_term_control 1
 			fi
-			[[ ! -z "${_add_dev}" ]] && _add_crypt="${msg[6]}" || _add_crypt="${msg[5]}" _add_dev="${_add_dev2}"
+			[[ -n "${_add_dev}" ]] && _add_crypt="${msg[4]}" || _add_crypt="${msg[3]}" _add_dev="${_add_dev2}"
 		else
 			# Crypt and/or dev already on tab.
 			if [[ ! -z "${_crypt_arr[@]}" && ! -z "${__crypt_arr[@]}" ]]; then
@@ -1375,8 +1400,25 @@ do_control_add()
 		do_term_control 1
 	else
 		echo "passphrase ${_add_pp} 1 -1" >${conf[FIFO]}
-		daemon_mount_crypt "${_add_crypt}" "${_add_dev}" "${_add_pp}" "${_add_trim}" & wait $!; _r=$?
-		case ${_r} in
+		if [[ ${_crypttab} -eq 1 ]]; then
+			# Crypt should be added to tab, ask for confirmation if necessary (error or request by user).
+			if [[ ${_r} -ne 0 || ${_confirm} -eq 1 ]]; then
+				do_control_confirm \
+						"Add ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase to Crypttab? (Y/n)"
+			else
+				_res="y"
+			fi
+			if [[ "${_res}" == "y" ]]; then
+				# Add the crypt to the crypttab and send reload signal to daemon.
+				echo -e "${_add_crypt}\t${_add_dev##*/}\t${_add_pp}\t${_add_trim}" >>${conf[CRYPTTAB]}
+				do_log warning "added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} trim ${_add_trim} to crypttab"
+				echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim}"\
+						"to Crypttab.${NOR}\r" >&${_socat[1]}
+				echo "reload" >${conf[FIFO]}
+			fi
+		fi
+		daemon_mount_crypt "${_add_crypt}" "${_add_dev}" "${_add_pp}" "${_add_trim}" &
+		wait $!; _r=$?; case ${_r} in
 		0)
 			do_log info "mounted ${_add_dev} as ${_add_crypt} trim ${_add_trim} using ${_add_pp} passphrase"
 			echo -e "\r${BOLD}${GRN}Mounted ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using"\
@@ -1400,22 +1442,6 @@ do_control_add()
 		esac
 	fi
 
-	if [[ ${_crypttab} -eq 1 ]]; then
-		# Crypt should be added to tab, ask for confirmation if necessary (error or request by user).
-		if [[ ${_r} -ne 0 || ${_confirm} -eq 1 ]]; then
-			do_control_confirm "Add ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase to Crypttab? (Y/n)"
-		else
-			_res="y"
-		fi
-		if [[ "${_res}" == "y" ]]; then
-			# Add the crypt to the crypttab and send reload signal to daemon.
-			echo -e "${_add_crypt}\t${_add_dev##*/}\t${_add_pp}\t${_add_trim}" >>${conf[CRYPTTAB]}
-			do_log warning "added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} trim ${_add_trim} to crypttab"
-			echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim}"\
-					"to Crypttab.${NOR}\r" >&${_socat[1]}
-			kill -SIGHUP ${pid_daemon}
-		fi
-	fi
 	[[ ${_confirm} -eq 1 ]] && do_control_confirm "Put ${_add_pp} Passphrase to Bootservers? (Y/n)" y || _res="y"
 	if [[ "${_res}" == "y" ]]; then
 		echo -e "\r${BOLD}${GRN}Putting ${_add_pp} Key to Boot Servers: ${GREY}${bootconf[BOOTSERVERS]}.${NOR}\r" >&${_socat[1]}
@@ -1608,6 +1634,7 @@ do_xcrypt_fromtab()
 			return 0
 		fi
 	done
+	return 1
 }
 
 do_eval_pp()
@@ -1995,7 +2022,7 @@ do_term_key_clnt()
 		kill -SIGTERM ${_ssh_PID} 2>/dev/null
 		wait ${_ssh_PID}
 	fi
-	if [[ "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${pid_logwrtier}" && "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
 		exec {fd_logwriter}>&-
 	fi
 
@@ -2859,8 +2886,8 @@ do_parse_opt()
 			[[ -n "${timeout}" ]] && do_echo_use "${command}"
 			timeout=-1
 		elif [[ "${command}" == "add" ]]; then
-			[[ ${add_trim} -eq 1 ]] && do_echo_use "${command}"
-			add_trim=1
+			[[ ${trim} -eq 1 ]] && do_echo_use "${command}"
+			trim=1
 		elif [[ "${command}" == "del" ]]; then
 			[[  ${crypttab} -eq 1 ]] && do_echo_use "${command}"
 			crypttab=1
@@ -3027,7 +3054,7 @@ do_term_cryptdisksd_cmd()
 	# Kill socat coproc if still active and remove the socket if still present. Restore stdin to the tty.
 	if [[ ! -z "${pid_socat}" && "$(</proc/${pid_socat}/comm)" == "socat" ]]; then
 		kill -SIGTERM ${pid_socat} 2>/dev/null
-		[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rKilled ${pid_socat}"
+		[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -ne "\n\rKilled ${pid_socat}"
 	fi
 	if [[ -n "${sock}" && -e ${conf[CRYPTDISKSDDIR]}/${sock} ]]; then
 		rm -f ${conf[CRYPTDISKSDDIR]}/${sock} && echo -e "\rRemoved ${conf[CRYPTDISKSDDIR]}/${sock}\r\n"
@@ -3043,7 +3070,7 @@ do_term_cryptdisksd_cmd()
 do_cryptdisksd_cmd()
 {
 	local crypttab=0 confirm=0 smartall=0 smarttest=0 cache="" srv="" add="" fw=0 loc=0 upd=0 trim=0 ks=""
-	local  stty_opt="-echo" msg="$1 " s sock pid_socat stdin passphrase _passphrase=x fd_logwriter fd_journal
+	local  stty_opt="-echo" msg="$1 " s sock pid_socat stdin pp passphrase _passphrase=x fd_logwriter fd_journal
 	trap 'do_term_cryptdisksd_cmd' SIGINT SIGTERM
 	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
 
@@ -3056,7 +3083,6 @@ do_cryptdisksd_cmd()
 	[[ -z "${cache}" ]] && cache=-2
 	[[ -z "${add}" ]] && add=-3
 	[[ ${add} -eq -1 && ${loc} -eq 1 ]] && add=-2
-	pp="$(do_eval_pp ${msg#* })"
 	if [[ "${command,,}" == "rmkey" && (	 $(wc -w <<<"${msg}") -ne 2 \
 									  || ( ${add} == "-1" && "${srv}" == "0" && -z "${ks}" ) \
 									  || ${cache} -ge 0 ) ]]; then
@@ -3102,7 +3128,7 @@ do_cryptdisksd_cmd()
 		if [[ ( ${crypttab} -eq 1 && $(wc -w <<<"${msg}") -ne 3 ) || ( ${crypttab} -eq 0 && $(wc -w <<<"${msg}") -ne 2 ) ]]; then
 			do_echo_use "${command}"
 		fi
-		msg+="${pp} ${trim} ${confirm} ${crypttab}";;
+		msg+="$(do_eval_pp "${pp}") ${trim} ${confirm} ${crypttab}";;
 	del)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
 		msg+="${confirm} ${crypttab}";;
@@ -3123,7 +3149,7 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" == "shell" ]] && stty_opt+=" raw -isig"
 	[[ ! ${command,,} =~ ^(smart|shell)$ ]] && stty_opt+=" raw isig"
 	stty ${stty_opt}
-	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rRequesting \"$@\" \"${msg}\" from ${MYNAME} - ${conf[FIFO]}\r"
+	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
 	echo "control ${BASHPID},${pid_socat} ${msg}" >${conf[FIFO]}
 	echo -ne "\r"
 	wait ${pid_socat}
@@ -3340,8 +3366,8 @@ MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC=
 
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\033[2J"
-PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[57C\033[s" PP="\033[u\033[6C\033[s"
-PT="\033[u\033[22C\033[s" PS="\033[u\033[21C" PK="\r\033[36C\033[s"
+PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[63C\033[s" PP="\033[u\033[5C\033[s"
+PT="\033[u\033[20C\033[s" PS="\033[u\033[20C" PK="\r\033[36C\033[s"
 OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
