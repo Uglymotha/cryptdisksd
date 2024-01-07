@@ -8,7 +8,7 @@ do_init_conf()
 	declare -gA conf keyserverconf keylife
 	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
 	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
-	if [[ -n "$1" && ! -d "${CONFDIR}" ]]; then
+	if [[ "$1" == "daemon" && ! -d "${CONFDIR}" ]]; then
 		do_log warning "creating ${CONFDIR} and using default config"
 		mkdir -p ${CONFDIR}
 	fi
@@ -57,7 +57,7 @@ do_init_conf()
 	if [[ "$1" != "daemon" ]]; then
 		[[ -z "${KEYSRVDIR}" ]] && KEYSRVDIR="${HOME}/${MYNAME}-keyserver"
 		[[ -z "${KEYSRVCONF}" ]] && KEYSRVCONF="${KEYSRVDIR}/${MYNAME}-keyserver.conf"
-		if [[ -n "$1" && ! -d "${KEYSRVDIR}" ]]; then
+		if [[ "$1" == "keyserver" && ! -d "${KEYSRVDIR}" ]]; then
 			do_log warning "creating ${KEYSRVDIR} and using default config"
 			mkdir -p ${KEYSRVDIR}
 		fi
@@ -81,8 +81,8 @@ do_init_conf()
 		[[ ! -z "${keyserverconf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]="${keyserverconf[PP_TIMEOUT]}"
 		[[ ! -z "${keyserverconf[USER_TIMEOUT]}" ]] && conf[USER_TIMEOUT]=${keyserverconf[USER_TIMEOUT]}
 		[[ ! -z "${keyserverconf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]="${keyserverconf[CLEANUP_TIMER]}"
-		[[ -n "$1" && ! -s ${CONF} ]] && for var in KEYSRV_FIFO LOGDIR LOGLEVEL KEYSRVR_GROUP LOG_GROUP KEYDIR KEYSRV_TIMEOUT \
-													PP_TIMEOUT USER_TIMEOUT CLEANUP_TIMER; do
+		[[ "$1" == "keyserver" && ! -s ${KEYSRVCONF} ]] && for var in KEYSRV_FIFO LOGDIR LOGLEVEL KEYSRVR_GROUP LOG_GROUP \
+																KEYSRV_TIMEOUT PP_TIMEOUT USER_TIMEOUT CLEANUP_TIMER; do
 			echo "${var}=${conf[${var}]}" >>${KEYSRVCONF}
 		done
 	fi
@@ -351,11 +351,6 @@ do_systemd_daemon()
 		do_log debug "processing \"${msg[@]}\"" 
 		_time_start=$(do_timer)
 
-		if [[ ${msg[0],,} =~ ^(mount|unmount|add|change|remove)$ ]] && crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
-			pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}")"
-		else
-			pp="-"
-		fi
 		case ${msg[0],,} in
 		reload)
 			do_reload_bootconf || do_term_daemon 1;;
@@ -364,13 +359,15 @@ do_systemd_daemon()
 				do_log debug "removed ${msg[1]} from active mounts"
 				unset active_mnt[${msg[1]}]
 			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
-				do_log debug "added ${msg[1]} to active mounts"
-				[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
-				if [[ ${pp} == "-" ]]; then
-					dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2)"
-					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && crypt_arr[3]=0 \
+				if crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
+					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}")"
+					[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
+				else
+					pp="-" dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
+					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && crypt_arr[3]=0 \
 																											   || crypt_arr[3]=1
 				fi
+				do_log debug "added ${msg[1]} to active mounts"
 				active_mnt[${msg[1]}]="${dev} ${pp} ${crypt_arr[3]} $(do_timer)"
 			fi
 			if [[ ${msg[2]} -eq 1 || ${msg[2]} -eq 5 ]]; then
@@ -387,16 +384,16 @@ do_systemd_daemon()
 			daemon_control ${msg[2],,} & job[control|${cmd}|$!]="$(do_timer)"
 			do_log debug "started control worker for ${cmd} (PID: $!)";;
 		remove)
-			if [[ ! -z "${crypt_arr[@]}" && ! ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
+			if crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && [[ ! ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
 				daemon_unmount_crypt "${crypt_arr[0]}" & job[mount|${crypt_arr[0]}|$!]="$(do_timer)"
 			fi
 			if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
-				pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' '-f1)
+				pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
 				do_log debug "ignoring ${msg[1]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 			fi;;
 		add|change)
-			[[ -z "${crypt_arr[@]}" ]] && continue
-			key="$(t_keyctl 1 search @u user "${pp}")" dev="$(do_find_dev "${crypt_arr[1]}")"
+			! crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && continue
+			pp="$(do_eval_pp "${crypt_arr[2]}")" key="$(t_keyctl 1 search @u user "${pp}")" dev="$(do_find_dev "${crypt_arr[1]}")"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
 			do_log debug "adding ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase"
 			if [[ -n "${active_mnt[${crypt_arr[0]}]}" ]]; then
@@ -410,7 +407,7 @@ do_systemd_daemon()
 				do_log debug "found cached ${pp} passphrase" 
 				[[  -n "${key}" ]] && do_move_passphrase "${pp}" "${key}"
 				if [[ ! ${!job[@]} =~ mount\|${crypt_arr[0]} ]];then
-					pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' '-f1)
+					pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
 					do_log debug "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 					continue
 				fi
@@ -445,7 +442,7 @@ do_systemd_daemon()
 					do_log debug2 "can mount ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase,"\
 								  "waited for ${crypt_arr[4]}s"
 					if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
-						pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' '-f1)
+						pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
 						do_log debug "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 						continue
 					fi
@@ -716,13 +713,13 @@ do_daemon_cleanup()
 	mnt_crypt="$(t_dmsetup 1 ls --target crypt |cut -f1 |grep -vi "No devices found")"
 	for crypt in ${mnt_crypt}; do if [[ -z "${active_mnt[${crypt}]}" ]]; then
 		crypt_arr=($(do_xcrypt_fromtab "${crypt}"))
-		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && trim=0 || trim=1
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && trim=0 || trim=1
 		if [[ ! -z "${crypt_arr[@]}" ]]; then
 			dev="$(do_find_dev ${crypt_arr[1]})" pp="$(do_eval_pp "${crypt_arr[2]}")"
 			[[ -z "${cached_pp[${pp}]}" ]] && key="$(t_keyctl 1 search @u user ${pp})" && do_move_passphrase "${pp}" "${key}"
 			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		else
-			dev=/dev/"$(t_dmsetup 1 deps ${crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2 2>/dev/null)" pp="-"
+			dev=/dev/"$(t_dmsetup 1 deps ${crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2 2>/dev/null)" pp="-"
 			active_mnt[${crypt}]="${dev} - ${trim} $(do_timer)"
 		fi
 		do_log debug "found ${dev} as ${crypt} TRIM ${trim} passphrase ${pp} adding to active list"
@@ -777,7 +774,7 @@ daemon_mount_crypt()
 		echo "passphrase ${_add_pp} 0 0" >${conf[FIFO]} 
 		_res=5
 	elif ! t_dmsetup 0 info "${_add_crypt}"; then
-		if [[ "$(t_lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]]; then
+		if [[ "$(t_lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]]; then
 			do_log warning "requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
 			_add_trim=0 _res=3
 		fi
@@ -790,7 +787,7 @@ daemon_mount_crypt()
 			_res=1
 		fi
 	else
-		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
 		if [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
 			_crypt_arr=($(echo "${_add_crypt} ${active_mnt[${_add_crypt}]}"))
 			_res=2
@@ -817,9 +814,9 @@ daemon_unmount_crypt()
 		_crypt_arr=(${_del_crypt} ${active_mnt[${_del_crypt}]})
 	elif ! _crypt_arr=($(do_xcrypt_fromtab "${_del_crypt}")); then
 		_crypt_arr[0]="${_del_crypt}"
-		_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2 2>/dev/null)"
+		_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2 2>/dev/null)"
 		_crypt_arr[2]="-"
-		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _crypt_arr[3]=0 \
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && _crypt_arr[3]=0 \
 																									   || _crypt_arr[4]=1
 	fi
 	[[ -z "${_crypt_arr[4]}" ]] && _crypt_arr[4]="$(do_timer)"
@@ -1039,9 +1036,9 @@ do_control_status()
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for _crypt in ${!active_mnt[@]}; do
 		_status="" __crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
-		_pp=${__crypt_arr[1]} _trim="$(t_lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d " " -f3)"
+		_pp=${__crypt_arr[1]} _trim="$(t_lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3)"
 		if [[ "${__crypt_arr[2]}" == "1" ]]; then
-			[[ "${_trim}" == "0B" ]] && _trim="${BOLD}${RED}Off" || _trim="On"
+			[[ "${_trim}" == "0B" ]] && _trim="${BOLD}${RED}Off  " || _trim="On   "
 		elif [[ "${_trim}" != "0B" ]]; then
 			_trim="${BOLD}${RED}On"
 		elif [[ ${___crypt_arr[3]} == "1" ]]; then
@@ -1054,25 +1051,27 @@ do_control_status()
 		elif [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ && -z "${bootconf[STORAGEPP]}" ]]; then
 			_pp="${conf[SYSTEMPP]}"
 		fi
+		_pp="${_pp##${conf[PP_PREFIX]}:}" _time="$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
 		[[ "${__crypt_arr[1]}" == "-" ]] && _status="${YEL}Online" || _status="${GRN}Online"
-		echo -e "${PR}${_crypt}${PD}${__crypt_arr[0]}${PE}${_trim}${NOR}${PP}${_pp##${conf[PP_PREFIX]}:}${PT}$(do_timer date ${__crypt_arr[3]})${PS}${_status}${NOR}\r" >&${_socat[1]}
+		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[0]}${PE}${_trim}${NOR}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
 
 	# Output all unmounted and waiting crypts.
-	_tab_crypt="$(tr "\t" " " <<<"${crypttab}" |cut -d" " -f1)"
+	_tab_crypt="$(tr "\t" " " <<<"${crypttab}" |cut -d' ' -f1)"
 	for _crypt in ${_tab_crypt}; do
 		for __crypt in ${!active_mnt[@]}; do
 			[[ "${_crypt}" == "${__crypt}" ]] && continue 2
 		done
 		for __crypt in ${!waiting_mnt[@]}; do if [[ "${_crypt}" == "${__crypt}" ]]; then
-			_status="${YEL}Waiting" _time=$(do_timer date ${waiting_mnt[${_crypt}]##* })
+			_status="${YEL}Waiting" _time=$(do_timer date ${waiting_mnt[${_crypt}]##* } |cut -d ':' -f-2)
 			break
 		fi done
 		[[ ! "${_status}" == "${YEL}Waiting" ]] && _status="${RED}Offline" _time="-"
 		__crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
-		[[ "${__crypt_arr[3]}" == "1" ]] && _trim="On" || _trim="Off"
-		pp="$(do_eval_pp ${__crypt_arr[2]})"
-		echo -e "${PR}${_crypt}${PD}${__crypt_arr[1]}${PE}${_trim}${PP}${_pp##${conf[PP_PREFIX]}:}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
+		[[ "${__crypt_arr[3]}" == "1" ]] && _trim="On   " || _trim="Off  "
+		_pp="$(do_eval_pp ${__crypt_arr[2]})"
+		_pp="${_pp##${conf[PP_PREFIX]}:}"
+		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[1]}${PE}${_trim}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
 	echo >&${_socat[1]}
 
@@ -1288,9 +1287,9 @@ do_control_del()
 			_crypt_arr=(${_del_crypt} ${active_mnt[${_del_crypt}]})
 		else
 			_crypt_arr[0]="${_del_crypt}"
-			_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d: -f2 |tr -d " ()" |cut -d: -f2)"
+			_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
 			_crypt_arr[2]="-"
-			[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d" " -f3)" == "0B" ]] && _crypt_arr[3]=0 \
+			[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && _crypt_arr[3]=0 \
 																										   || _crypt_arr[3]=1
 		fi
 		[[ -z "${_crypt_arr[4]}" ]] && _crypt_arr[4]="$(do_timer)"
@@ -1698,6 +1697,7 @@ do_write_keyfile()
 		do_log error "error writing ${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]}"
 	else
 		res=0
+		[[ -n "${srv}" ]] && chmod 600 ${keydir}/${pp}.key
 		do_log debug "wrote $([[ -z "${srv}" ]] && echo ${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]} \
 												|| echo ${keydir}/${pp}.key)"
 	fi
@@ -1849,7 +1849,7 @@ do_term_keysrv()
 
 do_systemd_keysrv()
 {
-	local fd_fifo pid msg cmd pp passphrase _passphrase key timeout _conf="$(<${CONF})" res=0 r IFS=' '
+	local fd_fifo pid msg cmd pp passphrase _passphrase key timeout _conf="$(<${KEYSRVCONF})" res=0 r IFS=' '
 	declare -A cached_pp
 	trap 'do_term_keysrv' SIGINT SIGTERM SIGHUP
 	systemd-notify --ready --status="${myname} Started on $(do_timer date ${time_start})"
@@ -1859,7 +1859,7 @@ do_systemd_keysrv()
 	while true; do 
 		do_log debug "running since $(do_timer date ${time_start})"
 		systemd-notify WATCHDOG=1 WATCHDOG_USEC=$(((2*conf[CLEANUP_TIMER])*1000000))
-		[[ "$(<${CONF})" != "${_conf}" ]] && do_log error "config changed, terminating" && break
+		[[ "$(<${KEYSRVCONF})" != "${_conf}" ]] && do_log error "config changed, terminating" && break
 
 		# Read message from queue, when add or put read the passphrase. Clean up expired passphrases before handling command.
 		IFS=$'\r' read -t${conf[CLEANUP_TIMER]} -ru${fd_fifo} msg passphrase
@@ -2079,7 +2079,7 @@ key_clnt()
 		ts=$(do_timer) ret=0
 		until [[ ${ret} -ge ${conf[START_TIMEOUT]} || "$(t_networkctl status | grep "Online state")" =~ (online|partial)$ ]]; do
 			t_sleep ${conf[QUEUE_TIMEOUT]}
-			ret=$((ret+$(do_timer ${ts} |cut -d. -f1)))
+			ret=$((ret+$(do_timer ${ts} |cut -d'.' -f1)))
 		done
 	fi
 
@@ -2119,12 +2119,12 @@ do_sanboot()
 	local myname="${MYNAME}-boot:" passphrase fd_fifo res r=0
 	trap 'rm -f ${KEYSRVDIR}/${MYNAME}.${BASHPID} ${KEYSRVDIR}/${cmd}.$$.res >/dev/null 2>&1; exit' SIGINT SIGTERM
 
-	if ! do_init_conf keyserver || ! mkfifo ${KEYSRVDIR}/${cmd}.$$.res || ! chgrp ${conf[KEYSRV_GROUP]} ${KEYSRVDIR}/${cmd}.$$.res \
-								|| ! chmod 620 ${KEYSRVDIR}/${cmd}.$$.res; then
+	if ! do_init_conf keyserver || ! mkfifo ${KEYSRVDIR}/${cmd}.$$.res || ! chmod 600 ${KEYSRVDIR}/${cmd}.$$.res; then
 		logger -p user.error "${myname} initialization failed"
 		return 1
 	elif [[ ${cmd} =~ ^(put|add)$ ]] && ! IFS= read -t${conf[KEYSRV_TIMEOUT]} -ru${in} passphrase; then
 		logger -p user.error "${myname} did not receive ${pp} passphrase from ssh client"
+		rm -f ${KEYSRVDIR}/${cmd}.$$.res
 		return 1
 	elif [[ ${cmd} == "update" ]]; then
 		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} res; do
@@ -2176,6 +2176,7 @@ do_sanboot()
 	fi
 
 	[[ "${cmd}" != "get" ]] && echo "${res}" >&${out}
+	rm -f ${KEYSRVDIR}/${cmd}.$$.res
 	return ${r}
 }
 
@@ -2426,8 +2427,8 @@ do_make_zram_fs()
 	# Create zram filesystem
 	local status=0 num_fs=$# i=1 zr alg size fs
 	while [[ "${i}" -le "${num_fs}" ]]; do
-		zr="zram$((i-1))" alg=$(echo ${!i} |cut -d "," -s -f 1)
-		size=$(echo ${!i} |cut -d "," -s -f 2) fs=$(echo ${!i} |cut -d "," -s -f 3)
+		zr="zram$((i-1))" alg=$(echo ${!i} |cut -d',' -s -f 1)
+		size=$(echo ${!i} |cut -d',' -s -f 2) fs=$(echo ${!i} |cut -d',' -s -f 3)
 		if [[ -b /dev/${zr} ]]; then
 			echo "1" > /sys/block/${zr}/reset
 			echo "${alg}" > /sys/block/${zr}/comp_algorithm
@@ -2556,7 +2557,7 @@ do_import_storage()
 			if [[ $? -ne 0 ]] ; then
 				do_initrd_log "incorrect storage device entry (${storagedev}) in bootconf"
 			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
-				if [[ ${bootconf[STORAGETRIM]} -eq 1 && "$(t_lsblk -rD ${dev} |head -n2 |tail -n1| cut -d " " -f3)" != "0B" ]]; then
+				if [[ ${bootconf[STORAGETRIM]} -eq 1 && "$(t_lsblk -rD ${dev} |head -n2 |tail -n1| cut -d' ' -f3)" != "0B" ]]; then
 					storagetrim="--allow-discards"
 				fi
 				t_cryptsetup open --type plain ${storagetrim} ${dev} ${2}${nr} <<<"$3"
@@ -2605,7 +2606,7 @@ do_import_storage()
 
 do_make_default_config()
 {
-	local passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d ' ' -f4)"
+	local passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)"
 	[[ ${size} -lt $((1024*1024)) ]] && do_problem "Need at Least 1GB Free Space on /boot"
 	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
 	ln -s /etc/bashrc ${rootdir}/root/.bashrc
@@ -3314,7 +3315,7 @@ do_systemd_keysrv_start()
 	fi
 	chgrp -R ${conf[KEYSRV_GROUP]} ${KEYSRVDIR} ${conf[KEYDIR]}
 	chmod 770 ${KEYSRVDIR} 
-	chmod 660 ${KEYSRVDIR}/${MYNAME}-keyserver.conf
+	chmod 660 ${KEYSRVCONF}
 	chmod 750 ${conf[KEYDIR]}
 	chmod 640 ${conf[KEYDIR]}/*
 
@@ -3362,12 +3363,12 @@ if [[ -e /etc/os-release ]]; then
 else
 	. /usr/lib/os-release
 fi
-MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC=
+MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin CONF= KEYSRVCONF=; unset LC_NUMERIC
 
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\033[2J"
-PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[63C\033[s" PP="\033[u\033[5C\033[s"
-PT="\033[u\033[20C\033[s" PS="\033[u\033[20C" PK="\r\033[36C\033[s"
+PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[69C\033[s" PP="\033[u\033[5C\033[s"
+PT="\033[u\033[17C\033[s" PS="\033[u\033[17C" PK="\r\033[36C\033[s"
 OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
@@ -3388,7 +3389,9 @@ elif [[ "$1" == "keyserver" && ( $# -eq 1 || ( $# -eq 2 && $2 == "-f" )) ]]; the
 	do_systemd_keysrv_start
 elif [[ "$1" == "keyserver" ]]; then
 	[[ -n "$3" ]] && HOME=$(getent passwd "$3" |cut -d':' -f6 2>/dev/null)
+	[[ -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
 	[[ -z "${CONFDIR}" ]] && CONFDIR=/etc/${MYNAME}
+	[[ -s ${HOME}/.config/systemd/${MYNAME}-keyserver.conf ]] && . ${HOME}/.config/systemd/${MYNAME}-keyserver.conf
 	[[ -z "${KEYSRVDIR}" ]] && KEYSRVDIR="${HOME}/${MYNAME}-keyserver"
 	if [[ "$2" == "-h" || "$2" != "status" || $# -gt 3 ]]; then
 		do_echo_use keyserver
