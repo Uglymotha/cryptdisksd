@@ -410,7 +410,7 @@ do_systemd_daemon()
 			elif [[ -n "${key}" || -n "$(t_keyctl 1 request user "${pp}" @s)" ]]; then
 				do_log debug "found cached ${pp} passphrase" 
 				[[  -n "${key}" ]] && do_move_passphrase "${pp}" "${key}"
-				if [[ ! ${!job[@]} =~ mount\|${crypt_arr[0]} ]];then
+				if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]];then
 					pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
 					do_log debug "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 					continue
@@ -1080,7 +1080,7 @@ do_control_status()
 	echo >&${_socat[1]}
 
 	# Output cached passphrases.
-	[[ ${conf[LOGLEVEL]} -ge 1 ]] && echo -e "${PR}${GREY}${BOLD}Cached Passphrases:${PS}${NOR}${!cached_pp[@]}\r\n" >&${_socat[1]}
+	[[ ${conf[LOGLEVEL]} -ge 1 ]] && echo -e "${PR}${GREY}${BOLD}Cached Passphrases:${NOR} ${!cached_pp[@]}\r\n" >&${_socat[1]}
 	# Output passphrases.
 	echo -e "${PR}${GREY}${BOLD}PASSPHRASE${PK}VALUE${PE}TIMEOUT${NOR}\r" >&${_socat[1]}
 	for _pp in ${!cached_pp[@]}; do
