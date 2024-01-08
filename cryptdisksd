@@ -177,7 +177,6 @@ logwriter()
 
 	# Prepend every line recieved with date and time and write to logfile.
 	while read -r ll line; do
-	echo "${ll} - ${line}" >> /tmp/kut
 		local _date="$(date '+%d-%m %H:%M:%S.%3N')"
 		if [[ ( "${ll}" == "debug" && ${conf[LOGLEVEL]} -ge 1 ) || ( "${ll}" == "debug2" && ${conf[LOGLEVEL]} -ge 3 ) ]]; then
 			echo "${_date} ${hostname} ${line}" >>${conf[LOGFILE]}
