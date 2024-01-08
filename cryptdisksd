@@ -6,6 +6,7 @@ do_init_conf()
 	# Initialize System Variables. Default config in /etc/cryptdisksd/cryptdisksd.conf. Systemd env CONF(DIR) will override.
 	local var val _conf= _keylife IFS=$'\n'
 	declare -gA conf keyserverconf keylife
+	[[ -z "${CONFDIR}" && -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
 	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
 	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
 	if [[ "$1" == "daemon" && ! -d "${CONFDIR}" ]]; then
@@ -55,6 +56,9 @@ do_init_conf()
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" != "daemon" ]]; then
+		if [[ -z "${KEYSRVDIR}" && -s ${HOME}/.config/systemd/${MYNAME}-keyserver.conf ]]; then
+			. ${HOME}/.config/systemd/${MYNAME}-keyserver.conf
+		fi
 		[[ -z "${KEYSRVDIR}" ]] && KEYSRVDIR="${HOME}/${MYNAME}-keyserver"
 		[[ -z "${KEYSRVCONF}" ]] && KEYSRVCONF="${KEYSRVDIR}/${MYNAME}-keyserver.conf"
 		if [[ "$1" == "keyserver" && ! -d "${KEYSRVDIR}" ]]; then
@@ -1036,15 +1040,15 @@ do_control_status()
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for _crypt in ${!active_mnt[@]}; do
 		_status="" __crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
-		_pp=${__crypt_arr[1]} _trim="$(t_lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3)"
+		_pp=${__crypt_arr[1]} _trim="$(lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3)"
 		if [[ "${__crypt_arr[2]}" == "1" ]]; then
 			[[ "${_trim}" == "0B" ]] && _trim="${BOLD}${RED}Off  " || _trim="On   "
 		elif [[ "${_trim}" != "0B" ]]; then
-			_trim="${BOLD}${RED}On"
+			_trim="${BOLD}${RED}On   "
 		elif [[ ${___crypt_arr[3]} == "1" ]]; then
-			_trim="${BOLD}${YEL}Off"
+			_trim="${BOLD}${YEL}Off  "
 		else
-			_trim="Off"
+			_trim="Off  "
 		fi
 		if [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ && -n "${bootconf[STORAGEPP]}" ]]; then
 			_pp="$(do_eval_pp "${bootconf[STORAGEPP]}")"
@@ -3363,7 +3367,7 @@ if [[ -e /etc/os-release ]]; then
 else
 	. /usr/lib/os-release
 fi
-MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin CONF= KEYSRVCONF=; unset LC_NUMERIC
+MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC
 
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\033[2J"
@@ -3374,57 +3378,38 @@ OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
 if [[ "${MYNAME}" == "init" ]]; then
 	set -a
-	MYNAME=$(basename $(readlink $0)) CONFIDR=""
+	MYNAME=$(basename $(readlink $0))
 	[[ -e /etc/initrd-release ]] && . /etc/initrd-release
 	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
 	do_init_conf daemon || do_problem "Failed to Load Config!"
 	do_initrd
-	exit $?
 elif [[ $# -eq 0 ]]; then
 	# No command line options specified. check if we're started from systemd, start daemon if so.
 	do_systemd_daemon_start
-	exit $?
-elif [[ "$1" == "keyserver" && ( $# -eq 1 || ( $# -eq 2 && $2 == "-f" )) ]]; then
-	[[ "$2" == "-f" ]] && FOREGROUND=1
-	do_systemd_keysrv_start
 elif [[ "$1" == "keyserver" ]]; then
 	[[ -n "$3" ]] && HOME=$(getent passwd "$3" |cut -d':' -f6 2>/dev/null)
-	[[ -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
-	[[ -z "${CONFDIR}" ]] && CONFDIR=/etc/${MYNAME}
-	[[ -s ${HOME}/.config/systemd/${MYNAME}-keyserver.conf ]] && . ${HOME}/.config/systemd/${MYNAME}-keyserver.conf
-	[[ -z "${KEYSRVDIR}" ]] && KEYSRVDIR="${HOME}/${MYNAME}-keyserver"
-	if [[ "$2" == "-h" || "$2" != "status" || $# -gt 3 ]]; then
+	if [[ $# -eq 1 || ( $# -eq 2 && "$2" == "-f" ) ]]; then
+		[[ "$2" == "-f" ]] && FOREGROUND=1
+		do_systemd_keysrv_start
+	elif [[ "$2" != "status" || $# -gt 3 ]]; then
 		do_echo_use keyserver
 	elif [[ -z "${HOME}" ]] || ! do_init_conf; then
 		echo -ne "${RED}${BOLD}Unable to Initialize"
 		[[ -z "${HOME}" ]] && echo -e ", $3 is not a Valid Host.${NOR}" || echo -e " Config.${NOR}"
-		exit 1
+		false
 	elif [[ "$2" == "status" ]]; then
 		do_keysrv_cmd "status" 
 	fi
-	exit $?
-else 
-	[[ -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
-	[[ -z "${CONFDIR}" ]] && CONFDIR=/etc/${MYNAME}
-	[[ -s ${HOME}/.config/systemd/${MYNAME}-keyserver.conf ]] && . ${HOME}/.config/systemd/${MYNAME}-keyserver.conf
-	[[ -z "${KEYSRVDIR}" ]] && KEYSRVDIR="${HOME}/${MYNAME}-keyserver"
-	if [[ "$(basename ${SHELL})" == "${MYNAME}" ]]; then
-		# If we are started through sshd a system is requesting passphrases.
-		[[ "$(</proc/${PPID}/comm)" != "sshd" ]] && exit 1
-		exec {in}>&0- {out}>&1- 2>/dev/null {fd_logwriter}>&2 {fd_journal}>&2
-		a=($2);	cmd="${a[0],,}" pp="${a[1]}" timeout="${a[2]}"
-		do_sanboot
-		rm -f ${CONFDIR}/${cmd}.$$.res
-		exit $?
-	else
-		# Command line options present, run in interactive mode.
-		do_cryptdisksd_cli $@
-		exit $?
-	fi
+elif [[ "$(basename ${SHELL})" == "${MYNAME}" ]]; then
+	# If we are started through sshd a system is requesting passphrases.
+	[[ "$(</proc/${PPID}/comm)" != "sshd" ]] && exit 1
+	exec {in}>&0- {out}>&1- 2>/dev/null {fd_logwriter}>&2 {fd_journal}>&2
+	a=($2);	cmd="${a[0],,}" pp="${a[1]}" timeout="${a[2]}"
+	do_sanboot
+else
+	# Command line options present, run in interactive mode.
+	do_cryptdisksd_cli $@
 fi
+exit $?
 
 # [END OF EXECUTION FUNCTIONS]
-
-# We should never get here, error exit if we do.
-echo "${MYNAME} Reached End of the Line, Bye Bye"
-exit 1
