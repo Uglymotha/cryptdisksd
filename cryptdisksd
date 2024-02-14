@@ -257,12 +257,11 @@ do_term_daemon()
 	rm -f ${conf[PIDFILE]} ${conf[CRYPTDISKSDDIR]}/*.sock
 
 	[[ -n "$(jobs -rp)" ]] && wait $(jobs -rp |tr $'\n' ' ')
-	if [[ -n "${pid_logwriter}" && "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
-		do_log debug2 "stopping log writer (PID: ${pid_logwriter} FD:${fd_logwriter})"
-		exec {fd_logwriter}>&-
-	fi
-	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
+	do_log debug2 "stopping log writer (PID: ${pid_logwriter} FD:${fd_logwriter})"
+	exec {fd_logwriter}>&- 1>&- 2>&-
+	wait ${pid_logwriter}
 	[[ -n "$2" ]] && kill -SIGTERM $2 2>/dev/null
+	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
 	exit $1
 }
 
@@ -807,7 +806,7 @@ daemon_mount_crypt()
 					"since $(do_timer date ${_crypt_arr[4]})"
 	fi
 
-	echo "mount ${_add_crypt} ${_res}" >${conf[FIFO]} 
+	echo "mount ${_add_crypt} ${_res}" >${conf[FIFO]}
 	exit ${_res}
 }
 
@@ -871,10 +870,8 @@ do_term_get_passphrase()
 		wait ${_pid_putkey}
 	fi
 	if [[ ! -z "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
-		do_log debug2 "stopping log writer (PID: ${_pid_logwriter})"
-		exec {fd_logwriter}>&-
+		do_log debug2 "stopping log writer (PID: ${_pid_logwriter} FD:${fd_logwriter})"
 	fi
-
 	exit $1
 }
 
@@ -908,9 +905,9 @@ get_passphrase()
 	local __fd_up _fd_getpp _pid_getpp _pid_logwriter _pid_putkey _passphrase="" _to
 	exec {fd_fifo}>&-
 	if [[ ${FOREGROUND} -eq 0 && ${conf[LOGLEVEL]} -eq 2 ]]; then
-		exec {fd_logwriter}> >(logwriter passphrase-${crypt_arr[2]}-${_pid_getpp}.log)
+		exec {fd_logwriter}>&- {fd_logwriter}> >(logwriter passphrase-${crypt_arr[2]}-${_pid_getpp}.log)
 	elif [[ ${FOREGROUND} -eq 0 && ${conf[LOGLEVEL]} -eq 4 ]]; then
-		exec {fd_logwriter}> >(logwriter passphrase-${crypt_arr[2]}-${_pid_getpp}.log) 1>&${fd_logwriter} 2>&1
+		exec {fd_logwriter}>&- {fd_logwriter}> >(logwriter passphrase-${crypt_arr[2]}-${_pid_getpp}.log) 1>&${fd_logwriter} 2>&1
 	fi
 	_pid_logwriter=$!
 	do_log debug "started"
@@ -969,14 +966,13 @@ do_term_control()
 			do_log debug "killed getpp worker (PID: ${_pid_getpp})"
 			wait ${_pid_getpp}
 		fi
-		if [[ -n "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
-			do_log debug "stopping log writer (PID: ${_pid_logwriter})"
-			exec {fd_logwriter}>&-
-		fi
 	fi
 	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
-	[[ $1 -ne 0 || -z "${_pid_putkey}" ]] && exit $1
-	wait ${_pid_putkey}
+	[[ $1 -eq 0 && -n "${_pid_putkey}" ]] && wait ${_pid_putkey}
+	if [[ -n "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
+		do_log debug2 "stopping log writer (PID: ${_pid_logwriter} FD:${fd_logwriter})"
+	fi
+	exec {fd_logwriter}>&-
 	exit $!
 }
 
@@ -989,7 +985,7 @@ daemon_control()
 	# Start logwriter when LOGLEVEL=2 or = 4. When level = 4 redirect out stdout and stderr to the logwriter.
 	if [[ ${FOREGROUND} -ne 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]]; then
 		[[ ${conf[LOGLEVEL]} -eq 4 ]] && _pid_logwriter="1>&${fd_logwriter} 2>&1"
-		exec {fd_logwriter}> >(logwriter control-${cmd}-${BASHPID}.log ${_pid_logwriter})
+		exec {fd_logwriter}>&- {fd_logwriter}> >(logwriter control-${cmd}-${BASHPID}.log ${_pid_logwriter})
 		_pid_logwriter=$!
 	fi
 	[[ "${cmd}" =~ ^(add|del|smart|erase)$ ]] && _crypt_arr=($(do_xcrypt_fromtab "${msg[3]}"))
@@ -1561,7 +1557,7 @@ do_cmd_timeout()
 	tt="$(trap -p SIGTERM)"; tt="${tt%\'*}"; tt="${tt##*\'}"; tt=(${tt})
 	trap 'do_term_cmd_timeout SIGINT' SIGINT; trap 'do_term_cmd_timeout SIGTERM' SIGTERM
 	shift 3
-	exec {in}<&0- {stdout}>&1- {stderr}>&2- {fd_cmd}< <(${cmd} $@ 0<&${in}- >&${out}- 2>&${err}- & echo $!; wait $!; echo $?)
+	exec {in}<&0- {stdout}>&1- {stderr}>&2- {fd_cmd}< <(${cmd} $@ 0<&${in}- >&${out}- 2>&${err}- & echo $!; wait $!; echo $?;)
 	pid[0]=$!
 	do_log debug2 "running \"${cmd} ${@}\" (PID: ${pid[0]}) with $([[ ${to} -eq 0 ]] && echo no || echo ${to}s) timeout"
 
@@ -1668,8 +1664,8 @@ do_find_dev()
 do_check_passphrase()
 {
 	# Check the received passphrase against the stored key in firmware. Write key if it doesn't exist.
-	local pp="$1" passphrase="$2" rmkey="$3" t="$([[ -z $4 ]] && echo "tail -c +5" || echo "cat -")" f
-	[[ -z $4 ]] && f=${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]} || f=${conf[KEYDIR]}/${pp}.key
+	local pp="$1" passphrase="$2" rmkey="$3" mode="$4" t="$([[ $4 -eq 0 ]] && echo "tail -c +5" || echo "cat -")" f
+	[[ ${mode} -eq 0 ]] && f=${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]} || f=${conf[KEYDIR]}/${pp}.key
 	if [ -s ${f} ]; then
 		if  $( t_cat ${f} |${t} |t_openssl aes-256-cbc -d -salt -pbkdf2 -in - -out /dev/null); then
 			do_log debug "passphrase check ok"
@@ -1677,7 +1673,7 @@ do_check_passphrase()
 		fi
 		do_log debug "passphrase check fail"
 		if [[ ${rmkey} -eq 1 ]]; then 
-			[[ -z $4 ]] && t_chattr -i ${f}
+			[[ ${mode} -eq 0 ]] && ! t_chattr -i ${f} && do_log error "unable to change mode of ${f}" && return 3
 			! t_rm -f ${f} && do_log error "unable te remove ${f}" && return 3
 		fi
 		return 1
@@ -1743,15 +1739,14 @@ do_term_query_passphrase()
 		do_log debug "killed ask worker (PID: ${pid_askpp})"
 	fi
 	do_log debug "terminating after $(do_timer ${_time_start})s"
-
 	exit 0
 }
 
 query_passphrase()
 {
 	# Ask for a pssphrase input by user through systemd-ask-password
-	local myname="query:$1:${BASHPID}:" _time_start=$(do_timer) pp="$1" POS="$2" OK="$3" WARN="$4" FAIL="$5" mode="$6"
-	local pid_askpp fd_askpp passphrase _passphrase ppchk="${mode}"
+	local pp="$1" POS="$2" OK="$3" WARN="$4" FAIL="$5" mode="$([[ -z "$6" ]] && echo 0 || echo $6)" pid_askpp fd_askpp
+	local myname="query:$1:${BASHPID}:" _time_start=$(do_timer) passphrase _passphrase ppchk="${mode}"
 	trap 'do_term_query_passphrase' SIGINT SIGTERM
 	do_log debug "query for ${pp} passphrase started"
 
@@ -1862,9 +1857,8 @@ do_term_keysrv()
 	do_log warning "terminating after $(do_timer ${time_start})s"
 	if [[ ! -z "${pid_logwriter}" && "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
 		do_log debug2 "stopping log writer (PID: ${pid_logwriter})"
-		exec {fd_logwriter}>&-
 	fi
-	exec {fd_fifo}>&-
+	exec {fd_logwriter}>&- {fd_fifo}>&- 1>&- 2>&-
 	rm -f ${KEYSRVDIR}/*.res
 
 	exit 0
@@ -1997,11 +1991,8 @@ do_systemd_keysrv()
 				else
 					timeout="$((timeout/86400))d $((timeout/3600%24))h $((timeout/60%60))m $((timeout%60))s"
 				fi
-				if [[ ${conf[LOGLEVEL]} -ge 3 ]]; then
-					passphrase="${RED}${BOLD}$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}" @s)")"
-				else
-					passphrase="${YEL}${BOLD}N/A"
-				fi
+				[[ ${conf[LOGLEVEL]} -lt 3 ]] || ! passphrase="${RED}${BOLD}$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}" @s)")" \
+											  && passphrase="${YEL}${BOLD}N/A"
 				do_keysrv_send "${BOLD}${pp}${PK}\"${passphrase}${NOR}${BOLD}\"${PE}timeout: ${timeout}${NOR}"
 			done
 			do_keysrv_send ".";;
@@ -2030,21 +2021,24 @@ do_term_key_clnt()
 	trap 'do_log warning "unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 	do_log debug "terminating after $(do_timer ${_time_start})s"
 
+	srv=""
 	for ts in ${pid_cmd}; do
 		if [[ "$(</proc/${ts}/comm)" == "${MYNAME}" ]]; then
 			do_log debug "killed ${cmd} (PID: ${ts})"
 			kill -SIGTERM ${ts} 2>/dev/null
+			srv+="${ts} "
 		fi
-		wait ${ts}
 	done
+	[[ -n "${srv}" ]] && wait ${srv}
 	if [[ -n "${_ssh_PID}" && "$(</proc/${_ssh_PID}/comm)" == "ssh" ]]; then
 		do_log debug "killed ssh (PID: ${_ssh_PID})"
 		kill -SIGTERM ${_ssh_PID} 2>/dev/null
 		wait ${_ssh_PID}
 	fi
-	if [[ -n "${pid_logwrtier}" && "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
-		exec {fd_logwriter}>&-
+	if [[ -n "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
+		do_log debug2 "stopping logwriter (PID: ${_pid_logwriter} FD: ${fd_logwriter})"
 	fi
+	exec {fd_logwriter}>&-
 
 	exit 0
 }
@@ -2052,7 +2046,7 @@ do_term_key_clnt()
 key_clnt()
 {
 	local myname="${1,,}:$([[ "${1,,}" == "update" ]] && echo ${MYNAME} || echo $2):${BASHPID}:" ret=${BASHPID} _ssh srv msg res
-	local _time_start=$(do_timer) cmd="${1,,}" pp="$(do_eval_pp "$2")" timeout kto ts pid_logwriter pid_cmd passphrase="" r
+	local _time_start=$(do_timer) cmd="${1,,}" pp="$(do_eval_pp "$2")" timeout kto ts _pid_logwriter pid_cmd passphrase="" r
 	trap 'do_term_key_clnt' SIGINT SIGTERM
 
 	[[ "${cmd}" == "update" ]] && pp="${MYNAME}" passphrase="" srv="$2" msg="updating"
@@ -2065,7 +2059,7 @@ key_clnt()
 	# If we are called with exactly one server, execute the command on that server.
 	if [[ ( "${cmd}" == "add" && $# -eq 5 ) || ( "${cmd}" == "put" && $# -eq 4 ) || ( "${cmd}" == "update" && $# -eq 2 ) \
 											|| ( ! "${cmd}" =~ ^(put|add|update)$ && $# -eq 3 ) ]]; then
-		pid_cmd= pid_logwriter=
+		pid_cmd= _pid_logwriter=
 		do_log debug "${msg}: ${srv}"
 		coproc _ssh ( ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} \
 					      ${bootconf[BOOTUSER]}@${srv} "${cmd^^}" "${pp}" "${kto}" 2>/dev/null)
@@ -2091,9 +2085,10 @@ key_clnt()
 
 	# When starting wait for network before trying to connect to servers.
 	if [[ ${FOREGROUND} -eq 0 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]]; then
+		exec {fd_logwriter}>&-
 		[[ ${conf[LOGLEVEL]} -eq 4 ]] && exec {fd_logwriter}> >(logwriter ${cmd}-${pp}-${ret}.log) 1>&${fd_logwriter} 2>&1
 		[[ ${conf[LOGLEVEL]} -ne 4 ]] && exec {fd_logwriter}> >(logwriter ${cmd}-${pp}-${ret}.log)
-		pid_logwriter=$!
+		_pid_logwriter=$!
 	fi
 	if [[ ${starting} -ne 0 && ${conf[NET_ONLINE]} -eq 1 ]]; then
 		ts=$(do_timer) ret=0
@@ -3105,7 +3100,8 @@ do_cryptdisksd_cmd()
 	
 	# Start socat in background and attach stdin, listen on a socket in RUNDIR. 
 	# The daemon will spawn a worker which will connect and start interactive session.
-	if [[ ! "$(NOTIFY_SOCKET= systemctl is-active ${MYNAME}.service 2>&1)" =~ ^activating|^active || ! -p ${conf[FIFO]} ]]; then
+	if [[ ! ${PPID} -eq 1 && ! "$(NOTIFY_SOCKET= systemctl is-active ${MYNAME}.service 2>&1)" =~ ^activating|^active \
+		  || ! -p ${conf[FIFO]} ]]; then
 		echo "${MYNAME} not Running"
 		return ${s}
 	fi
