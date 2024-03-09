@@ -2372,6 +2372,7 @@ EOF
 
 	# Check for default config
 	if [[ -f /default ]]; then
+		do_mount_boot || do_problem "Unable to Mount Boot."
 		do_initrd_cmd "$([[ -f /boot/storage ]] && echo Loading || echo Creating) Default Config." do_make_default_config
 	else
 		do_mount_etc
@@ -2604,7 +2605,6 @@ do_make_default_config()
 	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
 	ln -s /etc/bashrc ${rootdir}/root/.bashrc
 	mkdir ${rootdir}/root/quarantine
-	do_mount_boot || do_problem "Unable to Mount Boot."
 	[[ "${imgtype,,}" =~ ^openssl ]] && \
 		passphrase="$(do_read_passphrase "${conf[SYSTEMPP]}" "${network}" "${fd_con}" 0 || do_reset)"
 	if [[ ! -f /boot/storage ]]; then
