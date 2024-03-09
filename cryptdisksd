@@ -2343,7 +2343,7 @@ EOF
 	fi
 
 	if [[ $recovery = yes ]] ; then
-		do_initrd_cmd "Mounting boot filesystem." do_mount_boot
+		do_initrd_cmd "Mounting boot filesystem" do_mount_boot
 		do_cecho -e "${PI}${RED}${BOLD}Entering Recovery Mode.${NOR}"
 		setsid cttyhack bash -i
 	fi
@@ -2373,7 +2373,7 @@ EOF
 	# Check for default config
 	if [[ -f /default ]]; then
 		do_mount_boot || do_problem "Unable to Mount Boot."
-		do_initrd_cmd "$([[ -f /boot/storage ]] && echo Loading || echo Creating) Default Config." do_make_default_config
+		do_initrd_cmd "$([[ -f /boot/storage ]] && echo Loading || echo Creating) Default Config" do_make_default_config
 	else
 		do_mount_etc
 	fi
@@ -3258,8 +3258,8 @@ do_systemd_daemon_start()
 	# Check if there is a crypttab, log message if there isn't since everything we do is based on it.
 	if [[ ! -f ${conf[CRYPTTAB]} ]]; then
 		echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase\t\t#TRIM" >${conf[CRYPTTAB]}
-		do_log warning "crypttab not found" 
-		systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found"
+		do_log warning "crypttab not found, creating default"
+		systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
 		start_status=2
 	fi
 
