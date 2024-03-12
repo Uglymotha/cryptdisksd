@@ -2527,6 +2527,7 @@ do_init_log()
 {
 	mkdir -p ${logdir}
 	mount -n ${logdev} ${logdir} > /dev/null 2>&1 || do_problem "Unable to Mount log ram drive"
+	chown rsyslog:wheel ${logdir}
 	ln -s /var/storage/logarchive ${logdir}/archive
 	mkdir ${logdir}/samba
 	chmod 750 ${logdir}/samba
