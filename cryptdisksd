@@ -10,7 +10,7 @@ do_init_conf()
 	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
 	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
 	if [[ "$1" == "daemon" && ! -d "${CONFDIR}" ]]; then
-		do_log warning "creating ${CONFDIR} and using default config"
+		do_log warning "${CONFDIR} not found, creating"
 		mkdir -p ${CONFDIR}
 	fi
 	if [[ -s ${CONF} ]]; then for var in $(grep -ve "^\s*#" <<<$(<${CONF})); do
@@ -52,7 +52,6 @@ do_init_conf()
 	[[ -z "${conf[USER_TIMEOUT]}" ]] && conf[USER_TIMEOUT]=10
 	[[ -z "${conf[CMD_TIMEOUT]}" ]] && conf[CMD_TIMEOUT]=2
 	[[ -z "${conf[MOUNT_TIMEOUT]}" ]] && conf[MOUNT_TIMEOUT]=30
-	[[ "$1" == "daemon" && ! -s ${CONF} ]] && for var in ${!conf[@]}; do echo "${var}=${conf[${var}]}" >>${CONF}; done
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" != "daemon" ]]; then
@@ -131,6 +130,10 @@ do_init_conf()
 		[[ -n "${keyserverconf[KEYLIFE]}" ]] && conf[KEYLIFE]=${keyserverconf[KEYLIFE]}
 	fi
 	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
+	if [[ "$1" == "daemon" && $2 == "1" && ! -s ${CONF} ]]; then
+		do_log warning "${CONF} not found, creating default"
+		for var in ${!conf[@]}; do echo "${var}=${conf[${var}]}" >>${CONF}; done
+	fi
 
 	return 0
 }
@@ -1621,7 +1624,7 @@ do_xcrypt_fromtab()
 		[[ "${#crypt_arr[@]}" -eq 3 ]] && crypt_arr[3]=0
 		if [[ "${#crypt_arr[@]}" -eq 0 ]]; then
 			do_log debug "device ${!i} not found on crypttab"
-		elif [[ "${#crypt_arr[@]}" -ne 4 || ${crypt_arr[0]}${crypt_arr[1]}${crypt_arr[2]} =~ (,| |\|\$) ]]; then
+		elif [[ "${#crypt_arr[@]}" -ne 4 || ${crypt_arr[0]}${crypt_arr[1]}${crypt_arr[2]} =~ (,| |\||\$) ]]; then
 			do_log warning "incorrect crypttab entry ${crypt_arr[@]}"
 		else
 			do_log debug "device ${!i} found on crypttab"
@@ -3223,7 +3226,7 @@ do_systemd_daemon_start()
 	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: "
 	keyctl new_session
 	keyctl link @u @s
-	if ! do_init_conf daemon; then
+	if ! do_init_conf daemon 1; then
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
 		exit 0
 	fi
@@ -3349,7 +3352,7 @@ if [[ "${MYNAME}" == "init" ]]; then
 	MYNAME=$(basename $(readlink $0))
 	[[ -e /etc/initrd-release ]] && . /etc/initrd-release
 	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
-	do_init_conf daemon || do_problem "Failed to Load Config!"
+	do_init_conf daemon 1 || do_problem "Failed to Load Config!"
 	do_initrd
 elif [[ $# -eq 0 ]]; then
 	# No command line options specified. check if we're started from systemd, start daemon if so.
