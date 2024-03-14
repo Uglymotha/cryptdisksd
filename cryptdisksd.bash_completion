@@ -235,6 +235,7 @@ _cryptdisksd_init_conf()
 	for (( i=0;i<${COMP_CWORD};i++ )); do
 		[[ ${COMP_WORDS[i]} == -d ]] && conf[CRYPTDISKSDDIR]=${COMP_WORDS[i+1]}
 	done 
+	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/cryptdisksd
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/cryptdisks.d
 	if [[ -s ${conf[CRYPTDISKSDDIR]}/cryptdisksd.conf ]]; then
 		CONF=${conf[CRYPTDISKSDDIR]}/cryptdisksd.conf
