@@ -52,6 +52,9 @@ do_init_conf()
 	[[ -z "${conf[USER_TIMEOUT]}" ]] && conf[USER_TIMEOUT]=10
 	[[ -z "${conf[CMD_TIMEOUT]}" ]] && conf[CMD_TIMEOUT]=2
 	[[ -z "${conf[MOUNT_TIMEOUT]}" ]] && conf[MOUNT_TIMEOUT]=30
+	[[ -z "${conf[ALGO]}" ]] && conf[ALGO]="aes-xts-plain64"
+	[[ -z "${conf[KEYSZ]}" ]] && conf[KEYSZ]="256"
+	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" != "daemon" ]]; then
@@ -785,7 +788,8 @@ daemon_mount_crypt()
 			do_log warning "requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
 			_add_trim=0 _res=3
 		fi
-		[[ ${_add_trim} -eq 1 ]] && key="--allow-discards" || key=""
+		key="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
+		[[ ${_add_trim} -eq 1 ]] && key+=" --allow-discards"
 		if t_cryptsetup open --type plain "${key}" "${_add_dev}" "${_add_crypt}" <<<"${_passphrase}"; then
 			do_log info "mounted ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} passphrase ${_add_pp}"
 			do_log debug2 "mounting ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} passphrase took $(do_timer ${_add_time})s"
@@ -2481,6 +2485,9 @@ do_parse_fwconf()
 									  || bootconf[STORAGEPP]="$(do_eval_pp ${bootconf[STORAGEPP]})"
 	[[ "${bootconf[STORAGETRIM]}" == "1" || "${bootconf[STORAGETRIM],,}" == "y" \
 		|| "${bootconf[STORAGETRIM],,}" == "yes" ]] && bootconf[STORAGETRIM]=1 || bootconf[STORAGETRIM]=0
+	[[ -z "${bootconf[STORAGEALGO]}" ]] && bootconf[STORAGEALGO]="${conf[ALGO]}" || conf[ALGO]="${bootconf[STORAGEALGO]}"
+	[[ -z "${bootconf[STORAGEKEYSZ]}" ]] && bootconf[STORAGEKEYSZ]="${conf[KEYSZ]}" || conf[KEYSZ]="${bootconf[STORAGEKEYSZ]}"
+	[[ -z "${bootconf[STORAGEHASH]}" ]] && bootconf[STORAGEHASH]="${conf[HASH]}" || conf[HASH]="${bootconf[STORAGEHASH]}"
 	[[ -z "${bootconf[TIMEOUT]}" ]] && bootconf[TIMEOUT]=30
 	[[ -z "${bootconf[LOGSIZE]}" ]] && bootconf[LOGSIZE]=2GiB
 	if [[ -s ${conf[FWDIR]}/${conf[DISTNAME]}_${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]} ]] && \
@@ -2548,7 +2555,7 @@ do_start_network()
 
 do_import_storage()
 {
-	local nr=1 i=1 status=0 storagedev storagetrim dev
+	local nr=1 i=1 status=0 storagedev storageopt dev
 	if [[ ! -z "${bootconf[STORAGEDEVS]}" ]]; then
 		for storagedev in ${bootconf[STORAGEDEVS]}; do
 			dev="$(findfs ${storagedev} 2>/dev/null)" 
@@ -2556,9 +2563,10 @@ do_import_storage()
 				do_initrd_log "incorrect storage device entry (${storagedev}) in bootconf"
 			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
 				if [[ ${bootconf[STORAGETRIM]} -eq 1 && "$(t_lsblk -rD ${dev} |head -n2 |tail -n1| cut -d' ' -f3)" != "0B" ]]; then
-					storagetrim="--allow-discards"
+					storageopt="--allow-discards"
 				fi
-				t_cryptsetup open --type plain ${storagetrim} ${dev} ${2}${nr} <<<"$3"
+				storageopt+=" --cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
+				t_cryptsetup open --type plain ${storageopt} ${dev} ${2}${nr} <<<"$3"
 				if [[ "$?" -eq 0 ]]; then
 					nr=$((nr+1))
 				else
@@ -2605,6 +2613,7 @@ do_import_storage()
 do_make_default_config()
 {
 	local passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)"
+	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
 	[[ ${size} -lt $((1024*1024)) ]] && do_problem "Need at Least 1GB Free Space on /boot"
 	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
 	ln -s /etc/bashrc ${rootdir}/root/.bashrc
@@ -2614,7 +2623,7 @@ do_make_default_config()
 	if [[ ! -f /boot/storage ]]; then
 		touch /boot/storage
 		truncate -s $((size/2*1024)) /boot/storage
-		t_cryptsetup create --type plain storage /boot/storage <<<"${passphrase}" || do_problem "Unable to Create Storage Device."
+		t_cryptsetup create --type plain "${opt}" storage /boot/storage <<<"${passphrase}" || do_problem "Unable to Create Storage Device."
 		mkfs.ext4 ${conf[DMDIR]}/storage
 		mount ${conf[DMDIR]}/storage /mnt
 		cp -a ${rootdir}/var/storage/* /mnt
