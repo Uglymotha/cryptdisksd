@@ -2550,6 +2550,7 @@ do_init_log()
 
 do_start_network()
 {
+	udevadm trigger -s net && udevadm settle
 	[[ ! -f ${CONFDIR}/network ]] && return 1 || return 0
 }
 
