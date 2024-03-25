@@ -30,9 +30,9 @@ do_init_conf()
 	[[ -z "${conf[PIDFILE]}" ]] && conf[PIDFILE]="${conf[CRYPTDISKSDDIR]}/${MYNAME}.pid"
 	[[ -z "${conf[CRYPTDISKSD_GROUP]}" ]] && conf[CRYPTDISKSD_GROUP]="disk"
 	[[ -z "${conf[LOG_GROUP]}" ]] && conf[LOG_GROUP]="${conf[CRYPTDISKSD_GROUP]}"
-	[[ -z "${conf[CRYPTDISKSDDIR_MODE]}" ]] && conf[CRYPTDISKSDDIR_MODE]=700
+	[[ -z "${conf[CRYPTDISKSDDIR_MODE]}" ]] && conf[CRYPTDISKSDDIR_MODE]=1770
 	[[ -z "${conf[FIFO]}" ]] && conf[FIFO]="${conf[CRYPTDISKSDDIR]}/queue"
-	[[ -z "${conf[FIFO_MODE]}" ]] && conf[FIFO_MODE]=600
+	[[ -z "${conf[FIFO_MODE]}" ]] && conf[FIFO_MODE]=620
 	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="${CONFDIR}/crypttab"
 	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
 	[[ -z "${conf[START_TIMEOUT]}" ]] && conf[START_TIMEOUT]=5
