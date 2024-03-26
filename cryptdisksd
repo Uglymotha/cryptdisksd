@@ -2243,7 +2243,7 @@ do_cryptdisksd_udev()
 	fi
 
 	# Enter a loop to check if any of the arguments specified is a command, error exit if so, add parameter to message if ok.
-	while [[ ! -z "$1" ]]; do
+	while [[ -n "$1" ]]; do
 		do_parse_opt $@
 		[[ $? -eq 0 ]] && msg+="$1 " || logger -p daemon.error "${MYNAME} cannot name crypt or dev \"$1\""
 		shift

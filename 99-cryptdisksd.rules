@@ -4,14 +4,15 @@ KERNEL=="nvme*", GOTO="cryptdisksd_nvme"
 KERNEL!="sd*|vd*", GOTO="cryptdisksd_end"
 
 ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev $env{ID_BUS}-$env{ID_SERIAL} wwn-$env{ID_WWN_WITH_EXTENSION}",GOTO="cryptdisksd_end"
-ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev $env{ID_BUS}-$env{ID_SERIAL}-part%n wwn-$env{ID_WWN_WITH_EXTENSION}-part%n",GOTO="cryptdisksd_end"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev $env{ID_BUS}-$env{ID_SERIAL}$env{.PART_SUFFIX} wwn-$env{ID_WWN_WITH_EXTENSION}$env{.PART_SUFFIX}",GOTO="cryptdisksd_end"
 
 LABEL="cryptdisksd_md"
 ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev md-uuid-$env{MD_UUID} md-name-$env{MD_NAME}",GOTO="cryptdisksd_end"
-ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev md-uuid-$env{MD_UUID}-part%n md-name-$env{MD_NAME}-part%n",GOTO="cryptdisksd_end"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev md-uuid-$env{MD_UUID}$env{.PART_SUFFIX} md-name-$env{MD_NAME}$env{.PART_SUFFIX}",GOTO="cryptdisksd_end"
 
 LABEL="cryptdisksd_nvme"
-ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev nvme-$env{ID_SERIAL} nvme-$env{ID_WWN}",GOTO="cryptdisksd_end"
-ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev nvme-$env{ID_SERIAL}-part%n nvme-$env{ID_WWN}-part%n",GOTO="cryptdisksd_end"
+ENV{ID_MODEL}=="?*", ENV{ID_SERIAL_SHORT}=="?*", OPTIONS="string_escape=replace", ENV{CRYPTDISKSD_SERIAL}="$env{ID_MODEL}_$env{ID_SERIAL_SHORT}"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="disk", RUN+="/usr/sbin/cryptdisksd udev nvme-$env{ID_SERIAL} nvme-$env{CRYPTDISKSD_SERIAL} nvme-$env{ID_WWN}",GOTO="cryptdisksd_end"
+ACTION=="add|change|remove", ENV{DEVTYPE}=="partition", RUN+="/usr/sbin/cryptdisksd udev nvme-$env{ID_SERIAL}$env{.PART_SUFFIX} nvme-$env{CRYPTDISKSD_SERIAL}$env{.PART_SUFFIX} nvme-$env{ID_WWN}$env{.PART_SUFFIX}",GOTO="cryptdisksd_end"
 
 LABEL="cryptdisksd_end"
