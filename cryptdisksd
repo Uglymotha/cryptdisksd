@@ -1349,7 +1349,7 @@ do_control_add()
 	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[3]}" _add_dev2="${msg[4]}" _add_pp="$(do_eval_pp "${msg[5]}")"
 	local _add_trim="${msg[6]}" _res="" _r=0 __crypt_arr _passphrase=""
 	
-	if [[ ${_crypttab} -eq 0 && -z "${_crypt_arr[0]}" ]]; then
+	if [[ ${_crypttab} -eq 0 && -z "${_add_crypt}" ]]; then
 		# Recevied add with just a crypt, if it's not on the tab exit.
 		echo -e "\r${BOLD}${RED}${msg[5]} not Found on Crypttab${NOR}\r" >&${_socat[1]}
 		do_log debug "${msg[5]} not found on crypttab"
@@ -1362,12 +1362,12 @@ do_control_add()
 		if [[ -z "${_crypt_arr[@]}" && -z "${__crypt_arr[@]}" ]]; then
 			# Crypt and dev not on tab, find device.
 			_add_dev="$(do_find_dev "${_add_dev}")" _add_dev2="$(do_find_dev "${_add_dev2}")"
-			if [[ -z "${_add_dev}" && -z "${_add_dev2}}" ]]; then
+			if [[ -z "${_add_dev}" && -z "${_add_dev2}" ]]; then
 				do_log debug "neither ${_add_crypt} nor ${_add_dev} is a valid block device in ${conf[BLOCKDEVDIRS]}"
 				echo -e "\r${BOLD}${RED}Neither ${_add_crypt} nor ${_add_dev} is a Valid Block Device in"\
 						" ${conf[BLOCKDEVDIRS]}.${NOR}\r" >&${_socat[1]}
 				do_term_control 1
-			elif [[ ! -z "${_add_dev}" && ! -z "${_add_dev2}" ]]; then
+			elif [[ -n "${_add_dev}" && -n "${_add_dev2}" ]]; then
 				do_log debug "both ${_add_crypt} and ${_add_dev} are valid block devices in ${conf[BLOCKDEVDIRS]}"
 				echo -e  "\r${BOLD}${RED}Both ${_add_crypt} and ${_add_dev} are Valid Block Devices in"\
 						 "${conf[BLOCKDEVDIRS]}'.${NOR}\r" >&${_socat[1]}
@@ -1376,7 +1376,7 @@ do_control_add()
 			[[ -n "${_add_dev}" ]] && _add_crypt="${msg[4]}" || _add_crypt="${msg[3]}" _add_dev="${_add_dev2}"
 		else
 			# Crypt and/or dev already on tab.
-			if [[ ! -z "${_crypt_arr[@]}" && ! -z "${__crypt_arr[@]}" ]]; then
+			if [[ -n "${_crypt_arr[@]}" && -n "${__crypt_arr[@]}" ]]; then
 				do_log debug "both ${_add_crypt} and ${_add_dev} already on crypttab"
 				echo -e "\r${BOLD}${RED}Both ${_add_crypt} and ${_add_dev} Already on Crypttab.${NOR}\r" >&${_socat[1]}
 			elif [[ ! -z "${_crypt_arr[@]}" ]]; then
@@ -1666,6 +1666,7 @@ do_find_dev()
 		return 0
 	fi done
 	do_log debug "${dev} not found in ${conf[BLOCKDEVSDIRS]}"
+	return 1
 }
 
 do_check_passphrase()
