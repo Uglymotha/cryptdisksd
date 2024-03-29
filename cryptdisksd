@@ -541,7 +541,7 @@ do_daemon_check_conf()
 				if [[ ${starting} -eq 0 ]]; then
 					do_log warning "${conf[FWBOOTCONF]} and ${conf[BOOTCONF]} differ, replacing ${conf[FWBOOTCONF]}"
 					[[ -e ${conf[FWBOOTCONF]} ]] && t_chattr -i ${conf[FWBOOTCONF]}
-					if ! t_printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]}l; then
+					if ! t_printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]}; then
 						do_log error "error creating ${conf[FWBOOTCONF]}"
 					elif ! t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}_${conf[BOOT]} -w -f ${conf[BOOTCONF]}; then
 						do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
