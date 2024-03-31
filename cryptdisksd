@@ -2343,7 +2343,7 @@ EOF
 	do_initrd_cmd "Reading Boot Config from Firmware" do_parse_fwconf && bootconfinfw=1
 
 	/lib/systemd/systemd-udevd --daemon --resolve-names=never 2>/dev/null
-	udevadm trigger && udevadm settle
+	udevadm trigger -s usb && udevadm trigger -s block && udevadm settle
 	mdadm --assemble --scan >/dev/null 2>&1
 
 	if [[ ${network} -eq 0 && ${bootconfinfw} -eq 1 ]]; then
