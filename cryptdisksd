@@ -373,7 +373,7 @@ do_systemd_daemon()
 					[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
 				else
 					pp="-" dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
-					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && crypt_arr[3]=0 \
+					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && crypt_arr[3]=0 \
 																											   || crypt_arr[3]=1
 				fi
 				do_log debug "added ${msg[1]} to active mounts"
@@ -723,7 +723,7 @@ do_daemon_cleanup()
 	mnt_crypt="$(t_dmsetup 1 ls --target crypt |cut -f1 |grep -vi "No devices found")"
 	for crypt in ${mnt_crypt}; do if [[ -z "${active_mnt[${crypt}]}" ]]; then
 		crypt_arr=($(do_xcrypt_fromtab "${crypt}"))
-		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && trim=0 || trim=1
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && trim=0 || trim=1
 		if [[ ! -z "${crypt_arr[@]}" ]]; then
 			dev="$(do_find_dev ${crypt_arr[1]})" pp="$(do_eval_pp "${crypt_arr[2]}")"
 			[[ -z "${cached_pp[${pp}]}" ]] && key="$(t_keyctl 1 search @u user ${pp})" && do_move_passphrase "${pp}" "${key}"
@@ -784,7 +784,7 @@ daemon_mount_crypt()
 		echo "passphrase ${_add_pp} 0 0" >${conf[FIFO]} 
 		_res=5
 	elif ! t_dmsetup 0 info "${_add_crypt}"; then
-		if [[ "$(t_lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]]; then
+		if [[ "$(t_lsblk -rD ${_add_dev} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]]; then
 			do_log warning "requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
 			_add_trim=0 _res=3
 		fi
@@ -798,7 +798,7 @@ daemon_mount_crypt()
 			_res=1
 		fi
 	else
-		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && _add_trim=0 || _add_trim=1
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_add_crypt} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && _add_trim=0 || _add_trim=1
 		if [[ -n "${active_mnt[${_add_crypt}]}" ]]; then
 			_crypt_arr=($(echo "${_add_crypt} ${active_mnt[${_add_crypt}]}"))
 			_res=2
@@ -827,7 +827,7 @@ daemon_unmount_crypt()
 		_crypt_arr[0]="${_del_crypt}"
 		_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2 2>/dev/null)"
 		_crypt_arr[2]="-"
-		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && _crypt_arr[3]=0 \
+		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && _crypt_arr[3]=0 \
 																									   || _crypt_arr[4]=1
 	fi
 	[[ -z "${_crypt_arr[4]}" ]] && _crypt_arr[4]="$(do_timer)"
@@ -1044,10 +1044,10 @@ do_control_status()
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for _crypt in ${!active_mnt[@]}; do
 		_status="" __crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
-		_pp=${__crypt_arr[1]} _trim="$(lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3)"
+		_pp=${__crypt_arr[1]} _trim="$(lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3-4)"
 		if [[ "${__crypt_arr[2]}" == "1" ]]; then
-			[[ "${_trim}" == "0B" ]] && _trim="${BOLD}${RED}Off  " || _trim="On   "
-		elif [[ "${_trim}" != "0B" ]]; then
+			[[ "${_trim}" =~ 0B ]] && _trim="${BOLD}${RED}Off  " || _trim="On   "
+		elif [[ ! "${_trim}" =~ 0B ]]; then
 			_trim="${BOLD}${RED}On   "
 		elif [[ ${___crypt_arr[3]} == "1" ]]; then
 			_trim="${BOLD}${YEL}Off  "
@@ -1297,7 +1297,7 @@ do_control_del()
 			_crypt_arr[0]="${_del_crypt}"
 			_crypt_arr[1]="/dev/$(t_dmsetup 1 deps ${_del_crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
 			_crypt_arr[2]="-"
-			[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d' ' -f3)" == "0B" ]] && _crypt_arr[3]=0 \
+			[[ "$(t_lsblk -rD ${conf[DMDIR]}/${_del_crypt} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && _crypt_arr[3]=0 \
 																										   || _crypt_arr[3]=1
 		fi
 		[[ -z "${_crypt_arr[4]}" ]] && _crypt_arr[4]="$(do_timer)"
@@ -2566,7 +2566,7 @@ do_import_storage()
 			if [[ $? -ne 0 ]] ; then
 				do_initrd_log "incorrect storage device entry (${storagedev}) in bootconf"
 			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
-				if [[ ${bootconf[STORAGETRIM]} -eq 1 && "$(t_lsblk -rD ${dev} |head -n2 |tail -n1| cut -d' ' -f3)" != "0B" ]]; then
+				if [[ ${bootconf[STORAGETRIM]} -eq 1 && ! "$(t_lsblk -rD ${dev}|head -n2|tail -n1|cut -d' ' -f3-4)" =~ 0B ]]; then
 					storageopt="--allow-discards"
 				fi
 				storageopt+=" --cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
