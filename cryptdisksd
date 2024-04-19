@@ -369,7 +369,7 @@ do_systemd_daemon()
 				unset active_mnt[${msg[1]}]
 			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
 				if crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
-					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}")"
+					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}" || echo "${RED}Not Found!${NOR}")"
 					[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
 				else
 					pp="-" dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
@@ -421,7 +421,8 @@ do_systemd_daemon()
 					do_log debug "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 					continue
 				fi
-				daemon_mount_crypt "${crypt_arr[0]}" "${dev}" "${pp}" "${crypt_arr[3]}" &
+				daemon_mount_crypt "${crypt_arr[0]}" "${dev}" "${pp}" "${crypt_arr[3]}" "${crypt_arr[4]}" \
+								   "${crypt_arr[5]}" "${crypt_arr[6]}" &
 				job[mount|${crypt_arr[0]}|$!]="$(do_timer)"
 			elif [[ -n "${waiting_mnt[${crypt_arr[0]}]}" ]]; then
 				# Check if crypt is already waiting
@@ -443,20 +444,21 @@ do_systemd_daemon()
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
-				crypt_arr=($(do_xcrypt_fromtab "${crypt}")); crypt_arr[4]="$(do_timer ${waiting_mnt[${crypt}]##* })s"
+				crypt_arr=($(do_xcrypt_fromtab "${crypt}")); crypt_arr[7]="$(do_timer ${waiting_mnt[${crypt}]##* })s"
 				unset waiting_mnt[${crypt}]
 				if [[ ${msg[2]} == 0 ]]; then
 					do_log debug "removed ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase,"\
 								 "waited for ${crypt_arr[4]}s"
 				else
 					do_log debug2 "can mount ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase,"\
-								  "waited for ${crypt_arr[4]}s"
+								  "waited for ${crypt_arr[7]}s"
 					if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
 						pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
 						do_log debug "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 						continue
 					fi
-					daemon_mount_crypt "${crypt_arr[0]}" "$(do_find_dev "${crypt_arr[1]}")" "${pp}" "${crypt_arr[3]}" &
+					daemon_mount_crypt "${crypt_arr[0]}" "$(do_find_dev "${crypt_arr[1]}")" "${pp}" "${crypt_arr[3]}" \
+									   "${crypt_arr[4]}" "${crypt_arr[5]}" "${crypt_arr[6]}" &
 					job[mount|${crypt_arr[0]}|$!]="$(do_timer)"
 				fi
 			fi done
@@ -788,7 +790,8 @@ daemon_mount_crypt()
 			do_log warning "requested TRIM for ${_add_crypt} but device ${_add_dev} does not support it"
 			_add_trim=0 _res=3
 		fi
-		key="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
+		[[ -n "$5" ]] && key="--cipher $5 --key-size $6 --hash $7" \
+					  || key="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
 		[[ ${_add_trim} -eq 1 ]] && key+=" --allow-discards"
 		if t_cryptsetup open --type plain "${key}" "${_add_dev}" "${_add_crypt}" <<<"${_passphrase}"; then
 			do_log info "mounted ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} passphrase ${_add_pp}"
@@ -1346,19 +1349,26 @@ do_control_del()
 
 do_control_add()
 {
-	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[3]}" _add_dev2="${msg[4]}" _add_pp="$(do_eval_pp "${msg[5]}")"
+	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[3]}" _add_dev2="${msg[4]}" _add_pp=($(tr '/' ' ' <<<"${msg[5]}"))
 	local _add_trim="${msg[6]}" _res="" _r=0 __crypt_arr _passphrase=""
+	local _add_algo="${conf[ALGO]}" _add_keysz="${conf[KEYSZ]}" _add_hash="${conf[HASH]}"
 	
 	if [[ ${_crypttab} -eq 0 && -z "${_add_crypt}" ]]; then
 		# Recevied add with just a crypt, if it's not on the tab exit.
-		echo -e "\r${BOLD}${RED}${msg[5]} not Found on Crypttab${NOR}\r" >&${_socat[1]}
+		echo -e "\r${BOLD}${RED}${add_crypt} not Found on Crypttab${NOR}\r" >&${_socat[1]}
 		do_log debug "${msg[5]} not found on crypttab"
 		do_term_control 1
 	elif [[ ${_crypttab} -eq 0 ]]; then
 		_add_dev="$(do_find_dev "${_crypt_arr[1]}")" _add_pp="$(do_eval_pp "${_crypt_arr[2]}")" _add_trim="${_crypt_arr[3]}"
+		[[ -n "${_crypt_arr[4]}" ]] && _add_algo="${_crypt_arr[4]}" _add_keysz="${_crypt_arr[5]}" _add_hash="${_crypt_arr[6]}"
 	elif [[ ${_crypttab} -eq 1 ]]; then
 		# Crypt should be added to tab, check if specified crypt and dev are already on tab.
-		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}"))
+		if [[ "${#_add_pp[@]}" -ne 1 && "${#_add_pp[@]}" -ne 4 ]]; then
+			echo -e "\r${BOLD}${RED}${_add_pp[@]} Not a Valid Passphrase${NOR}" >&${_socat[1]}
+			do_term_control 1
+		fi
+		[[ -n "${_add_pp[1]}" ]] && _add_algo="${_add_pp[1]}" _add_keysz="${_add_pp[2]}" _add_hash="${_add_pp[3]}"
+		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}")) _add_pp="${_add_pp[0]}"
 		if [[ -z "${_crypt_arr[@]}" && -z "${__crypt_arr[@]}" ]]; then
 			# Crypt and dev not on tab, find device.
 			_add_dev="$(do_find_dev "${_add_dev}")" _add_dev2="$(do_find_dev "${_add_dev2}")"
@@ -1424,7 +1434,7 @@ do_control_add()
 				echo "reload" >${conf[FIFO]}
 			fi
 		fi
-		daemon_mount_crypt "${_add_crypt}" "${_add_dev}" "${_add_pp}" "${_add_trim}" &
+		daemon_mount_crypt "${_add_crypt}" "${_add_dev}" "${_add_pp}" "${_add_trim}" "${_add_algo}" "${_add_keysz}" "${_add_hash}" &
 		wait $!; _r=$?; case ${_r} in
 		0)
 			do_log info "mounted ${_add_dev} as ${_add_crypt} trim ${_add_trim} using ${_add_pp} passphrase"
@@ -1622,7 +1632,7 @@ do_xcrypt_fromtab()
 {
 	# Extract the line for the device received in the udev command from the crypttab into crypt_arr array.
 	# Element 1 = cryptdisk name, Element 2 = cryptdisk block device, Element 3 = passphrase, Element 4 = TRIM
-	local crypt_arr i
+	local crypt_arr i key_arr
 	for ((i=1;i<=$#;i++)); do
 		crypt_arr=($(grep -iE "(^|\s)${!i}\s" <<<"${crypttab}" 2>/dev/null)) 
 		[[ "${#crypt_arr[@]}" -eq 3 ]] && crypt_arr[3]=0
@@ -1637,8 +1647,13 @@ do_xcrypt_fromtab()
 			else
 				crypt_arr[3]=0
 			fi
-			crypt_arr[2]="$(do_eval_pp "${crypt_arr[2]}")"
-			echo "${crypt_arr[@]}"
+			key_arr=($(tr '/' ' ' <<<"${crypt_arr[2]}"))
+			if [[ "${#key_arr[@]}" -ne 1 && "${#key_arr[@]}" -ne 4 ]]; then
+				do_log warning "incorrect crypttab entry ${crypt_arr[@]}"
+				return
+			fi
+			crypt_arr[2]="$(do_eval_pp "${key_arr[0]}")"
+			echo "${crypt_arr[@]} ${key_arr[1]} ${key_arr[2]} ${key_arr[3]}"
 			return 0
 		fi
 	done
