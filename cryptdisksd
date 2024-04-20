@@ -1444,6 +1444,7 @@ do_control_add()
 	fi
 
 	if [[ ${_crypttab} -eq 1 ]]; then
+		[[ -n "${_add_ppa[1]}" ]] && _add_pp+="/${_add_algo}/${_add_keysz}/${_add_hash}"
 		if [[ ${_r} -ne 0 || ${_confirm} -eq 1 ]]; then
 		# Crypt should be added to tab, ask for confirmation if necessary (error or request by user).
 			do_control_confirm \
@@ -1453,7 +1454,6 @@ do_control_add()
 		fi
 		if [[ "${_res}" == "y" ]]; then
 			# Add the crypt to the crypttab and send reload signal to daemon.
-			[[ -n "${_add_ppa[1]}" ]] && _add_pp+="/${_add_algo}/${_add_keysz}/${_add_hash}"
 			echo -e "${_add_crypt}\t${_add_dev##*/}\t${_add_pp}\t${_add_trim}" >>${conf[CRYPTTAB]}
 			do_log warning "added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} trim ${_add_trim} to crypttab"
 			echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim}"\
@@ -1461,6 +1461,7 @@ do_control_add()
 			echo "reload" >${conf[FIFO]}
 		fi
 	fi
+	_add_pp="${_add_pp%%/*}"
 	[[ ${_confirm} -eq 1 || ${_r} -ne 0 ]] && do_control_confirm "Put ${_add_pp} Passphrase to Bootservers? (Y/n)" y || _res="y"
 	if [[ "${_res}" == "y" ]]; then
 		echo -e "\r${BOLD}${GRN}Putting ${_add_pp} Key to Boot Servers: ${GREY}${bootconf[BOOTSERVERS]}.${NOR}\r" >&${_socat[1]}
