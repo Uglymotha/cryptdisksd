@@ -376,8 +376,9 @@ do_systemd_daemon()
 					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && crypt_arr[3]=0 \
 																											   || crypt_arr[3]=1
 				fi
-				do_log debug "added ${msg[1]} to active mounts"
+				[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
 				active_mnt[${msg[1]}]="${dev} ${pp} ${crypt_arr[3]} $(do_timer)"
+				do_log debug "added ${msg[1]} to active mounts"
 			fi
 			if [[ ${msg[2]} -eq 1 || ${msg[2]} -eq 5 ]]; then
 				start_status=1
@@ -1349,9 +1350,9 @@ do_control_del()
 
 do_control_add()
 {
-	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[3]}" _add_dev2="${msg[4]}" _add_pp=($(tr '/' ' ' <<<"${msg[5]}"))
+	local _add_crypt="${_crypt_arr[0]}" _add_dev="${msg[3]}" _add_dev2="${msg[4]}" _add_ppa=($(tr '/' ' ' <<<"${msg[5]}"))
 	local _add_trim="${msg[6]}" _res="" _r=0 __crypt_arr _passphrase=""
-	local _add_algo="${conf[ALGO]}" _add_keysz="${conf[KEYSZ]}" _add_hash="${conf[HASH]}"
+	local _add_algo="${conf[ALGO]}" _add_keysz="${conf[KEYSZ]}" _add_hash="${conf[HASH]}" _add_pp=""
 	
 	if [[ ${_crypttab} -eq 0 && -z "${_add_crypt}" ]]; then
 		# Recevied add with just a crypt, if it's not on the tab exit.
@@ -1363,11 +1364,11 @@ do_control_add()
 		[[ -n "${_crypt_arr[4]}" ]] && _add_algo="${_crypt_arr[4]}" _add_keysz="${_crypt_arr[5]}" _add_hash="${_crypt_arr[6]}"
 	elif [[ ${_crypttab} -eq 1 ]]; then
 		# Crypt should be added to tab, check if specified crypt and dev are already on tab.
-		if [[ "${#_add_pp[@]}" -ne 1 && "${#_add_pp[@]}" -ne 4 ]]; then
-			echo -e "\r${BOLD}${RED}${_add_pp[@]} Not a Valid Passphrase${NOR}" >&${_socat[1]}
+		if [[ "${#_add_ppa[@]}" -ne 1 && "${#_add_ppa[@]}" -ne 4 ]]; then
+			echo -e "\r${BOLD}${RED}${_add_ppa[@]} Not a Valid Passphrase${NOR}" >&${_socat[1]}
 			do_term_control 1
 		fi
-		[[ -n "${_add_pp[1]}" ]] && _add_algo="${_add_pp[1]}" _add_keysz="${_add_pp[2]}" _add_hash="${_add_pp[3]}"
+		[[ -n "${_add_ppa[1]}" ]] && _add_algo="${_add_ppa[1]}" _add_keysz="${_add_ppa[2]}" _add_hash="${_add_ppa[3]}"
 		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}")) _add_pp="${_add_pp[0]}"
 		if [[ -z "${_crypt_arr[@]}" && -z "${__crypt_arr[@]}" ]]; then
 			# Crypt and dev not on tab, find device.
@@ -1389,7 +1390,7 @@ do_control_add()
 			if [[ -n "${_crypt_arr[@]}" && -n "${__crypt_arr[@]}" ]]; then
 				do_log debug "both ${_add_crypt} and ${_add_dev} already on crypttab"
 				echo -e "\r${BOLD}${RED}Both ${_add_crypt} and ${_add_dev} Already on Crypttab.${NOR}\r" >&${_socat[1]}
-			elif [[ ! -z "${_crypt_arr[@]}" ]]; then
+			elif [[ -n "${_crypt_arr[@]}" ]]; then
 				do_log debug "${_add_dev} already on crypttab"
 				echo -e "\r${BOLD}${RED}${_add_dev} Already on Crypttab.${NOR}\r" >&${_socat[1]}
 			else
@@ -1417,23 +1418,6 @@ do_control_add()
 		do_term_control 1
 	else
 		echo "passphrase ${_add_pp} 1 -1" >${conf[FIFO]}
-		if [[ ${_crypttab} -eq 1 ]]; then
-			# Crypt should be added to tab, ask for confirmation if necessary (error or request by user).
-			if [[ ${_r} -ne 0 || ${_confirm} -eq 1 ]]; then
-				do_control_confirm \
-						"Add ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase to Crypttab? (Y/n)"
-			else
-				_res="y"
-			fi
-			if [[ "${_res}" == "y" ]]; then
-				# Add the crypt to the crypttab and send reload signal to daemon.
-				echo -e "${_add_crypt}\t${_add_dev##*/}\t${_add_pp}\t${_add_trim}" >>${conf[CRYPTTAB]}
-				do_log warning "added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} trim ${_add_trim} to crypttab"
-				echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim}"\
-						"to Crypttab.${NOR}\r" >&${_socat[1]}
-				echo "reload" >${conf[FIFO]}
-			fi
-		fi
 		daemon_mount_crypt "${_add_crypt}" "${_add_dev}" "${_add_pp}" "${_add_trim}" "${_add_algo}" "${_add_keysz}" "${_add_hash}" &
 		wait $!; _r=$?; case ${_r} in
 		0)
@@ -1459,14 +1443,33 @@ do_control_add()
 		esac
 	fi
 
-	[[ ${_confirm} -eq 1 ]] && do_control_confirm "Put ${_add_pp} Passphrase to Bootservers? (Y/n)" y || _res="y"
+	if [[ ${_crypttab} -eq 1 ]]; then
+		if [[ ${_r} -ne 0 || ${_confirm} -eq 1 ]]; then
+		# Crypt should be added to tab, ask for confirmation if necessary (error or request by user).
+			do_control_confirm \
+					"Add ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase to Crypttab? (Y/n)"
+		else
+			_res="y"
+		fi
+		if [[ "${_res}" == "y" ]]; then
+			# Add the crypt to the crypttab and send reload signal to daemon.
+			[[ -n "${_add_ppa[1]}" ]] && _add_pp+="/${_add_algo}/${_add_keysz}/${_add_hash}"
+			echo -e "${_add_crypt}\t${_add_dev##*/}\t${_add_pp}\t${_add_trim}" >>${conf[CRYPTTAB]}
+			do_log warning "added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} trim ${_add_trim} to crypttab"
+			echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim}"\
+					"to Crypttab.${NOR}\r" >&${_socat[1]}
+			echo "reload" >${conf[FIFO]}
+		fi
+	fi
+	[[ ${_confirm} -eq 1 || ${_r} -ne 0 ]] && do_control_confirm "Put ${_add_pp} Passphrase to Bootservers? (Y/n)" y || _res="y"
 	if [[ "${_res}" == "y" ]]; then
 		echo -e "\r${BOLD}${GRN}Putting ${_add_pp} Key to Boot Servers: ${GREY}${bootconf[BOOTSERVERS]}.${NOR}\r" >&${_socat[1]}
 		exec {__fd_user}>&${_socat[1]}
-		key_clnt "PUT" "${_add_pp}" "${_passphrase}" & _pid_putkey=$!; wait ${_pid_putkey}
+		key_clnt "PUT" "${_add_pp}" "${_passphrase}" & _pid_putkey=$!
 		echo -e "\r" >&${_socat[1]}
 	fi
 
+	[[ -n "${_pid_putkey}" ]] && wait ${_pid_putkey}
 	unset _pid_putkey
 	do_term_control ${_r}
 }
