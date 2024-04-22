@@ -1,8 +1,8 @@
 #!/bin/bash
 _cryptdisksd_completion()
 {
+	local MYNAME="${COMP_WORDS[0]}" cur="${COMP_WORDS[COMP_CWORD]}" keys="" crypts="" devs="" cmd=""
 	local commands="status add del putkey rmkey erase smart stop keyserver bootsan reload shell"
-	local n=${COMP_WORDS[0]} cur=${COMP_WORDS[COMP_CWORD]} keys="" crypts="" devs="" cmd=""
 	[[ ${COMP_CWORD} -eq 1 ]] && COMPREPLY=( $( compgen -W '-h -d -f ${commands}' -- ${cur}) ) && return
 
 	args=(); COMPREPLY=()
@@ -235,9 +235,9 @@ _init_conf()
 	for (( i=0;i<${COMP_CWORD};i++ )); do
 		[[ ${COMP_WORDS[i]} == -d ]] && conf[CRYPTDISKSDDIR]=${COMP_WORDS[i+1]}
 	done 
-	[[ -z "${conf[CRYPTDISKSDDIR]}" || ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/${n}
+	[[ -z "${conf[CRYPTDISKSDDIR]}" || ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/${MYNAME}
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/${n::-1}.d
-	[[ -s ${conf[CRYPTDISKSDDIR]}/${n}.conf ]] && CONF=${conf[CRYPTDISKSDDIR]}/${n}.conf
+	[[ -s ${conf[CRYPTDISKSDDIR]}/${MYNAME}.conf ]] && CONF=${conf[CRYPTDISKSDDIR]}/${MYNAME}.conf
 	if [[ -s ${CONF} ]]; then
 		local __var __val
 		while IFS="=" read -r __var __val; do
@@ -249,7 +249,7 @@ _init_conf()
 	keys="$(cat ${conf[CRYPTTAB]} |tr -s "\t" |cut -f3 |cut -d'/' -f1 |sort -u)"
 	crypts="$(cat ${conf[CRYPTTAB]} |cut -f1)"
 	devs="$(cat ${conf[CRYPTTAB]} |cut -f2)"
-	keysrv="$(getent passwd |grep ${n} |cut -d':' -f1)"
+	keysrv="$(getent passwd |grep ${MYNAME} |cut -d':' -f1)"
 	bootsrv="$(grep "BOOTSERVERS=" ${conf[CRYPTDISKSDDIR]}/boot.conf 2>/dev/null |cut -d'=' -f2)"
 }
 
