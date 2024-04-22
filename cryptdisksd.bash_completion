@@ -1,13 +1,14 @@
 #!/bin/bash
 _cryptdisksd_completion()
 {
-	local commands="status add del putkey rmkey erase smart stop keyserver bootsan reload shell" cur=${COMP_WORDS[COMP_CWORD]} keys="" crypts="" devs="" cmd=""
+	local commands="status add del putkey rmkey erase smart stop keyserver bootsan reload shell"
+	local n=${COMP_WORDS[0]} cur=${COMP_WORDS[COMP_CWORD]} keys="" crypts="" devs="" cmd=""
 	[[ ${COMP_CWORD} -eq 1 ]] && COMPREPLY=( $( compgen -W '-h -d -f ${commands}' -- ${cur}) ) && return
 
 	args=(); COMPREPLY=()
 	declare -A conf
-	_cryptdisksd_init_conf
-	_cryptdisksd_parse_cmd
+	_init_conf
+	_parse_cmd
 
 	case ${cmd} in
 		cryptdisksd)
@@ -120,13 +121,18 @@ _cryptdisksd_completion()
 				*)
 					[[ ${opt_c} -eq 0 ]] && compreply+="-c "
 					[[ ${opt_p} -eq 0 ]] && compreply+="-p "
-					[[ ${j} -lt 2 && ${opt_crypt} -eq 0 ]] && compreply+="${crypts} "
-					[[ ${j} -lt 2 && ${opt_dev} -eq 0 ]] && compreply+="${devs} "
-					case "${args[0]} ${opt_c} ${opt_p}" in
-						"2 0 0") compreply+="${commands} ";;
-						"3 1 0") compreply+="${commands} ";;
-						"5 0 1") compreply+="${commands} ";;
-						"6 1 1") compreply+="${commands} ";;
+					[[ ${opt_t} -eq 0 ]] && compreply+="-t "
+					[[ ${j} -lt 3 && ${opt_crypt} -eq 0 ]] && compreply+="${crypts} "
+					[[ ${j} -lt 3 && ${opt_dev} -eq 0 ]] && compreply+="${devs} "
+					case "${args[0]} ${opt_c} ${opt_p} ${opt_t}" in
+						"2 0 0 0") compreply+="${commands} ";;
+						"3 1 0 0") compreply+="${commands} ";;
+						"5 0 1 0") compreply+="${commands} ";;
+						"6 1 1 0") compreply+="${commands} ";;
+						"2 0 0 1") compreply+="${commands} ";;
+						"3 1 0 1") compreply+="${commands} ";;
+						"5 0 1 1") compreply+="${commands} ";;
+						"6 1 1 1") compreply+="${commands} ";;
 					esac
 					COMPREPLY=( $(compgen -W "${compreply}" -- ${cur}) )
 					return;;
@@ -218,7 +224,7 @@ _cryptdisksd_completion()
 }
 
 # Parse the command to be completed
-_cryptdisksd_parse_cmd()
+_parse_cmd()
 {
 	local i=${COMP_CWORD}; args[0]=0
 	while [[ ! " cryptdisksd ${commands} " =~ " ${args[args[0]]} " && ${i} -ge 0 ]]; do
@@ -229,32 +235,29 @@ _cryptdisksd_parse_cmd()
 	cmd=${args[args[0]]}
 }
 
-_cryptdisksd_init_conf()
+_init_conf()
 {
 	local i=0 CONF=""
+	declare -gA conf
 	for (( i=0;i<${COMP_CWORD};i++ )); do
 		[[ ${COMP_WORDS[i]} == -d ]] && conf[CRYPTDISKSDDIR]=${COMP_WORDS[i+1]}
 	done 
-	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/cryptdisksd
-	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/cryptdisks.d
-	if [[ -s ${conf[CRYPTDISKSDDIR]}/cryptdisksd.conf ]]; then
-		CONF=${conf[CRYPTDISKSDDIR]}/cryptdisksd.conf
-	else
-		CONF=/etc/cryptdisks.d/cryptdisksd.conf
-	fi
+	[[ -z "${conf[CRYPTDISKSDDIR]}" || ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/${n}
+	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && conf[CRYPTDISKSDDIR]=/etc/${n::-1}.d
+	[[ -s ${conf[CRYPTDISKSDDIR]}/${n}.conf ]] && CONF=${conf[CRYPTDISKSDDIR]}/${n}.conf
 	if [[ -s ${CONF} ]]; then
 		local __var __val
 		while IFS="=" read -r __var __val; do
 			[[ ! -z "${__val}" ]] && conf[${__var^^}]="${__val}"
 		done <<<"$(cat ${CONF} |grep -ve "^\s*#")"
 	fi
-	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="/etc/cryptdisks.d/crypttab"
+	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="${conf[CRYPTDISKSDDIR]}/crypttab"
 	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
-	keys="$(cat ${conf[CRYPTTAB]} |tr -s "\t" |cut -f3 |sort -u)"
+	keys="$(cat ${conf[CRYPTTAB]} |tr -s "\t" |cut -f3 |cut -d'/' -f1 |sort -u)"
 	crypts="$(cat ${conf[CRYPTTAB]} |cut -f1)"
 	devs="$(for dir in ${conf[BLOCKDEVSDIRS]}; do ls ${dir};done |sort -u)"
-	keysrv="$(getent passwd |grep cryptdisksd |cut -d':' -f1)"
-	bootsrv="$(grep "BOOTSERVERS=" /etc/cryptdisks.d/boot.conf 2>/dev/null |cut -d'=' -f2)"
+	keysrv="$(getent passwd |grep ${n} |cut -d':' -f1)"
+	bootsrv="$(grep "BOOTSERVERS=" ${conf[CRYPTDISKSDDIR]}/boot.conf 2>/dev/null |cut -d'=' -f2)"
 }
 
 complete -F _cryptdisksd_completion cryptdisksd
