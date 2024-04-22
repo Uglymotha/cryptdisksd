@@ -1389,7 +1389,7 @@ do_control_add()
 			# Crypt and/or dev already on tab.
 			if [[ -n "${_crypt_arr[@]}" && -n "${__crypt_arr[@]}" ]]; then
 				do_log debug "both ${msg[3]} and ${msg[4]} already on crypttab"
-				echo -e "\r${BOLD}${RED}Both ${_add_crypt} and ${_add_dev} Already on Crypttab.${NOR}\r" >&${_socat[1]}
+				echo -e "\r${BOLD}${RED}Both ${msg[3]} and ${msg[4]} Already on Crypttab.${NOR}\r" >&${_socat[1]}
 			elif [[ -n "${_crypt_arr[@]}" ]]; then
 				do_log debug "${_add_dev} already on crypttab"
 				echo -e "\r${BOLD}${RED}${_add_dev} Already on Crypttab.${NOR}\r" >&${_socat[1]}
