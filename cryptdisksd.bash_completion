@@ -30,6 +30,9 @@ _cryptdisksd_completion()
 				keyserver)
 					COMPREPLY=( $(compgen -W "-f status ${keysrv}" -- ${cur}) )
 					return;;
+				status)
+					COMPREPLY=( $(compgen -W "${keysrv}" -- ${cur}) )
+					return;;
 				*)
 					return;;
 			esac
@@ -56,7 +59,8 @@ _cryptdisksd_completion()
 		status|shell|reload) 
 			case ${args[1]} in
 				status|shell|reload)
-					COMPREPLY=( $(compgen -W "-h ${commands}" -- ${cur}) ); return;;
+					COMPREPLY=( $(compgen -W "-h ${commands}" -- ${cur}) )
+					return;;
 				*)
 					return;;
 			esac
@@ -64,7 +68,7 @@ _cryptdisksd_completion()
 		erase)
 			case ${args[1]} in
 				erase)
-					COMPREPLY=( $(compgen -W "-h ${crypts}" -- ${cur}) ); return;;
+					COMPREPLY=( $(compgen -W "-h ${crypts} ${devs}" -- ${cur}) ); return;;
 				-h)
 					return;;
 				*)
@@ -73,14 +77,14 @@ _cryptdisksd_completion()
 		smart)
 			case ${args[1]} in
 				smart)
-					COMPREPLY=( $(compgen -W "-h -a -t ${crypts}" -- ${cur}) ); return;;
+					COMPREPLY=( $(compgen -W "-h -a -t ${crypts} ${devs}" -- ${cur}) ); return;;
 				-h)
 					return;;
 				-a|-t|-x)
 					if [[ ${args[0]} -eq 3 ]]; then
 						COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
 					else
-						COMPREPLY=( $(compgen -W "${crypts}" -- ${cur}) )
+						COMPREPLY=( $(compgen -W "${crypts} ${devs}" -- ${cur}) )
 					fi
 					return;;
 				*)
@@ -93,12 +97,13 @@ _cryptdisksd_completion()
 			esac
 			return;;
 		add)
-			local opt_c=0 opt_p=0 opt_t=0 opt_crypt=0 opt_dev=0 i=0 j=0 compreply=""
+			local opt_i=0 opt_p=0 opt_t=0 opt_crypt=0 opt_dev=0 i=0 j=0 compreply=""
+			devs="$(for dir in ${conf[BLOCKDEVSDIRS]}; do ls ${dir};done |sort -u)"
 			for (( i=1;i<${args[0]};i++ )); do
 				case ${args[i]} in
 					-p) [[ ${opt_p} -eq 0 ]] && opt_p=1 || return;;
-					-c) [[ ${opt_c} -eq 0 ]] && opt_c=1 || return;;
 					-t) [[ ${opt_t} -eq 0 ]] && opt_t=1 || return;;
+					-i) [[ ${opt_i} -eq 0 ]] && opt_i=1 || return;;
 					*)
 						if [[ ! ${args[i+1]} == "-p" ]]; then
 							j=$((j+1)); [[ ${j} -gt 2 ]] && return
@@ -109,39 +114,27 @@ _cryptdisksd_completion()
 			done
 			case ${args[1]} in
 				add)
-					COMPREPLY=( $(compgen -W "-h -c -t -p ${crypts} ${devs}" -- ${cur}) ); return;;
+					compreply+="-h -i -t -p ${crypts} ${devs}";;
 				-h)
 					return;;
 				-p)
-					COMPREPLY=( $(compgen -W "${keys}" -- ${cur}) )
-					return;;
-				-t)
-					COMPREPLY=( $(compgen -W "0 1" -- ${cur}) )
-					return;;
+					compreply+="${keys} ";;
 				*)
-					[[ ${opt_c} -eq 0 ]] && compreply+="-c "
-					[[ ${opt_p} -eq 0 ]] && compreply+="-p "
-					[[ ${opt_t} -eq 0 ]] && compreply+="-t "
 					[[ ${j} -lt 3 && ${opt_crypt} -eq 0 ]] && compreply+="${crypts} "
 					[[ ${j} -lt 3 && ${opt_dev} -eq 0 ]] && compreply+="${devs} "
-					case "${args[0]} ${opt_c} ${opt_p} ${opt_t}" in
-						"2 0 0 0") compreply+="${commands} ";;
-						"3 1 0 0") compreply+="${commands} ";;
-						"5 0 1 0") compreply+="${commands} ";;
-						"6 1 1 0") compreply+="${commands} ";;
-						"2 0 0 1") compreply+="${commands} ";;
-						"3 1 0 1") compreply+="${commands} ";;
-						"5 0 1 1") compreply+="${commands} ";;
-						"6 1 1 1") compreply+="${commands} ";;
-					esac
-					COMPREPLY=( $(compgen -W "${compreply}" -- ${cur}) )
-					return;;
+					case "${args[0]} ${opt_p} ${opt_t} ${opt_i}" in
+						"2 0 0 0"|"3 0 0 1"|"5 1 0 0"|"6 1 0 1"|"6 0 1 1"|"7 1 1 1") compreply+="${commands} ";;
+					esac;;
 			esac
+			[[ ${opt_p} -eq 0 ]] && compreply+="-p "
+			[[ ${opt_t} -eq 0 ]] && compreply+="-t "
+			[[ ${opt_i} -eq 0 ]] && compreply+="-i "
+			COMPREPLY=( $(compgen -W "${compreply}" -- ${cur}) )
 			return;;
 		del)
 			case ${args[1]} in
 				del)
-					COMPREPLY=( $(compgen -W "-h -c -t ${crypts} ${devs}" -- ${cur}) ); return;;
+					COMPREPLY=( $(compgen -W "-h -i -t ${crypts} ${devs}" -- ${cur}) ); return;;
 				-h)
 					return;;
 				-t)
@@ -232,7 +225,7 @@ _parse_cmd()
 		i=$((i-1))
 		args[args[0]]=${COMP_WORDS[i]}
 	done
-	cmd=${args[args[0]]}
+	[[ "${args[args[0]]}" == "status" && "${COMP_WORDS[i-1]}" == "keyserver" ]] && cmd="keyserver" || cmd=${args[args[0]]}
 }
 
 _init_conf()
@@ -255,7 +248,7 @@ _init_conf()
 	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
 	keys="$(cat ${conf[CRYPTTAB]} |tr -s "\t" |cut -f3 |cut -d'/' -f1 |sort -u)"
 	crypts="$(cat ${conf[CRYPTTAB]} |cut -f1)"
-	devs="$(for dir in ${conf[BLOCKDEVSDIRS]}; do ls ${dir};done |sort -u)"
+	devs="$(cat ${conf[CRYPTTAB]} |cut -f2)"
 	keysrv="$(getent passwd |grep ${n} |cut -d':' -f1)"
 	bootsrv="$(grep "BOOTSERVERS=" ${conf[CRYPTDISKSDDIR]}/boot.conf 2>/dev/null |cut -d'=' -f2)"
 }
