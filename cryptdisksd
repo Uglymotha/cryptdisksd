@@ -370,13 +370,13 @@ do_systemd_daemon()
 			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
 				if crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
 					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}" || echo "${RED}Not Found!${NOR}")"
+					[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
 					[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
 				else
 					pp="-" dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
 					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && crypt_arr[3]=0 \
 																											   || crypt_arr[3]=1
 				fi
-				[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
 				active_mnt[${msg[1]}]="${dev} ${pp} ${crypt_arr[3]} $(do_timer)"
 				do_log debug "added ${msg[1]} to active mounts"
 			fi
@@ -730,6 +730,7 @@ do_daemon_cleanup()
 		if [[ ! -z "${crypt_arr[@]}" ]]; then
 			dev="$(do_find_dev ${crypt_arr[1]})" pp="$(do_eval_pp "${crypt_arr[2]}")"
 			[[ -z "${cached_pp[${pp}]}" ]] && key="$(t_keyctl 1 search @u user ${pp})" && do_move_passphrase "${pp}" "${key}"
+			[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
 			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		else
 			dev=/dev/"$(t_dmsetup 1 deps ${crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2 2>/dev/null)" pp="-"
@@ -1058,11 +1059,10 @@ do_control_status()
 		else
 			_trim="Off  "
 		fi
-		if [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ && -n "${bootconf[STORAGEPP]}" ]]; then
-			_pp="$(do_eval_pp "${bootconf[STORAGEPP]}")"
-		elif [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ && -z "${bootconf[STORAGEPP]}" ]]; then
-			_pp="${conf[SYSTEMPP]}"
-		fi
+		if [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ ]]; then
+			[[ -n "${bootconf[STORAGEPP]}" ]] && _pp="$(do_eval_pp "${bootconf[STORAGEPP]}")" || _pp="${conf[SYSTEMPP]}"
+            [[ -x "${bootconf[STORAGEALGO]}" ]] && pp+="/${bootconf[STORAGEALGO]}/${bootconf[STORAGEKEYSZ]}/${bootconf[STORAGEHASH]}"
+        fi
 		_pp="${_pp##${conf[PP_PREFIX]}:}" _time="$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
 		[[ "${__crypt_arr[1]}" == "-" ]] && _status="${YEL}Online" || _status="${GRN}Online"
 		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[0]}${PE}${_trim}${NOR}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
@@ -1082,6 +1082,7 @@ do_control_status()
 		__crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
 		[[ "${__crypt_arr[3]}" == "1" ]] && _trim="On   " || _trim="Off  "
 		_pp="$(do_eval_pp ${__crypt_arr[2]})"
+		[[ -n "${__crypt_arr[4]}" ]] && _pp+="/${__crypt_arr[4]}/${__crypt_arr[5]}/${__crypt_arr[6]}"
 		_pp="${_pp##${conf[PP_PREFIX]}:}"
 		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[1]}${PE}${_trim}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
