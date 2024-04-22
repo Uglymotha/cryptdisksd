@@ -3146,7 +3146,7 @@ do_cryptdisksd_cmd()
 	exec {stdin}<&0
 	[[ "${command,,}" == "stop" ]] && to="-t${conf[START_TIMEOUT]}" || to="-t${conf[QUEUE_TIMEOUT]}"
 	sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
-	socat ${to} - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- &
+	socat ${to} - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- 2>/dev/null &
 	pid_socat=$!
 
 	case ${command,,} in
