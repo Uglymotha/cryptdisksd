@@ -2802,10 +2802,10 @@ do_echo_use()
 		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -h ] {crypt | device }${NOR}\n\n"
 		echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text";;
 	keyserver)
-		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tSecure Erase Device\n"
-		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -h | -f | status HOST ]${NOR}\n\n"
+		echo -e "${BOLD}${MYNAME} $1${NOR}\t\t${MYNAME} Keyserver\n"
+		echo -e " Usage:\n\t${BOLD}${MYNAME} $1 [ -h | -f | status HOST ]\n\r\tKeyserver requires at least one option.${NOR}\n"
 		echo -e " Options:\n\t${BOLD}-h${NOR}\t\tDisplay This Help Text"
-		echo -e "\t${BOLD}-f${NOR}\t\tRun in Foreground (Debug) Mode. Can not be Started by root"
+		echo -e "\t${BOLD}-f${NOR}\t\tRun in Foreground (Debug) Mode. Can not be Started by root."
 		echo -e "\t${BOLD}status HOST${NOR}\tDisplay Status of Keyserver for HOST";;
 	bootsan)
 		echo -e "${BOLD}${MYNAME} $1${NOR}\t\tAdd Keys to Keyserver and Start Host\n"
@@ -3394,6 +3394,7 @@ elif [[ "$1" == "keyserver" ]]; then
 	[[ -n "$3" ]] && HOME=$(getent passwd "$3" |cut -d':' -f6 2>/dev/null)
 	if [[ $# -eq 1 || ( $# -eq 2 && "$2" == "-f" ) ]]; then
 		[[ "$2" == "-f" ]] && FOREGROUND=1
+		[[ "${FOREGROUND}" -ne 1 && "${PPID}" -ne 1 ]] && do_echo_use keyserver
 		do_systemd_keysrv_start
 	elif [[ "$2" != "status" || $# -gt 3 ]]; then
 		do_echo_use keyserver
