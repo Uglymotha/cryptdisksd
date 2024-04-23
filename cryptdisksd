@@ -19,6 +19,7 @@ do_init_conf()
 	done fi
 	[[ -z "${ID}" ]] && conf[DISTNAME]="unknown-linux" || conf[DISTNAME]="${ID}"
 	[[ -z "${VERSION_ID}" ]] && conf[DISTVERSION]="0.00.000" || conf[DISTVERSION]="${VERSION_ID}"
+	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash_completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]=${MYNAME}:system
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
 	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
@@ -37,7 +38,6 @@ do_init_conf()
 	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
 	[[ -z "${conf[START_TIMEOUT]}" ]] && conf[START_TIMEOUT]=5
 	[[ -z "${conf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]=3
-	[[ -z "${conf[PP_PREFIX]}" ]] && conf[PP_PREFIX]=${MYNAME}
 	[[ -z "${conf[QUEUE_TIMEOUT]}" ]] && conf[QUEUE_TIMEOUT]=2
 	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
 	[[ -z "${conf[FWDIR]}" ]] && conf[FWDIR]="/sys/firmware/efi/efivars"
@@ -1063,7 +1063,7 @@ do_control_status()
 			[[ -n "${bootconf[STORAGEPP]}" ]] && _pp="$(do_eval_pp "${bootconf[STORAGEPP]}")" || _pp="${conf[SYSTEMPP]}"
             [[ -x "${bootconf[STORAGEALGO]}" ]] && pp+="/${bootconf[STORAGEALGO]}/${bootconf[STORAGEKEYSZ]}/${bootconf[STORAGEHASH]}"
         fi
-		_pp="${_pp##${conf[PP_PREFIX]}:}" _time="$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
+		_time="$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
 		[[ "${__crypt_arr[1]}" == "-" ]] && _status="${YEL}Online" || _status="${GRN}Online"
 		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[0]}${PE}${_trim}${NOR}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
@@ -1079,11 +1079,10 @@ do_control_status()
 			break
 		fi done
 		[[ ! "${_status}" == "${YEL}Waiting" ]] && _status="${RED}Offline" _time="-"
-		__crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
+		__crypt_arr=($(do_xcrypt_fromtab "${_crypt}")) || continue
 		[[ "${__crypt_arr[3]}" == "1" ]] && _trim="On   " || _trim="Off  "
 		_pp="$(do_eval_pp ${__crypt_arr[2]})"
 		[[ -n "${__crypt_arr[4]}" ]] && _pp+="/${__crypt_arr[4]}/${__crypt_arr[5]}/${__crypt_arr[6]}"
-		_pp="${_pp##${conf[PP_PREFIX]}:}"
 		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[1]}${PE}${_trim}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
 	done
 	echo >&${_socat[1]}
@@ -1179,7 +1178,7 @@ do_control_putrmkey()
 	[[ "${_srv}" == "1" ]] && _srv=${bootconf[BOOTSERVERS]}
 	if [[ "${cmd}" == "rmkey" ]]; then
 		_s="Remove " _t=" from:"
-	elif [[ "${_pp}" != "${conf[PP_PREFIX]}::" ]]; then
+	elif [[ "${_pp}" != "::" ]]; then
 		_s="Put " _t=" to:"
 	else
 		_s="Update" _pp=""
@@ -1667,14 +1666,13 @@ do_xcrypt_fromtab()
 
 do_eval_pp()
 {
-	# Evaluate the passphrase and prepend conf[PP_PREFIX] or make conf[SYSTEMPP]. 
-	if [[ ${1,,} =~ ^(${MYNAME}:|${conf[PP_PREFIX]}:|)(1|master|system|system:master)$ ]]; then
-		echo "${conf[SYSTEMPP]}"
-	elif [[ ! ${1,,} =~ ^${conf[PP_PREFIX]}: ]]; then
-		echo "${conf[PP_PREFIX]}:$(tr -d '|, $' <<<"${1,,}")"
-	else 
-		echo "$(tr -d '|, $' <<<"${1,,}")"
-	fi
+	# Evaluate and sanitize the passphrase.
+	local pp="$1"
+	shopt -s nocasematch
+	[[ "${pp}" =~ ^S{MYNAME}: ]] && pp="${pp:$((${#MYNAME}+1)):${#pp}}"
+	[[ "${pp}" =~ ^(1|master|system|system:1|system:master)$ ]] && pp="system"
+	echo "${pp}"
+	shopt -u nocasematch
 }
 
 do_find_dev()
@@ -1754,7 +1752,7 @@ do_cache_pp()
 		[[ ${timeout} -eq 0 ]] && key="-" || key="$((timeout/86400))d $((timeout/3600%24))h $((timeout/60%60))m"
 		do_log debug "set ${pp} timeout to ${key}"
 	fi
-	return  ${r}
+	return ${r}
 }
 
 # Query the user for a passphrase. We get called with 1 parameter, the passphrase to query.
@@ -1780,7 +1778,7 @@ query_passphrase()
 	do_log debug "query for ${pp} passphrase started"
 
 	# Receive a passphrase from the user check it against key stored in firmware.
-	do_ask_passphrase "${POS}Enter ${pp} Passphrase: " || do_term_query_passphrase
+	do_ask_passphrase "${POS}(${UL}${YMANE}${ULO}) Enter ${pp} Passphrase: " || do_term_query_passphrase
 	[[ ${mode} -ne 2 ]] && ppchk=$(do_check_passphrase "${pp}" "${passphrase}" 0 ${mode})$?
 	case ${ppchk} in
 	3)
@@ -1791,15 +1789,16 @@ query_passphrase()
 		# Key not present in firmware, ask for confirmation from the user.
 		[[ -n "${WARN}" ]] && echo -e "${WARN}" >&${__fd_user[1]}
 		_passphrase="${passphrase}" passphrase="$([[ ${mode} -ne 2 ]] && echo "Created key file. ")"
-		do_ask_passphrase "${POS}${passphrase}Confirm ${pp} Passphrase: " || do_term_query_passphrase
+		do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) ${passphrase}Confirm ${pp} Passphrase: " || do_term_query_passphrase
 		# If the passphrase does not match, enter a loop until it does and wirte the keyfile if ok.
 		until [[ "${_passphrase}" == "${passphrase}" ]]; do
 			[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
-			do_ask_passphrase "${POS}Passphrases do not Match. Enter ${pp} Passphrase: " || do_term_query_passphrase
+			do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) Passphrases do not Match. Enter ${pp} Passphrase: " \
+				|| do_term_query_passphrase
 			_passphrase="${passphrase}"
 			[[ ${mode} -ne 2 && $(do_check_passphrase "${pp}" "${passphrase}" 1 ${mode})$? -ge 3 ]] && do_term_query_passphrase
 			[[ -n "${WARN}" ]] && echo -e "${WARN}" >&${__fd_user[1]}
-			do_ask_passphrase "${POS}Confirm ${pp} Passphrase: " || do_term_query_passphrase
+			do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) Confirm ${pp} Passphrase: " || do_term_query_passphrase
 		done
 		[[ ${mode} -ne 2 ]] && do_write_keyfile "${pp}" "${passphrase}"
 		do_log debug "received passphrase after $(do_timer ${_time_start})s";;
@@ -1808,7 +1807,8 @@ query_passphrase()
 		until [[ ${ppchk} -eq 0 ]]; do
 			do_log debug "query passphrase check failed"
 			[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
-			do_ask_passphrase "${POS}Incorrect Passphrase. Enter ${pp} Passphrase: " || do_term_query_passphrase
+			do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) Incorrect Passphrase. Enter ${pp} Passphrase: " \
+				|| do_term_query_passphrase
 			ppchk=$(do_check_passphrase "${pp}" "${passphrase}" 0 ${mode})$?
 		done
 		do_log debug "received passphrase after $(do_timer ${_time_start})s";;
@@ -2093,7 +2093,11 @@ key_clnt()
 		coproc _ssh ( ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} \
 					      ${bootconf[BOOTUSER]}@${srv} "${cmd^^}" "${pp}" "${kto}" 2>/dev/null)
 		[[ ${cmd} =~ ^(put|add)$ ]] && echo "${passphrase}" >&${_ssh[1]} 
-		[[ ${cmd} == "update" ]] && cat $0 >&${_ssh[1]} && echo $'\f' >&${_ssh[1]}
+		[[ ${cmd} == "update" ]] && for f in ${conf[FILES]}; do
+			echo "${f}" >&${_ssh[1]}
+			cat ${f} >&${_ssh[1]}
+			echo $'\f' >&${_ssh[1]}
+		done
 		IFS= read -t${timeout} -ru${_ssh[0]} res
 		r=$?
 		if [[ ${r} -ne 0 || ( "${cmd}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ) \
@@ -2158,6 +2162,23 @@ key_clnt()
 	do_log debug2 "finished after $(do_timer ${_time_start})s"
 }
 
+do_sanboot_update()
+{
+	local r=0 res i f
+	while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} f && [[ "${r}" -ne 1 ]]; do
+		local t="$(mktemp)"
+		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} res && [[ "${res}" != $'\f' ]]; do
+			echo "${res}" >>${t}
+		done || r=1
+		if [[ ${r} -ne 1 ]]; then
+			diff -q ${t} ${f} >/dev/null 2>&1 && r=2 || sudo /usr/bin/cp -a ${t} ${f} || r=1
+		fi
+		rm -f ${t} >/dev/null 2>&1
+	done || r=1
+	[[ ${r} -eq 0 ]] && systemctl --user stop ${MYNAME}-keyserver.service >/dev/null 2>&1
+	return ${r}
+}
+
 do_sanboot()
 {
 	local myname="${MYNAME}-boot:" passphrase fd_fifo res r=0
@@ -2171,14 +2192,7 @@ do_sanboot()
 		rm -f ${KEYSRVDIR}/${cmd}.$$.res
 		return 1
 	elif [[ ${cmd} == "update" ]]; then
-		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} res; do
-			[[ ${res} == $'\f' ]] && break
-			echo "${res}" >>${KEYSRVDIR}/${MYNAME}.${BASHPID}
-		done || r=1
-		[[ ${r} -eq 0 ]] && diff -q ${KEYSRVDIR}/${MYNAME}.${BASHPID} $0 >/dev/null 2>&1 && r=2
-		[[ ${r} -eq 0 ]] && ! sudo /usr/bin/cp ${KEYSRVDIR}/${MYNAME}.${BASHPID} $0 && r=1
-		[[ ${r} -eq 0 ]] && systemctl --user stop ${MYNAME}-keyserver.service >/dev/null 2>&1
-		rm -f ${KEYSRVDIR}/${MYNAME}.${BASHPID} >/dev/null 2>&1
+		r=$(do_sanboot_update)$?
 	else
 		exec {fd_fifo}<>${KEYSRVDIR}/${cmd}.$$.res
 		echo "$$ ${cmd} ${pp} ${timeout}"$'\r'"${passphrase}" >${conf[KEYSRV_FIFO]}
@@ -3164,7 +3178,7 @@ do_cryptdisksd_cmd()
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
 		msg+="${smartall} ${smarttest}";;
 	rmkey|putkey)
-		msg+="$([[ $(wc -w <<<"${msg}") -eq 1 ]] && echo ": ")${confirm} ${add} ${cache} ${fw} ${upd} ${srv}";;
+		msg+="$([[ $(wc -w <<<"${msg}") -eq 1 ]] && echo ":: ")${confirm} ${add} ${cache} ${fw} ${upd} ${srv}";;
 	*)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
 		msg+="${confirm}";;
@@ -3375,9 +3389,9 @@ fi
 MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC
 
 # Formatting parameters for console output.
-RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" UL="\033[4m" NOR="\033[0m" RES="\033[2J"
+RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" NOR="\033[0m" RES="\033[2J"
 PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[69C\033[s" PP="\033[u\033[5C\033[s"
-PT="\033[u\033[17C\033[s" PS="\033[u\033[17C" PK="\r\033[36C\033[s"
+PT="\033[u\033[17C\033[s" PS="\033[u\033[17C" PK="\r\033[36C\033[s" UL="\033[4m" ULO="\033[24m"
 OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
