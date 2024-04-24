@@ -20,7 +20,7 @@ do_init_conf()
 	[[ -z "${ID}" ]] && conf[DISTNAME]="unknown-linux" || conf[DISTNAME]="${ID}"
 	[[ -z "${VERSION_ID}" ]] && conf[DISTVERSION]="0.00.000" || conf[DISTVERSION]="${VERSION_ID}"
 	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash_completion/completions/${MYNAME}"
-	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]=${MYNAME}:system
+	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
 	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
 	[[ -z "${conf[RUNDIR]}" ]] && conf[RUNDIR]="/run"
@@ -1669,7 +1669,7 @@ do_eval_pp()
 	# Evaluate and sanitize the passphrase.
 	local pp="$1"
 	shopt -s nocasematch
-	[[ "${pp}" =~ ^S{MYNAME}: ]] && pp="${pp:$((${#MYNAME}+1)):${#pp}}"
+	[[ "${pp}" =~ ^${MYNAME}: ]] && pp="${pp:$((${#MYNAME}+1)):${#pp}}"
 	[[ "${pp}" =~ ^(1|master|system|system:1|system:master)$ ]] && pp="system"
 	echo "${pp}"
 	shopt -u nocasematch
@@ -1773,12 +1773,12 @@ query_passphrase()
 {
 	# Ask for a pssphrase input by user through systemd-ask-password
 	local pp="$1" POS="$2" OK="$3" WARN="$4" FAIL="$5" mode="$([[ -z "$6" ]] && echo 0 || echo $6)" pid_askpp fd_askpp
-	local myname="query:$1:${BASHPID}:" _time_start=$(do_timer) passphrase _passphrase ppchk="${mode}"
+	local myname="query:$1:${BASHPID}:" _time_start=$(do_timer) passphrase _passphrase ppchk="${mode}" PRE="$7"
 	trap 'do_term_query_passphrase' SIGINT SIGTERM
 	do_log debug "query for ${pp} passphrase started"
 
 	# Receive a passphrase from the user check it against key stored in firmware.
-	do_ask_passphrase "${POS}(${UL}${YMANE}${ULO}) Enter ${pp} Passphrase: " || do_term_query_passphrase
+	do_ask_passphrase "${POS}${PRE}Enter ${pp} Passphrase: " || do_term_query_passphrase
 	[[ ${mode} -ne 2 ]] && ppchk=$(do_check_passphrase "${pp}" "${passphrase}" 0 ${mode})$?
 	case ${ppchk} in
 	3)
@@ -1789,16 +1789,15 @@ query_passphrase()
 		# Key not present in firmware, ask for confirmation from the user.
 		[[ -n "${WARN}" ]] && echo -e "${WARN}" >&${__fd_user[1]}
 		_passphrase="${passphrase}" passphrase="$([[ ${mode} -ne 2 ]] && echo "Created key file. ")"
-		do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) ${passphrase}Confirm ${pp} Passphrase: " || do_term_query_passphrase
+		do_ask_passphrase "${POS}${PRE}${passphrase}Confirm ${pp} Passphrase: " || do_term_query_passphrase
 		# If the passphrase does not match, enter a loop until it does and wirte the keyfile if ok.
 		until [[ "${_passphrase}" == "${passphrase}" ]]; do
 			[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
-			do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) Passphrases do not Match. Enter ${pp} Passphrase: " \
-				|| do_term_query_passphrase
+			do_ask_passphrase "${POS}${PRE}Passphrases do not Match. Enter ${pp} Passphrase: " || do_term_query_passphrase
 			_passphrase="${passphrase}"
 			[[ ${mode} -ne 2 && $(do_check_passphrase "${pp}" "${passphrase}" 1 ${mode})$? -ge 3 ]] && do_term_query_passphrase
 			[[ -n "${WARN}" ]] && echo -e "${WARN}" >&${__fd_user[1]}
-			do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) Confirm ${pp} Passphrase: " || do_term_query_passphrase
+			do_ask_passphrase "${POS}${PRE}Confirm ${pp} Passphrase: " || do_term_query_passphrase
 		done
 		[[ ${mode} -ne 2 ]] && do_write_keyfile "${pp}" "${passphrase}"
 		do_log debug "received passphrase after $(do_timer ${_time_start})s";;
@@ -1807,8 +1806,7 @@ query_passphrase()
 		until [[ ${ppchk} -eq 0 ]]; do
 			do_log debug "query passphrase check failed"
 			[[ -n "${FAIL}" ]] && echo -e "${FAIL}" >&${__fd_user[1]}
-			do_ask_passphrase "${POS}(${UL}${MYNAME}${ULO}) Incorrect Passphrase. Enter ${pp} Passphrase: " \
-				|| do_term_query_passphrase
+			do_ask_passphrase "${POS}${PRE}Incorrect Passphrase. Enter ${pp} Passphrase: " || do_term_query_passphrase
 			ppchk=$(do_check_passphrase "${pp}" "${passphrase}" 0 ${mode})$?
 		done
 		do_log debug "received passphrase after $(do_timer ${_time_start})s";;
@@ -1858,11 +1856,11 @@ do_read_passphrase()
 	if ! passphrase="$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}")")"; then
 		if [[ ${network} -eq 1 ]]; then
 			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- {__fd_user}>&${fd_user}-); pid=$!
-			IFS= do_initrd_cmd "Getting ${pp} Passphrase from Boot Servers: " \
+			IFS= do_initrd_cmd "(${UL}${MYNAME}${ULO}) Getting ${pp} Passphrase from Boot Servers: " \
 					read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && fd_pp=1 || fd_pp=0
 		fi
 		if [[ ${fd_pp} -eq 0 ]]; then
-			exec {fd_pp}< <(query_passphrase "${pp}" "${PI}" "${OK}" "${WARN}" "${FAIL}" "${mode}" \
+			exec {fd_pp}< <(query_passphrase "${pp}" "${PI}" "${OK}" "${WARN}" "${FAIL}" "${mode}" "(${UL}${MYNAME}${ULO}) " \
 							{__fd_up}>&1- {__fd_user[0]}<&0- {__fd_user[1]}>&${fd_user}-)
 			! IFS= read -ru${fd_pp} passphrase && return 1
 		fi
@@ -2324,7 +2322,7 @@ do_reset()
 do_initrd()
 {
 	trap 'do_problem "Caught SIGINT or SIGTERM"' SIGINT SIGTERM
-	local MYNAME=init myname="${conf[DISTNAME]}-boot:" version="${conf[DISTVERSION]}" network=0 bootconfinfw=0 rootdir="/.root"
+	local myname="${conf[DISTNAME]}-boot:" version="${conf[DISTVERSION]}" network=0 bootconfinfw=0 rootdir="/.root"
 	local logdev="/dev/zram0" logdir="${rootdir}/var/log" keeplog=0 pid pid_logwriter fd_logwriter libmd="/dev/md/lib" libsz=1
 	local etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=1 init=/lib/systemd/systemd recovery="no" starting=0 FOREGROUND=1
 	local sysimg="/sysimg-${conf[DISTNAME]}-${conf[DISTVERSION]}.sqfs" fd_con
