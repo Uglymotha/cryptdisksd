@@ -19,7 +19,7 @@ do_init_conf()
 	done fi
 	[[ -z "${ID}" ]] && conf[DISTNAME]="unknown-linux" || conf[DISTNAME]="${ID}"
 	[[ -z "${VERSION_ID}" ]] && conf[DISTVERSION]="0.00.000" || conf[DISTVERSION]="${VERSION_ID}"
-	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash_completion/completions/${MYNAME}"
+	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash-completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
 	[[ -z "${conf[DEBUGSHELL]}" ]] && conf[DEBUGSHELL]=0
@@ -906,7 +906,7 @@ get_passphrase()
 			t_sleep ${conf[USER_TIMEOUT]}
 		fi
 		if [[ $2 -eq 1 ]]; then
-			query_passphrase ${crypt_arr[2]} & __pid_querypp=$!
+			query_passphrase ${crypt_arr[2]} "" "" "" "" "" "(${MYNAME})" & __pid_querypp=$!
 			do_log debug "started query user (PID: ${__pid_querypp})"
 		fi
 		[[ -n "${__pid_keyclnt}${__pid_querypp}" ]] && wait ${__pid_keyclnt} ${__pid_querypp}
@@ -1042,13 +1042,13 @@ daemon_control()
 do_control_status()
 {
 	# Connect to control socket and blurt status in some form of a pretty fashion.
-	local _passphrase _waiting_mnt=${msg[5]} _tab_crypt __crypt_arr ___crypt_arr _crypt __crypt _pp _trim _time _status _timeout
+	local _passphrase _waiting_mnt=${msg[5]} _tab_crypt __crypt_arr ___crypt_arr _crypt __crypt _pp _trim _time _timeout
 
 	# Output the status to the coproc, which will transfer it to stdout of the requestor. First al active mounts.
-	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}ACTIVE SINCE${PS}STATUS${NOR}\r" >&${_socat[1]}
+	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}MOUNTED${NOR}\r" >&${_socat[1]}
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for _crypt in ${!active_mnt[@]}; do
-		_status="" __crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
+		__crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
 		_pp=${__crypt_arr[1]} _trim="$(lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3-4)"
 		if [[ "${__crypt_arr[2]}" == "1" ]]; then
 			[[ "${_trim}" =~ 0B ]] && _trim="${BOLD}${RED}Off  " || _trim="On   "
@@ -1063,9 +1063,8 @@ do_control_status()
 			[[ -n "${bootconf[STORAGEPP]}" ]] && _pp="$(do_eval_pp "${bootconf[STORAGEPP]}")" || _pp="${conf[SYSTEMPP]}"
             [[ -x "${bootconf[STORAGEALGO]}" ]] && pp+="/${bootconf[STORAGEALGO]}/${bootconf[STORAGEKEYSZ]}/${bootconf[STORAGEHASH]}"
         fi
-		_time="$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
-		[[ "${__crypt_arr[1]}" == "-" ]] && _status="${YEL}Online" || _status="${GRN}Online"
-		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[0]}${PE}${_trim}${NOR}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
+		_time="${GRN}$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
+		echo -e "${PR}${_crypt::15}${PD}$(basename ${__crypt_arr[0]})${PE}${_trim}${NOR}${PP}${_pp::37}${PT}${_time}${NOR}\r" >&${_socat[1]}
 	done
 
 	# Output all unmounted and waiting crypts.
@@ -1075,15 +1074,15 @@ do_control_status()
 			[[ "${_crypt}" == "${__crypt}" ]] && continue 2
 		done
 		for __crypt in ${!waiting_mnt[@]}; do if [[ "${_crypt}" == "${__crypt}" ]]; then
-			_status="${YEL}Waiting" _time=$(do_timer date ${waiting_mnt[${_crypt}]##* } |cut -d ':' -f-2)
+			_time="${YEL}Waiting"
 			break
 		fi done
-		[[ ! "${_status}" == "${YEL}Waiting" ]] && _status="${RED}Offline" _time="-"
+		[[ ! "${_time}" == "${YEL}Waiting" ]] && _time="${RED}Offline"
 		__crypt_arr=($(do_xcrypt_fromtab "${_crypt}")) || continue
 		[[ "${__crypt_arr[3]}" == "1" ]] && _trim="On   " || _trim="Off  "
 		_pp="$(do_eval_pp ${__crypt_arr[2]})"
 		[[ -n "${__crypt_arr[4]}" ]] && _pp+="/${__crypt_arr[4]}/${__crypt_arr[5]}/${__crypt_arr[6]}"
-		echo -e "${PR}${_crypt::15}${PD}${__crypt_arr[1]}${PE}${_trim}${PP}${_pp::16}${PT}${_time}${PS}${_status}${NOR}\r" >&${_socat[1]}
+		echo -e "${PR}${_crypt::15}${PD}$(basename ${__crypt_arr[1]})${PE}${_trim}${PP}${_pp::37}${PT}${_time}${NOR}\r" >&${_socat[1]}
 	done
 	echo >&${_socat[1]}
 
@@ -1530,7 +1529,7 @@ do_control_get_passphrase()
 			_key=1
 		else
 			do_log debug "failed to get ${_pp} passphrase from user"
-			echo -e "\r\n${RED}${BOLD}Failed to Get ${_pp} Passphrase from Your Yourself and You${NOR}\r" >&${_socat[1]}
+			echo -e "\r\n${RED}${BOLD}Failed to Get ${_pp} Passphrase from You Yourself and You${NOR}\r" >&${_socat[1]}
 		fi
 		exec {_fd_getpp}>&-
 		[[ "$(</proc/${_pid_getpp}/comm)" == "${MYNAME}" ]] && kill -SIGTERM ${_pid_getpp} 2>/dev/null
@@ -2164,14 +2163,16 @@ do_sanboot_update()
 {
 	local r=0 res i f
 	while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} f && [[ "${r}" -ne 1 ]]; do
+		logger -p user.warning "${myname} updating ${f}"
 		local t="$(mktemp)"
 		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} res && [[ "${res}" != $'\f' ]]; do
 			echo "${res}" >>${t}
 		done || r=1
 		if [[ ${r} -ne 1 ]]; then
-			diff -q ${t} ${f} >/dev/null 2>&1 && r=2 || sudo /usr/bin/cp -a ${t} ${f} || r=1
+			diff -q ${t} ${f} >/dev/null 2>&1 && r=2 || cp ${t} ${f} || r=1
 		fi
 		rm -f ${t} >/dev/null 2>&1
+		[[ "${r}" -eq 1 ]] && logger -p user.error "${myname} failed to update ${f}"
 	done || r=1
 	[[ ${r} -eq 0 ]] && systemctl --user stop ${MYNAME}-keyserver.service >/dev/null 2>&1
 	return ${r}
@@ -2190,6 +2191,7 @@ do_sanboot()
 		rm -f ${KEYSRVDIR}/${cmd}.$$.res
 		return 1
 	elif [[ ${cmd} == "update" ]]; then
+		logger -p user.warning "${myname} running update"
 		r=$(do_sanboot_update)$?
 	else
 		exec {fd_fifo}<>${KEYSRVDIR}/${cmd}.$$.res
@@ -2226,9 +2228,9 @@ do_sanboot()
 		[[ "${res,,}" == "nok" ]] && r=1 && logger -p user.warning "${myname} failed removing ${pp} passphrase from keyserver cache"
 		[[ "${res,,}" == "ok" ]]  && r=0 && logger -p user.info "${myname} removing ${pp} passphrase from keyserver cache succeeded"
 	elif [[ ${cmd} == "update" ]]; then
-		[[ ${r} -eq 0 ]] && res=OK   && logger -p user.warning "${myname} update $0 success" 
-		[[ ${r} -eq 1 ]] && res=NOK  && logger -p user.error "${myname} update $0 failed"
-		[[ ${r} -eq 2 ]] && res=SAME && logger -p user.warning "${myname} update $0 same" 
+		[[ ${r} -eq 0 ]] && res=OK   && logger -p user.warning "${myname} update success"
+		[[ ${r} -eq 1 ]] && res=NOK  && logger -p user.error "${myname} update failed"
+		[[ ${r} -eq 2 ]] && res=SAME && logger -p user.warning "${myname} update same"
 	fi
 
 	[[ "${cmd}" != "get" ]] && echo "${res}" >&${out}
@@ -3388,8 +3390,8 @@ MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC
 
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" NOR="\033[0m" RES="\033[2J"
-PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[69C\033[s" PP="\033[u\033[5C\033[s"
-PT="\033[u\033[17C\033[s" PS="\033[u\033[17C" PK="\r\033[36C\033[s" UL="\033[4m" ULO="\033[24m"
+PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[56C\033[s" PP="\033[u\033[5C\033[s"
+PT="\033[u\033[37C\033[s" PK="\r\033[36C\033[s" UL="\033[4m" ULO="\033[24m"
 OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
@@ -3407,8 +3409,8 @@ elif [[ "$1" == "keyserver" ]]; then
 	[[ -n "$3" ]] && HOME=$(getent passwd "$3" |cut -d':' -f6 2>/dev/null)
 	if [[ $# -eq 1 || ( $# -eq 2 && "$2" == "-f" ) ]]; then
 		[[ "$2" == "-f" ]] && FOREGROUND=1
-		[[ "${FOREGROUND}" -ne 1 && "${PPID}" -ne 1 ]] && do_echo_use keyserver
-		do_systemd_keysrv_start
+		[[ "${FOREGROUND}" -eq 1 || "${PPID}" -eq "${MANAGERPID}" ]] && do_systemd_keysrv_start
+		false
 	elif [[ "$2" != "status" || $# -gt 3 ]]; then
 		do_echo_use keyserver
 	elif [[ -z "${HOME}" ]] || ! do_init_conf; then
