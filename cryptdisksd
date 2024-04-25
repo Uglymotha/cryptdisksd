@@ -1056,7 +1056,7 @@ do_control_status()
             [[ -x "${bootconf[STORAGEALGO]}" ]] && pp+="/${bootconf[STORAGEALGO]}/${bootconf[STORAGEKEYSZ]}/${bootconf[STORAGEHASH]}"
         fi
 		_time="${GRN}$(do_timer date ${__crypt_arr[3]} |cut -d ':' -f-2)"
-		echo -e "${PR}${_crypt::15}${PD}$(basename ${__crypt_arr[0]})${PE}${_trim}${NOR}${PP}${_pp::37}${PT}${_time}${NOR}\r" >&${_socat[1]}
+		echo -e "${PR}${_crypt::15}${PD}$(basename ${__crypt_arr[0]})${PE}${_trim}${NOR}${PP}${_pp::38}${PT}${_time}${NOR}\r" >&${_socat[1]}
 	done
 
 	# Output all unmounted and waiting crypts.
@@ -1847,7 +1847,7 @@ do_read_passphrase()
 	if ! passphrase="$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}")")"; then
 		if [[ ${network} -eq 1 ]]; then
 			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- {__fd_user}>&${fd_user}-); pid=$!
-			IFS= do_initrd_cmd "(${UL}${MYNAME}${ULO}) Getting ${pp} Passphrase from Boot Servers: " \
+			IFS= do_initrd_cmd "(${MYNAME}) Getting ${pp} Passphrase from Boot Servers: " \
 					read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && fd_pp=1 || fd_pp=0
 		fi
 		if [[ ${fd_pp} -eq 0 ]]; then
@@ -2082,11 +2082,20 @@ key_clnt()
 		coproc _ssh ( ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} \
 					      ${bootconf[BOOTUSER]}@${srv} "${cmd^^}" "${pp}" "${kto}" 2>/dev/null)
 		[[ ${cmd} =~ ^(put|add)$ ]] && echo "${passphrase}" >&${_ssh[1]} 
-		[[ ${cmd} == "update" ]] && for f in ${conf[FILES]}; do
-			echo "${f}" >&${_ssh[1]}
-			cat ${f} >&${_ssh[1]}
-			echo $'\f' >&${_ssh[1]}
-		done
+		if [[ ${cmd} == "update" ]]; then
+			do_log warning "updating ${srv}"
+			for f in ${conf[FILES]}; do
+				res=0
+				do_log warning "updating ${f} on ${srv}"
+				echo -e "${f}\n$(du -b ${f} |cut -f1)" >&${_ssh[1]}
+				dd obs=1 if=${f} >&${_ssh[1]} || res=1
+				IFS= read -t${timeout} -ru${_ssh[0]} res || res=1
+				[[ "${res}" -eq 0 ]] && do_log info "update ${f} on ${srv} ok"
+				[[ "${res}" -eq 1 ]] && do_log error "update ${f} on ${srv} failed"
+				[[ "${res}" -eq 2 ]] && do_log warning "update ${f} on ${srv} equal"
+			done
+			exit
+		fi
 		IFS= read -t${timeout} -ru${_ssh[0]} res
 		r=$?
 		if [[ ${r} -ne 0 || ( "${cmd}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ) \
@@ -2151,28 +2160,9 @@ key_clnt()
 	do_log debug2 "finished after $(do_timer ${_time_start})s"
 }
 
-do_sanboot_update()
-{
-	local r=0 res i f
-	while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} f && [[ "${r}" -ne 1 ]]; do
-		logger -p user.warning "${myname} updating ${f}"
-		local t="$(mktemp)"
-		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} res && [[ "${res}" != $'\f' ]]; do
-			echo "${res}" >>${t}
-		done || r=1
-		if [[ ${r} -ne 1 ]]; then
-			diff -q ${t} ${f} >/dev/null 2>&1 && r=2 || cp ${t} ${f} || r=1
-		fi
-		rm -f ${t} >/dev/null 2>&1
-		[[ "${r}" -eq 1 ]] && logger -p user.error "${myname} failed to update ${f}"
-	done || r=1
-	[[ ${r} -eq 0 ]] && systemctl --user stop ${MYNAME}-keyserver.service >/dev/null 2>&1
-	return ${r}
-}
-
 do_sanboot()
 {
-	local myname="${MYNAME}-boot:" passphrase fd_fifo res r=0
+	local myname="${MYNAME}-boot:" passphrase fd_fifo res r=0 t f
 	trap 'rm -f ${KEYSRVDIR}/${MYNAME}.${BASHPID} ${KEYSRVDIR}/${cmd}.$$.res >/dev/null 2>&1; exit' SIGINT SIGTERM
 
 	if ! do_init_conf keyserver || ! mkfifo ${KEYSRVDIR}/${cmd}.$$.res || ! chmod 600 ${KEYSRVDIR}/${cmd}.$$.res; then
@@ -2184,7 +2174,23 @@ do_sanboot()
 		return 1
 	elif [[ ${cmd} == "update" ]]; then
 		logger -p user.warning "${myname} running update"
-		r=$(do_sanboot_update)$?
+		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} f; do
+			r=0 t="$(mktemp)" || r=1
+			logger -p user.warning "${myname} updating ${f}"
+			read -t${conf[CMD_TIMEOUT]} -ru${in} res || r=1
+			if [[ "${r}" -ne 1 && -f "${f}" && ! -L "${f}" && "${res}" -gt 0 ]]; then
+				if dd ibs=1 of=${t} count=${res} 2>/dev/null; then
+					diff -q ${t} ${f} >/dev/null 2>&1 && r=2 || cp ${t} ${f} || r=1
+				else r=1
+				fi
+			fi
+			[[ -n "${t}" ]] && rm -f ${t} >/dev/null 2>&1
+			[[ "${r}" -eq 1 ]] && logger -p user.error "${myname} ${f} failed"
+			[[ "${r}" -eq 2 ]] && logger -p user.info "${myname} ${f} not changed"
+			echo "${r}" >&${out}
+		done
+		systemctl --user stop ${MYNAME}-keyserver.service >/dev/null 2>&1
+		return
 	else
 		exec {fd_fifo}<>${KEYSRVDIR}/${cmd}.$$.res
 		echo "$$ ${cmd} ${pp} ${timeout}"$'\r'"${passphrase}" >${conf[KEYSRV_FIFO]}
@@ -2219,10 +2225,6 @@ do_sanboot()
 		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname} ${pp} passphrase not cached on keyserver"
 		[[ "${res,,}" == "nok" ]] && r=1 && logger -p user.warning "${myname} failed removing ${pp} passphrase from keyserver cache"
 		[[ "${res,,}" == "ok" ]]  && r=0 && logger -p user.info "${myname} removing ${pp} passphrase from keyserver cache succeeded"
-	elif [[ ${cmd} == "update" ]]; then
-		[[ ${r} -eq 0 ]] && res=OK   && logger -p user.warning "${myname} update success"
-		[[ ${r} -eq 1 ]] && res=NOK  && logger -p user.error "${myname} update failed"
-		[[ ${r} -eq 2 ]] && res=SAME && logger -p user.warning "${myname} update same"
 	fi
 
 	[[ "${cmd}" != "get" ]] && echo "${res}" >&${out}
@@ -3383,7 +3385,7 @@ MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" NOR="\033[0m" RES="\033[2J"
 PI="\r\033[9C" PR="\r\033[s" PD="\033[u\033[16C\033[s" PE="\033[u\033[56C\033[s" PP="\033[u\033[5C\033[s"
-PT="\033[u\033[37C\033[s" PK="\r\033[36C\033[s" UL="\033[4m" ULO="\033[24m"
+PT="\033[u\033[38C\033[s" PK="\r\033[37C\033[s" UL="\033[4m" ULO="\033[24m"
 OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
