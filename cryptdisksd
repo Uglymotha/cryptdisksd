@@ -2179,7 +2179,7 @@ do_sanboot()
 			logger -p user.warning "${myname} updating ${f}"
 			read -t${conf[CMD_TIMEOUT]} -ru${in} res || r=1
 			if [[ "${r}" -ne 1 && -f "${f}" && ! -L "${f}" && "${res}" -gt 0 ]]; then
-				dd ibs=1 of=${t} count=${res} 2>/dev/null || r=1
+				dd ibs=1 of=${t} count=${res} 0<&${in} 2>/dev/null || r=1
 				[[ "${r}" -eq 0 ]] && diff -q ${t} ${f} >/dev/null 2>&1 && r=2
 				[[ "${r}" -eq 0 ]] && ! cp ${t} ${f} && r=1
 			fi
