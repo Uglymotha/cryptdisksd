@@ -367,11 +367,11 @@ do_systemd_daemon()
 			if [[ "${msg[0],,}" == "unmount" && ${msg[2]} -ne 1 ]]; then
 				do_log debug "removed ${msg[1]} from active mounts"
 				unset active_mnt[${msg[1]}]
-			elif [[ "${msg[0],,}" == "mount" && ( ${msg[2]} -eq 0 || ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
+			elif [[ "${msg[0],,}" == "mount" && ${msg[2]} -ne 1 && ${msg[2]} -ne 2 && ${msg[2]} -ne 5 ]]; then
 				if crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
-					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}" || echo "${RED}Not Found!${NOR}")"
+					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}")" || dev"${RED}Not Found!${NOR}"
 					[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
-					[[ ${msg[2]} -eq 3 ]] && crypt_arr[3]=0; [[ ${msg[2]} -eq 4 ]] && crypt_arr[3]=1
+					[[ "${msg[2]}" -ne 0 ]] && crypt_arr[3]="${msg[2]}"
 				else
 					pp="-" dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
 					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && crypt_arr[3]=0 \
@@ -380,7 +380,7 @@ do_systemd_daemon()
 				active_mnt[${msg[1]}]="${dev} ${pp} ${crypt_arr[3]} $(do_timer)"
 				do_log debug "added ${msg[1]} to active mounts"
 			fi
-			if [[ ${msg[2]} -eq 1 || ${msg[2]} -eq 5 ]]; then
+			if [[ "${msg[2]}" -eq 1 || "${msg[2]}" -eq 5 ]]; then
 				start_status=1
 			elif [[ ${start_status} -eq 0 && (  ( "${msg[0],,}" == "unmount" && ${msg[2]} -eq 2 ) \
 												|| ${msg[2]} -eq 3 || ${msg[2]} -eq 4 ) ]]; then
@@ -400,7 +400,7 @@ do_systemd_daemon()
 			fi
 			if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
 				pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
-				do_log debug "ignoring ${msg[1]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
+				do_log info "ignoring ${msg[1]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 			fi;;
 		add|change)
 			! crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && continue
@@ -419,7 +419,7 @@ do_systemd_daemon()
 				[[  -n "${key}" ]] && do_move_passphrase "${pp}" "${key}"
 				if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]];then
 					pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
-					do_log debug "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
+					do_log info "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 					continue
 				fi
 				daemon_mount_crypt "${crypt_arr[0]}" "${dev}" "${pp}" "${crypt_arr[3]}" "${crypt_arr[4]}" \
@@ -906,7 +906,7 @@ get_passphrase()
 			t_sleep ${conf[USER_TIMEOUT]}
 		fi
 		if [[ $2 -eq 1 ]]; then
-			query_passphrase ${crypt_arr[2]} "" "" "" "" "" "(${MYNAME})" & __pid_querypp=$!
+			query_passphrase ${crypt_arr[2]} "" "" "" "" "" "(${MYNAME}) " & __pid_querypp=$!
 			do_log debug "started query user (PID: ${__pid_querypp})"
 		fi
 		[[ -n "${__pid_keyclnt}${__pid_querypp}" ]] && wait ${__pid_keyclnt} ${__pid_querypp}
@@ -1048,17 +1048,9 @@ do_control_status()
 	echo -e "\r${GREY}${BOLD}${PR}CRYPT${PD}DEVICE${PE}TRIM${PP}PASSPHRASE${PT}MOUNTED${NOR}\r" >&${_socat[1]}
 	[[ -n "${bootconf[STORAGEPREFIX]}" ]] && __storageprefix="${bootconf[STORAGEPREFIX]}" || __storageprefix="storage"
 	for _crypt in ${!active_mnt[@]}; do
-		__crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}"))
-		_pp=${__crypt_arr[1]} _trim="$(lsblk -rD ${conf[DMDIR]}/${_crypt} |head -n2 |tail -n1| cut -d' ' -f3-4)"
-		if [[ "${__crypt_arr[2]}" == "1" ]]; then
-			[[ "${_trim}" =~ 0B ]] && _trim="${BOLD}${RED}Off  " || _trim="On   "
-		elif [[ ! "${_trim}" =~ 0B ]]; then
-			_trim="${BOLD}${RED}On   "
-		elif [[ ${___crypt_arr[3]} == "1" ]]; then
-			_trim="${BOLD}${YEL}Off  "
-		else
-			_trim="Off  "
-		fi
+		__crypt_arr=(${active_mnt[${_crypt}]}) ___crypt_arr=($(do_xcrypt_fromtab "${_crypt}")) _pp=${__crypt_arr[1]}
+		[[ "${__crypt_arr[2]}" == "0" ]] && _trim="Off  "; [[ "${__crypt_arr[2]}" == "3" ]] && _trim="${BOLD}${YEL}Off  "
+		[[ "${__crypt_arr[2]}" == "1" ]] && _trim="On   "; [[ "${__crypt_arr[2]}" == "4" ]] && _trim="${BOLD}${RED}On   "
 		if [[ "${__crypt_arr[1]}" == "-" && "${_crypt}" =~ ^${__storageprefix}[0-9]{1,2}$ ]]; then
 			[[ -n "${bootconf[STORAGEPP]}" ]] && _pp="$(do_eval_pp "${bootconf[STORAGEPP]}")" || _pp="${conf[SYSTEMPP]}"
             [[ -x "${bootconf[STORAGEALGO]}" ]] && pp+="/${bootconf[STORAGEALGO]}/${bootconf[STORAGEKEYSZ]}/${bootconf[STORAGEHASH]}"
@@ -1859,7 +1851,7 @@ do_read_passphrase()
 					read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && fd_pp=1 || fd_pp=0
 		fi
 		if [[ ${fd_pp} -eq 0 ]]; then
-			exec {fd_pp}< <(query_passphrase "${pp}" "${PI}" "${OK}" "${WARN}" "${FAIL}" "${mode}" "(${UL}${MYNAME}${ULO}) " \
+			exec {fd_pp}< <(query_passphrase "${pp}" "${PI}" "${OK}" "${WARN}" "${FAIL}" "${mode}" "(${MYNAME}) " \
 							{__fd_up}>&1- {__fd_user[0]}<&0- {__fd_user[1]}>&${fd_user}-)
 			! IFS= read -ru${fd_pp} passphrase && return 1
 		fi
@@ -3308,7 +3300,7 @@ do_systemd_daemon_start()
 
 	# Check if there is a crypttab, log message if there isn't since everything we do is based on it.
 	if [[ ! -f ${conf[CRYPTTAB]} ]]; then
-		echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase\t\t#TRIM" >${conf[CRYPTTAB]}
+		echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase(/algorithm/key-size/hash)\t\t#TRIM" >${conf[CRYPTTAB]}
 		do_log warning "crypttab not found, creating default"
 		systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
 		start_status=2
