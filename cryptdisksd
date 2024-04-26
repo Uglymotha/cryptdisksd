@@ -2024,7 +2024,7 @@ do_systemd_keysrv()
 
 do_keysrv_send()
 {
-	echo "$@" >${cmd}.${pid}.res
+	cat >${cmd}.${pid}.res <<<"$@" 2>/dev/null
 	return 0
 }
 
@@ -2081,22 +2081,29 @@ key_clnt()
 		do_log debug "${msg}: ${srv}"
 		coproc _ssh ( ssh -i ${CONFDIR}/${bootconf[BOOTUSERKEY]} -o UserKnownHostsFile=${CONFDIR}/${bootconf[BOOTSERVERKEYS]} \
 					      ${bootconf[BOOTUSER]}@${srv} "${cmd^^}" "${pp}" "${kto}" 2>/dev/null)
-		[[ ${cmd} =~ ^(put|add)$ ]] && echo "${passphrase}" >&${_ssh[1]} 
+		[[ ${cmd} =~ ^(put|add)$ ]] && cat >&${_ssh[1]} <<<"${passphrase}" 2>/dev/null
 		if [[ ${cmd} == "update" ]]; then
-			do_log warning "updating ${srv}"
 			for f in ${conf[FILES]}; do
 				res=0
 				do_log warning "updating ${f} on ${srv}"
-				echo -e "${f}\n$(du -b ${f} |cut -f1)" >&${_ssh[1]}
-				dd obs=1 if=${f} >&${_ssh[1]} || res=1
-				IFS= read -t${timeout} -ru${_ssh[0]} res || res=1
-				[[ "${res}" -eq 0 ]] && do_log info "update ${f} on ${srv} ok"
-				[[ "${res}" -eq 1 ]] && do_log error "update ${f} on ${srv} failed"
-				[[ "${res}" -eq 2 ]] && do_log warning "update ${f} on ${srv} equal"
+				cat >&${_ssh[1]} <<<"${f}"$'\n'"$(du -b ${f} |cut -f1)" 2>/dev/null
+				dd obs=1 if=${f} >&${_ssh[1]} 2>/dev/null || res=1
+				[[ "${res}" -ne 1 ]] && ! IFS= read -t${timeout} -ru${_ssh[0]} res 2>/dev/null && res=1
+				case ${res} in
+				0)
+					do_log info "update ${f} on ${srv} ok"
+					[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${GRN}${srv}:${f}${NOR} " >&${__fd_user};;
+				1)
+					do_log error "update ${f} on ${srv} failed"
+					[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}:${f}${NOR} " >&${__fd_user};;
+				2)
+					do_log warning "update ${f} on ${srv} equal"
+					[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${YEL}${srv}:${f}${NOR} " >&${__fd_user};;
+				esac
 			done
 			exit
 		fi
-		IFS= read -t${timeout} -ru${_ssh[0]} res
+		IFS= read -t${timeout} -ru${_ssh[0]} res 2>/dev/null
 		r=$?
 		if [[ ${r} -ne 0 || ( "${cmd}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ) \
 				 		 || ( "${cmd}" == "get" && $(do_check_passphrase "${pp}" "${res}" 0)$? -eq 1 ) ]]; then
@@ -2174,10 +2181,9 @@ do_sanboot()
 		return 1
 	elif [[ ${cmd} == "update" ]]; then
 		logger -p user.warning "${myname} running update"
-		while IFS= read -t${conf[CMD_TIMEOUT]} -ru${in} f; do
+		while read -t${conf[CMD_TIMEOUT]} -ru${in} f 2>/dev/null && read -t${conf[CMD_TIMEOUT]} -ru${in} res 2>/dev/null; do
 			r=0 t="$(mktemp)" || r=1
-			logger -p user.warning "${myname} updating ${f}"
-			read -t${conf[CMD_TIMEOUT]} -ru${in} res || r=1
+			logger -p user.warning "${myname} updating ${f} (${res})"
 			if [[ "${r}" -ne 1 && -f "${f}" && ! -L "${f}" && "${res}" -gt 0 ]]; then
 				dd ibs=1 of=${t} count=${res} 0<&${in} 2>/dev/null || r=1
 				[[ "${r}" -eq 0 ]] && diff -q ${t} ${f} >/dev/null 2>&1 && r=2
@@ -2186,27 +2192,27 @@ do_sanboot()
 			[[ -n "${t}" ]] && rm -f ${t} >/dev/null 2>&1
 			[[ "${r}" -eq 1 ]] && logger -p user.error "${myname} ${f} failed"
 			[[ "${r}" -eq 2 ]] && logger -p user.info "${myname} ${f} not changed"
-			echo "${r}" >&${out}
-		done
+			cat >&${out} <<<"${r}" 2>/dev/null
+		done || logger -p user.error "${myname} update failed"
 		systemctl --user stop ${MYNAME}-keyserver.service >/dev/null 2>&1
 		return
 	else
 		exec {fd_fifo}<>${KEYSRVDIR}/${cmd}.$$.res
-		echo "$$ ${cmd} ${pp} ${timeout}"$'\r'"${passphrase}" >${conf[KEYSRV_FIFO]}
+		cat >>${conf[KEYSRV_FIFO]} <<<"$$ ${cmd} ${pp} ${timeout}"$'\r'"${passphrase}" 2>/dev/null
 	fi
 
 	if [[ ${cmd} != "update" ]] && ! read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} res; then
 		logger -p user.error "${myname} no response received from keyserver"
 		r=1
 	elif [[ "${cmd}" == "get" ]]; then
-		if [[ "${res,,}" == "nok" ]] || ! IFS= read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} passphrase; then
+		if [[ "${res,,}" == "nok" ]] || ! IFS= read -t${conf[KEYSRV_TIMEOUT]} -ru${fd_fifo} passphrase 2>/dev/null; then
 			[[ "${res,,}" == "nok" ]] && logger -p user.info "${myname} ${pp} passphrase not cached by keyserver"
 			[[ "${res,,}" != "nok" ]] && logger -p user.warning "${myname} no ${pp} passphrase received from keyserver"
 			kill -SIGTERM ${PPID} 2>/dev/null
 			r=1
 		else
 			logger -p user.info "${myname} received ${pp} passphrase from keyserver"
-			echo "${passphrase}" >&${out}
+			cat >&${out} <<<"${passphrase}" 2>/dev/null
 		fi
 	elif [[ "${cmd}" == "put" ]]; then
 		[[ "${res,,}" == "same" ]] && r=2 && logger -p user.info "${myname} ${pp} passphrase on keyserver equal to stored passhrase"
@@ -2226,8 +2232,8 @@ do_sanboot()
 		[[ "${res,,}" == "ok" ]]  && r=0 && logger -p user.info "${myname} removing ${pp} passphrase from keyserver cache succeeded"
 	fi
 
-	[[ "${cmd}" != "get" ]] && echo "${res}" >&${out}
-	rm -f ${KEYSRVDIR}/${cmd}.$$.res
+	[[ "${cmd}" != "get" ]] && cat >&${out} <<<"${res}" 2>/dev/null
+	rm -f ${KEYSRVDIR}/${cmd}.$$.res >/dev/null 2>&1
 	return ${r}
 }
 
