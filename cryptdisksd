@@ -2086,7 +2086,7 @@ key_clnt()
 			for f in ${conf[FILES]}; do
 				res=0
 				do_log warning "updating ${f} on ${srv}"
-				cat >&${_ssh[1]} <<<"${f}"$'\n'"$(du -b ${f} |cut -f1)" 2>/dev/null
+				cat >&${_ssh[1]} <<<"${f}"$'\r'"$(du -b ${f} |cut -f1)" 2>/dev/null
 				dd obs=1 if=${f} >&${_ssh[1]} 2>/dev/null || res=1
 				[[ "${res}" -ne 1 ]] && ! IFS= read -t${timeout} -ru${_ssh[0]} res 2>/dev/null && res=1
 				case ${res} in
@@ -2181,7 +2181,7 @@ do_sanboot()
 		return 1
 	elif [[ ${cmd} == "update" ]]; then
 		logger -p user.warning "${myname} running update"
-		while read -t${conf[CMD_TIMEOUT]} -ru${in} f 2>/dev/null && read -t${conf[CMD_TIMEOUT]} -ru${in} res 2>/dev/null; do
+		while IFS=$'\r' read -t${conf[CMD_TIMEOUT]} -ru${in} f res 2>/dev/null; do
 			r=0 t="$(mktemp)" || r=1
 			logger -p user.warning "${myname} updating ${f} (${res})"
 			if [[ "${r}" -ne 1 && -f "${f}" && ! -L "${f}" && "${res}" -gt 0 ]]; then
