@@ -1847,7 +1847,7 @@ do_read_passphrase()
 	if ! passphrase="$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}")")"; then
 		if [[ ${network} -eq 1 ]]; then
 			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- {__fd_user}>&${fd_user}-); pid=$!
-			IFS= do_initrd_cmd "(${MYNAME}) Getting ${pp} Passphrase from Boot Servers: " \
+			IFS= do_initrd_cmd "($5) Getting ${pp} Passphrase from Boot Servers: " \
 					read -t${bootconf[TIMEOUT]} -ru${fd_pp} passphrase && fd_pp=1 || fd_pp=0
 		fi
 		if [[ ${fd_pp} -eq 0 ]]; then
@@ -2393,7 +2393,7 @@ EOF
 	if [[ ! -f /default ]]; then
 		do_initrd_cmd "Importing Storage Pool ${storagepool} " \
 		  do_import_storage "${bootconf[STORAGEPOOL]}" "${bootconf[STORAGEPREFIX]}" \
-							"$(do_read_passphrase "${bootconf[STORAGEPP]}" "${network}" "${fd_con}" 0 || do_reset)"
+							"$(do_read_passphrase "${bootconf[STORAGEPP]}" "${network}" "${fd_con}" 0 "${_MYNAME}" || do_reset)"
 		[[ $? -eq 1 ]] && touch /default
 	fi
 
@@ -2402,7 +2402,7 @@ EOF
 	imgtype="$(file -b ${sysimg})"
 	if [[ "${imgtype,,}" =~ ^openssl ]]; then
 		do_initrd_cmd "Mounting ${sysimg##*/}" do_mount_root \
-												"$(do_read_passphrase "${conf[SYSTEMPP]}" "${network}" "${fd_con}" 0 || do_reset)"
+					"$(do_read_passphrase "${conf[SYSTEMPP]}" "${network}" "${fd_con}" 0 "${_MYNAME}" || do_reset)"
 	elif [[ "${imgtype,,}" =~ ^squashfs ]]; then
 		do_initrd_cmd "Mounting ${sysimg##*/}" do_mount_root 
 	else
@@ -2656,7 +2656,7 @@ do_make_default_config()
 	ln -s /etc/bashrc ${rootdir}/root/.bashrc
 	mkdir ${rootdir}/root/quarantine
 	[[ "${imgtype,,}" =~ ^openssl ]] && \
-		passphrase="$(do_read_passphrase "${conf[SYSTEMPP]}" "${network}" "${fd_con}" 0 || do_reset)"
+		passphrase="$(do_read_passphrase "${conf[SYSTEMPP]}" "${network}" "${fd_con}" 0 "${_MYNAME}" || do_reset)"
 	if [[ ! -f /boot/storage ]]; then
 		touch /boot/storage
 		truncate -s $((size/2*1024)) /boot/storage
@@ -3211,7 +3211,7 @@ do_keysrv_cmd()
 
 	## For add or put we need a passphrase first.
 	[[ ${cmd} =~ ^(put|add)$ ]] && until [[ ${res} -eq 0 ]]; do
-		passphrase="$(do_read_passphrase "${pp}" 0 ${fd_out} "$([[ -n "${key}" ]] && echo 1 || echo 2)")" && res=0 || echo
+		passphrase="$(do_read_passphrase "${pp}" 0 ${fd_out} "$(($([[ -n "${key}" ]])$?+1))" "${MYNAME}" && res=0 || echo
 		echo -ne "${PI}"
 	done
 
@@ -3396,7 +3396,7 @@ OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
 if [[ "${MYNAME}" == "init" ]]; then
 	set -a
-	MYNAME=$(basename $(readlink $0))
+	_MYNAME=$(basename $(readlink $0))
 	[[ -e /etc/initrd-release ]] && . /etc/initrd-release
 	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
 	do_init_conf daemon 1 || do_problem "Failed to Load Config!"
