@@ -3211,7 +3211,7 @@ do_keysrv_cmd()
 
 	## For add or put we need a passphrase first.
 	[[ ${cmd} =~ ^(put|add)$ ]] && until [[ ${res} -eq 0 ]]; do
-		passphrase="$(do_read_passphrase "${pp}" 0 ${fd_out} "$(($([[ -n "${key}" ]])$?+1))" "${MYNAME}")" && res=0 || echo
+		passphrase="$(do_read_passphrase "${pp}" 0 ${fd_out} "$(($([[ -n "${key}" ]])$?+1)))" "${MYNAME}" && res=0 || echo
 		echo -ne "${PI}"
 	done
 
