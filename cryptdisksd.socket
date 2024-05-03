@@ -4,7 +4,7 @@ After=systemd-journald.service
 Before=systemd-udevd.service
 DefaultDependencies=no
 Before=shutdown.target
-Conflicts=shutdown.target
+Conflicts=shutdown.target initrd-switch-root.target emergency.target
 
 [Socket]
 ListenFIFO=/run/%N/queue
