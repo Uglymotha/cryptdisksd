@@ -55,6 +55,8 @@ do_init_conf()
 	[[ -z "${conf[ALGO]}" ]] && conf[ALGO]="aes-xts-plain64"
 	[[ -z "${conf[KEYSZ]}" ]] && conf[KEYSZ]="256"
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
+	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/sysimg-${conf[DISTNAME]}-${conf[DISTVERSION]}.sqfs"
+	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" != "daemon" ]]; then
@@ -281,7 +283,7 @@ do_hup_daemon()
 do_systemd_daemon()
 {
 	local time_active=0 cleanup=0 msg fd_fifo key read_to res _time_start crypt_arr crypt
-	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to _time_active
+	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to _time_active mountsysimg
 	declare -gA active_mnt waiting_mnt cached_pp job
 	trap 'do_term_daemon' SIGINT SIGTERM; trap 'do_hup_daemon' SIGHUP
 
@@ -390,6 +392,18 @@ do_systemd_daemon()
 		control)
 			pid_ctrl=${msg[1]%%,*} pid_socat=${msg[1]##*,} cmd="${msg[2],,}"
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
+			if [[ "${msg[2],,}" == "mountsysimg" ]]; then
+				if key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"; then
+					daemon_mount_sysimg "${passphrase}" &
+				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
+					do_log debug "no active worker for ${pp}, starting"
+					get_passphrase "${user}" & job[passphrase|${conf[SYSTEMPP]}|$!]="$(do_timer)"
+				else
+					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
+				fi
+				mountsysimg="${pid_socat} ${sock_ctrl}"
+				continue
+			fi
 			[[ "${cmd}" == "stop" ]] && do_term_daemon 0 ${pid_socat}
 			[[ "${msg[2],,}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase; [[ "${msg[2],,}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey 
 			daemon_control ${msg[2],,} & job[control|${cmd}|$!]="$(do_timer)"
@@ -441,6 +455,10 @@ do_systemd_daemon()
 			fi;;
 		passphrase)
 			pp="$(do_eval_pp ${msg[1]})"
+			if [[ -n "${mountsysimg}" && pp="${conf[SYSTEMPP]}" ]]; then
+				daemon_mount_sysimg "$(t_keyctl pipe 1 "$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)")" &
+				unset mountsysimg
+			fi
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
@@ -774,6 +792,23 @@ do_daemon_cleanup()
 	[[ -n "${!waiting_mnt[@]}" ]] && key=", waiting mounts: ${!waiting_mnt[@]}" || key=""
 	do_log debug2 "cleanup took $(do_timer ${_time_start})s${pp}${crypt}${key}"
 	cleanup=$(do_timer ${time_start})
+}
+
+daemon_mount_sysimg()
+{
+	local passphrase="$1" res=0 sock_ctrl="${mountsysimg##* }" pid_socat="${mountsysimg%% *}"
+	do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
+	mkdir /squashfs
+	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
+	if [[ "${res}" -eq 0 && -n "$1" ]]; then
+		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${sysimg##*/} || res=1
+	elif [[ "${res}" -eq 0 ]]; then
+		cp ${conf[SYSIMG]} /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
+	fi
+	[[ "${res}" -eq 0 ]] && mount -t squashfs /squashfs/${conf[SYSIMG]##*/} ${conf[ROOTDIR]} > /dev/null 2>&1 || res=1
+	[[ "${res}" -ne 0 ]] && do_log error "failed to mount ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
+	echo "${res}" |socat - UNIX-CONNECT:${sock_Ctrl}
+	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
 }
 
 daemon_mount_crypt()
@@ -2326,7 +2361,6 @@ do_initrd()
 	local myname="${conf[DISTNAME]}-boot:" version="${conf[DISTVERSION]}" network=0 bootconfinfw=0 rootdir="/.root"
 	local logdev="/dev/zram0" logdir="${rootdir}/var/log" keeplog=0 pid pid_logwriter fd_logwriter libmd="/dev/md/lib" libsz=1
 	local etcmd="/dev/md/etc" etcdir="${rootdir}/etc" etcsz=1 init=/lib/systemd/systemd recovery="no" starting=0 FOREGROUND=1
-	local sysimg="/sysimg-${conf[DISTNAME]}-${conf[DISTVERSION]}.sqfs" fd_con
 	set -o pipefail
 	PATH=/bin:/sbin
 
@@ -2545,19 +2579,6 @@ do_mount_boot()
 	[[ ! -d /boot ]] && mkdir /boot
 	[[ ! -L /dev/disk/by/label/boot ]] && mdadm --assemble --scan --name=boot >/dev/null 2>&1
 	mount /dev/disk/by-label/boot /boot || do_problem "Unable to Mount boot"
-}
-
-do_mount_root()
-{
-	local passphrase="$1"
-	mkdir /squashfs
-	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${sysimg})+1))" /squashfs
-	if [[ -n "$1" ]]; then
-		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${sysimg} -out /squashfs/${sysimg##*/}
-	else 
-		cp ${sysimg} /squashfs/${sysimg##*/}
-	fi
-	mount -t squashfs /squashfs/${sysimg##*/} ${rootdir} > /dev/null 2>&1 || do_problem "Unable to Mount Squashfs root"
 }
 
 do_mount_etc()
@@ -3047,7 +3068,7 @@ do_parse_cmd()
 		do_init_conf daemon || return 1
 		kill -SIGHUP $(<${conf[PIDFILE]})
 		return 1;;
-	status|shell|add|del|putkey|rmkey|smart|erase|stop)
+	status|shell|add|del|putkey|rmkey|smart|erase|stop|mountsysimg)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cryptdisksd_cmd $@
 		return $?;;
