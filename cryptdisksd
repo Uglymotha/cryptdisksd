@@ -393,7 +393,6 @@ do_systemd_daemon()
 			pid_ctrl=${msg[1]%%,*} pid_socat=${msg[1]##*,} cmd="${msg[2],,}"
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
 			if [[ "${cmd}" == "stop" ]]; then
-				echo "${RED}Stopping${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
 				do_term_daemon 0 ${pid_socat}
 			elif [[ "${msg[2],,}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
 				do_log debug "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
