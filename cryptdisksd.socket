@@ -13,6 +13,7 @@ SocketUser=root
 SocketMode=0600
 PipeSize=1M
 ExecStartPre=/bin/rm -rf /run/%N/
+ExecStopPost=/bin/rm -rf /run/%N/
 
 [Install]
 WantedBy=sockets.target
