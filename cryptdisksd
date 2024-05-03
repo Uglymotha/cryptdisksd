@@ -392,7 +392,15 @@ do_systemd_daemon()
 		control)
 			pid_ctrl=${msg[1]%%,*} pid_socat=${msg[1]##*,} cmd="${msg[2],,}"
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
-			if [[ "${msg[2],,}" == "mountsysimg" ]]; then
+			if [[ "${cmd}" == "stop" ]]; then
+				echo "${RED}Stopping${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
+				do_term_daemon 0 ${pid_socat}
+			elif [[ "${msg[2],,}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
+				do_log debug "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
+				echo "${RED}Already Mounting${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
+				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
+			elif [[ "${msg[2],,}" == "mountsysimg" ]]; then
+				mountsysimg="${pid_socat} ${sock_ctrl}"
 				if key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"; then
 					daemon_mount_sysimg "${passphrase}" &
 				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
@@ -401,13 +409,12 @@ do_systemd_daemon()
 				else
 					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
 				fi
-				mountsysimg="${pid_socat} ${sock_ctrl}"
-				continue
-			fi
-			[[ "${cmd}" == "stop" ]] && do_term_daemon 0 ${pid_socat}
-			[[ "${msg[2],,}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase; [[ "${msg[2],,}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey 
-			daemon_control ${msg[2],,} & job[control|${cmd}|$!]="$(do_timer)"
-			do_log debug "started control worker for ${cmd} (PID: $!)";;
+			else
+				[[ "${msg[2],,}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase
+				[[ "${msg[2],,}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey
+				daemon_control ${msg[2],,} & job[control|${cmd}|$!]="$(do_timer)"
+				do_log debug "started control worker for ${cmd} (PID: $!)"
+			fi;;
 		remove)
 			if crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && [[ ! ${!job[@]} =~ mount\|${crypt_arr[0]} ]]; then
 				daemon_unmount_crypt "${crypt_arr[0]}" & job[mount|${crypt_arr[0]}|$!]="$(do_timer)"
