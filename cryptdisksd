@@ -57,6 +57,8 @@ do_init_conf()
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
 	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/sysimg-${conf[DISTNAME]}-${conf[DISTVERSION]}.sqfs"
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
+	[[ -z "${conf[ETCDEV]}" ]] && conf[ETCDEV]="etc"
+	[[ -z "${conf[LIBDEV]}" ]] && conf[LIBDEV]="lib"
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" != "daemon" ]]; then
@@ -403,8 +405,9 @@ do_systemd_daemon()
 				if key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"; then
 					daemon_mount_sysimg "${passphrase}" &
 				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
-					do_log debug "no active worker for ${pp}, starting"
-					get_passphrase "${user}" & job[passphrase|${conf[SYSTEMPP]}|$!]="$(do_timer)"
+					do_log debug "no active worker for ${conf[SYSTEMPP]}, starting"
+					crypt_arr[2]="${conf[SYSTEMPP]}"
+					get_passphrase "" & job[passphrase|${conf[SYSTEMPP]}|$!]="$(do_timer)"
 				else
 					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
 				fi
@@ -804,7 +807,7 @@ daemon_mount_sysimg()
 {
 	local passphrase="$1" res=0 sock_ctrl="${mountsysimg##* }" pid_socat="${mountsysimg%% *}"
 	do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
-	mkdir /squashfs
+	[[ -d /squashfs ]] || mkdir /squashfs || res=1
 	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
 	if [[ "${res}" -eq 0 && -n "$1" ]]; then
 		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${sysimg##*/} || res=1
@@ -3198,7 +3201,7 @@ do_cryptdisksd_cmd()
 	del)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
 		msg+="${confirm} ${crypttab}";;
-	status|shell|stop)
+	status|shell|stop|mountsysimg)
 		[[ $(wc -w <<<"${msg}") -ne 1 ]] && do_echo_use "${command}";;
 	smart)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
@@ -3305,6 +3308,10 @@ do_systemd_daemon_start()
 		exit 0
 	fi
 	[[ ${FOREGROUND} -eq 1 ]] && echo "loglevel=${conf[LOGLEVEL]}"
+	[[ ! -d /etc/udev/rules.d ]] && mkdir -pv /etc/udev/rules.d
+	cat > /etc/udev/rules.d//99-startetclib.rules << EOF
+SUBSYSTEM=="block", KERNEL=="zd*", ACTION=="add|change", ENV{MD_DEVNAME}=="${conf[ETCDEV]}|${conf[LIBDEV]}", ENV{MD_STARTED}=="unsafe", ENV{MD_FOREIGN}=="no", RUN+="/sbin/mdadm --run /dev/\$env{MD_DEVICE}"
+EOF
 
 	# Start the logwriter.
 	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
