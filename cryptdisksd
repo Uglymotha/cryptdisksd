@@ -429,7 +429,7 @@ do_systemd_daemon()
 			fi;;
 		add|change)
 			! crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && continue
-			pp="$(do_eval_pp "${crypt_arr[2]}")" key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")"
+			pp="$(do_eval_pp "${crypt_arr[2]}")"; key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")"
 			dev="$(do_find_dev "${crypt_arr[1]}")"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
 			do_log debug "adding ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase"
@@ -459,7 +459,7 @@ do_systemd_daemon()
 				# If the crypt is already active the user will not be asked for passphrase.
 				t_dmsetup 0 info "${crypt_arr[0]}" && user=0
 				do_log debug "adding ${dev} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} to waiting list for ${pp} passphrase"
-				waiting_mnt[{crypt_arr[0]}]="${pp} ${dev} ${crypt_arr[3]} $(do_timer)"
+				waiting_mnt[${crypt_arr[0]}]="${pp} ${dev} ${crypt_arr[3]} $(do_timer)"
 				if [[ ! ${!job[@]} =~ passphrase\|${pp} ]]; then
 					do_log debug "no active worker for ${pp}, starting"
 					get_passphrase "${user}" & job[passphrase|${pp}|$!]="$(do_timer)"
@@ -467,11 +467,11 @@ do_systemd_daemon()
 			fi;;
 		passphrase)
 			pp="$(do_eval_pp ${msg[1]})"
+			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
 			if [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]]; then
-				key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" passphrase="$(t_keyctl 1 pipe "${key}")"
+				key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"
 				daemon_mount_sysimg &
 			fi
-			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
@@ -808,14 +808,14 @@ do_daemon_cleanup()
 
 daemon_mount_sysimg()
 {
-	local res=0 sock="$(cut -d' '-f2 <<< "${mountsysimg}")" enc="${mountsysimg##* }" pid="${mountsysimg%% *}"
+	local res=0 sock="$(cut -d' ' -f2 <<< "${mountsysimg}")" enc="${mountsysimg##* }" pid="${mountsysimg%% *}"
 	do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 	[[ -d /squashfs ]] || mkdir /squashfs || res=1
 	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
 	if [[ "${res}" -eq 0 && "${enc}" -eq 0 ]]; then
-		openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
+		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	elif [[ "${res}" -eq 0 ]]; then
-		cp ${conf[SYSIMG]} /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
+		t_cp ${conf[SYSIMG]} /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	fi
 	[[ "${res}" -eq 0 ]] && losetup /dev/loop0 /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	[[ "${res}" -ne 0 ]] && do_log error "failed to mount ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
@@ -1660,6 +1660,7 @@ t_kpartx() { do_cmd_timeout $((5*conf[CMD_TIMEOUT])) 0 kpartx ${@}; return $?; }
 t_cat() { do_cmd_timeout -1 1 cat ${@}; return $?; }
 t_tail() { do_cmd_timeout -1 1 tail ${@}; return $?; }
 t_rm() { do_cmd_timeout -1 0 rm ${@}; return $?; }
+t_cp() { do_cmd_timeout -1 0 cp ${@}; return $?; }
 t_chattr() { do_cmd_timeout -1 0 chattr ${@}; return $?; }
 t_chmod() { do_cmd_timeout -1 0 chmod ${@}; return $?; }
 t_chgrp() { do_cmd_timeout -1 0 chgrp ${@}; return $?; }
@@ -1773,7 +1774,7 @@ do_write_keyfile()
 
 do_cache_pp()
 {
-	local pp="$(do_eval_pp "$1")" key="$(t_keyctl 1 request user "$1" @s)" ring="$2" timeout="$3" passphrase="$4" ks="$5" r=0
+	local pp="$1" key="$(t_keyctl 1 request user "$1" "$2")" ring="$2" timeout="$3" passphrase="$4" ks="$5" r=0
 	[[ ${timeout} -eq -1 && -n "${keylife[${pp}]}" ]] && timeout=${keylife[${pp}]}
 	[[ ${timeout} -eq -1 ]] && timeout=${conf[KEYLIFE]}
 	[[ -n "${ks}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && timeout=0
@@ -3307,10 +3308,9 @@ do_systemd_daemon_start()
 	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 0</dev/null {fd_journal}>&1- 1>/dev/null 2>&1
 	[[ ${FOREGROUND} -eq 1 ]] && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
 
-	# Start new key session and link the user key ring to the session key ring. On boot keys will be cached in user key ring. 
+	# Start new key session. On boot keys will be cached in user key ring.
 	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: "
 	keyctl new_session
-	keyctl link @u @s
 	if ! do_init_conf daemon 1; then
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
 		exit 0
