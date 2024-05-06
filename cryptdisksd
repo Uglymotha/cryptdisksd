@@ -19,6 +19,8 @@ do_init_conf()
 	done fi
 	[[ -z "${ID}" ]] && conf[DISTNAME]="unknown-linux" || conf[DISTNAME]="${ID}"
 	[[ -z "${VERSION_ID}" ]] && conf[DISTVERSION]="0.00.000" || conf[DISTVERSION]="${VERSION_ID}"
+	[[ -z "${conf[FWDIR]}" ]] && conf[FWDIR]="/sys/firmware/efi/efivars"
+	[[ -z "${conf[FWGUID]}" ]] && conf[FWGUID]="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
 	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash-completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
@@ -35,14 +37,14 @@ do_init_conf()
 	[[ -z "${conf[FIFO]}" ]] && conf[FIFO]="${conf[CRYPTDISKSDDIR]}/queue"
 	[[ -z "${conf[FIFO_MODE]}" ]] && conf[FIFO_MODE]=620
 	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="${CONFDIR}/crypttab"
+	[[ -z "${conf[FWCRYPTTAB]}" ]] && conf[FWCRYPTTAB]="${conf[FWDIR]}/${conf[DISTNAME]}_crypttab-${conf[FWGUID]}"
 	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
 	[[ -z "${conf[START_TIMEOUT]}" ]] && conf[START_TIMEOUT]=5
 	[[ -z "${conf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]=3
 	[[ -z "${conf[QUEUE_TIMEOUT]}" ]] && conf[QUEUE_TIMEOUT]=2
 	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
-	[[ -z "${conf[FWDIR]}" ]] && conf[FWDIR]="/sys/firmware/efi/efivars"
-	[[ -z "${conf[FWGUID]}" ]] && conf[FWGUID]="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
 	[[ -z "${conf[BOOT]}" ]] && conf[BOOT]="boot.conf"
+	[[ -z "${conf[FWCONF]}" ]] && conf[FWCONF]="${conf[FWDIR]}/${conf[DISTNAME]}_$(basename ${CONF})-${conf[FWGUID]}"
 	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${conf[FWDIR]}/${conf[DISTNAME]}_${conf[BOOT]}-${conf[FWGUID]}"
 	[[ -z "${conf[BOOTCONF]}" ]] && conf[BOOTCONF]="${CONFDIR}/${conf[BOOT]}"
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
@@ -59,8 +61,6 @@ do_init_conf()
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
 	[[ -z "${conf[ETCDEV]}" ]] && conf[ETCDEV]="etc"
 	[[ -z "${conf[LIBDEV]}" ]] && conf[LIBDEV]="lib"
-	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
-	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	if [[ "$1" != "daemon" ]]; then
 		if [[ -z "${KEYSRVDIR}" && -s ${HOME}/.config/systemd/${MYNAME}-keyserver.conf ]]; then
 			. ${HOME}/.config/systemd/${MYNAME}-keyserver.conf
@@ -141,6 +141,8 @@ do_init_conf()
 		do_log warning "${CONF} not found, creating default"
 		for var in ${!conf[@]}; do echo "${var}=${conf[${var}]}" >>${CONF}; done
 	fi
+	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
+	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 
 	return 0
 }
@@ -290,9 +292,7 @@ do_systemd_daemon()
 	trap 'do_term_daemon' SIGINT SIGTERM; trap 'do_hup_daemon' SIGHUP
 
 	# The master passphrase may be in the user keyring, revoke and cache in session keyring.
-	key="$(keyctl search @u user "${conf[SYSTEMPP]}" 2>/dev/null)" && do_move_passphrase "${conf[SYSTEMPP]}" "${key}"
-	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
-	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
+	key="$(keyctl search @u user "${MYNAME}:${conf[SYSTEMPP]}" 2>/dev/null)" && do_move_passphrase "${conf[SYSTEMPP]}" "${key}"
 
 	exec {fd_fifo}<>${conf[FIFO]}
 	while true; do	
@@ -396,14 +396,16 @@ do_systemd_daemon()
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
 			if [[ "${cmd}" == "stop" ]]; then
 				do_term_daemon 0 ${pid_socat}
+			elif [[ "${msg[2],,}" == "mountsysimg" && "${INITRD}" -eq 0 ]]; then
+				echo "${RED}Not in Initramfs" |socat - UNIX-CONNECT:${sock_ctrl} && kill -SIGTERM ${pid_socat} 2>/dev/null
 			elif [[ "${msg[2],,}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
 				do_log debug "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 				echo "${RED}Already Mounting${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
 				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
 			elif [[ "${msg[2],,}" == "mountsysimg" ]]; then
-				mountsysimg="${pid_socat} ${sock_ctrl}"
-				if key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"; then
-					daemon_mount_sysimg "${passphrase}" &
+				mountsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
+				if [[ "${mountsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
+					[[ "${mountsysimg##* }" -eq 1 ]] || passphrase="$(t_keyctl 1 pipe "${key}")" && daemon_mount_sysimg &
 				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
 					do_log debug "no active worker for ${conf[SYSTEMPP]}, starting"
 					crypt_arr[2]="${conf[SYSTEMPP]}"
@@ -427,7 +429,8 @@ do_systemd_daemon()
 			fi;;
 		add|change)
 			! crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && continue
-			pp="$(do_eval_pp "${crypt_arr[2]}")" key="$(t_keyctl 1 search @u user "${pp}")" dev="$(do_find_dev "${crypt_arr[1]}")"
+			pp="$(do_eval_pp "${crypt_arr[2]}")" key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")"
+			dev="$(do_find_dev "${crypt_arr[1]}")"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
 			do_log debug "adding ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase"
 			if [[ -n "${active_mnt[${crypt_arr[0]}]}" ]]; then
@@ -456,7 +459,7 @@ do_systemd_daemon()
 				# If the crypt is already active the user will not be asked for passphrase.
 				t_dmsetup 0 info "${crypt_arr[0]}" && user=0
 				do_log debug "adding ${dev} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} to waiting list for ${pp} passphrase"
-				waiting_mnt[${crypt_arr[0]}]="${pp} ${dev} ${crypt_arr[3]} $(do_timer)"
+				waiting_mnt[{crypt_arr[0]}]="${pp} ${dev} ${crypt_arr[3]} $(do_timer)"
 				if [[ ! ${!job[@]} =~ passphrase\|${pp} ]]; then
 					do_log debug "no active worker for ${pp}, starting"
 					get_passphrase "${user}" & job[passphrase|${pp}|$!]="$(do_timer)"
@@ -464,9 +467,9 @@ do_systemd_daemon()
 			fi;;
 		passphrase)
 			pp="$(do_eval_pp ${msg[1]})"
-			if [[ -n "${mountsysimg}" && pp="${conf[SYSTEMPP]}" ]]; then
-				daemon_mount_sysimg "$(t_keyctl pipe 1 "$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)")" &
-				unset mountsysimg
+			if [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]]; then
+				key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" passphrase="$(t_keyctl 1 pipe "${key}")"
+				daemon_mount_sysimg &
 			fi
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
@@ -528,7 +531,7 @@ do_daemon_start_logwriter()
 		4)    exec {fd_logwriter}> >(logwriter daemon-${pid_daemon}.log) 1>&${fd_logwriter} 2>&1;;
 	esac
 	pid_logwriter=$!
-	do_log debug "started log writer (PID: ${pid_logwriter} FD:${fd_logwriter})"
+	do_log debug "started log writer (PID: ${pid_logwriter} FD: ${fd_logwriter})"
 }
 
 do_daemon_notify_systemd()
@@ -756,7 +759,7 @@ do_daemon_cleanup()
 		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && trim=0 || trim=1
 		if [[ ! -z "${crypt_arr[@]}" ]]; then
 			dev="$(do_find_dev ${crypt_arr[1]})" pp="$(do_eval_pp "${crypt_arr[2]}")"
-			[[ -z "${cached_pp[${pp}]}" ]] && key="$(t_keyctl 1 search @u user ${pp})" && do_move_passphrase "${pp}" "${key}"
+			[[ -z "${cached_pp[${pp}]}" ]] && key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")" && do_move_passphrase "${pp}" "${key}"
 			[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
 			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		else
@@ -805,19 +808,19 @@ do_daemon_cleanup()
 
 daemon_mount_sysimg()
 {
-	local passphrase="$1" res=0 sock_ctrl="${mountsysimg##* }" pid_socat="${mountsysimg%% *}"
+	local res=0 sock="$(cut -d' '-f2 <<< "${mountsysimg}")" enc="${mountsysimg##* }" pid="${mountsysimg%% *}"
 	do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 	[[ -d /squashfs ]] || mkdir /squashfs || res=1
 	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
-	if [[ "${res}" -eq 0 && -n "$1" ]]; then
-		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${sysimg##*/} || res=1
+	if [[ "${res}" -eq 0 && "${enc}" -eq 0 ]]; then
+		openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	elif [[ "${res}" -eq 0 ]]; then
 		cp ${conf[SYSIMG]} /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	fi
-	[[ "${res}" -eq 0 ]] && mount -t squashfs /squashfs/${conf[SYSIMG]##*/} ${conf[ROOTDIR]} > /dev/null 2>&1 || res=1
+	[[ "${res}" -eq 0 ]] && losetup /dev/loop0 /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	[[ "${res}" -ne 0 ]] && do_log error "failed to mount ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
-	echo "${res}" |socat - UNIX-CONNECT:${sock_Ctrl}
-	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
+	echo "${res}" |socat - UNIX-CONNECT:${sock}
+	[[ "$(</proc/${pid}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid} 2>/dev/null
 }
 
 daemon_mount_crypt()
@@ -990,6 +993,7 @@ get_passphrase()
 
 	# Put key (back) to servers, cache and send to daemon.
 	key_clnt "PUT" "${crypt_arr[2]}" "${_passphrase}" & _pid_putkey=$!
+	[[ "${INITRD}" -eq 1 ]] && do_cache_pp "${MYNAME}:${crypt_arr[2]}" "@u" "$((2*conf[START_TIMEOUT]))" "${_passphrase}"
 	do_cache_pp "${crypt_arr[2]}" "@s" "-1" "${_passphrase}" || do_term_get_passphrase 1
 	echo "passphrase ${crypt_arr[2]} 1 -1 0" >${conf[FIFO]}
 
@@ -1769,9 +1773,10 @@ do_write_keyfile()
 
 do_cache_pp()
 {
-	local pp="$1" key="$(t_keyctl 1 request user "$1" @s)" ring="$2" timeout="$3" passphrase="$4" r=0
+	local pp="$(do_eval_pp "$1")" key="$(t_keyctl 1 request user "$1" @s)" ring="$2" timeout="$3" passphrase="$4" ks="$5" r=0
 	[[ ${timeout} -eq -1 && -n "${keylife[${pp}]}" ]] && timeout=${keylife[${pp}]}
 	[[ ${timeout} -eq -1 ]] && timeout=${conf[KEYLIFE]}
+	[[ -n "${ks}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && timeout=0
 	
 	if [[ -n "${key}" ]]; then
 		do_log debug "${pp} passphrase already cached"
@@ -1983,14 +1988,14 @@ do_systemd_keysrv()
 				do_keysrv_send "NOK"
 			esac
 			if [[ ${res} -eq 0 ]]; then
-				res=$(do_cache_pp "${pp}" "@s" "${timeout}" "${passphrase}")$?
+				res=$(do_cache_pp "${pp}" "@s" "${timeout}" "${passphrase}")$? 1
 				if [[ ${res} -eq 2 ]]; then
 					_passphrase="$(t_keyctl 1 pipe "$(t_keyctl 1 request user ${pp} @s)")"
 					if [[ $? -eq 0 && "${_passphrase}" != "${passphrase}" ]]; then
 						do_log warning "${pp} passphrase differs from cached passphrase, revoking"
 						t_keyctl 0 revoke "${key}"
 						t_keyctl 0 unlimk "${key}" @s
-						res=$(do_cache_pp "${pp}" "@s" "${timeout}" "${passphrase}")$?
+						res=$(do_cache_pp "${pp}" "@s" "${timeout}" "${passphrase}")$? 1
 					fi
 				fi
 				if [[ ${res} -eq 1 ]]; then
@@ -3181,13 +3186,12 @@ do_cryptdisksd_cmd()
 	
 	# Start socat in background and attach stdin, listen on a socket in RUNDIR. 
 	# The daemon will spawn a worker which will connect and start interactive session.
-	if [[ ! ${PPID} -eq 1 && ! "$(NOTIFY_SOCKET= systemctl is-active ${MYNAME}.service 2>&1)" =~ ^activating|^active \
-		  || ! -p ${conf[FIFO]} ]]; then
+	if [[ ! -p ${conf[FIFO]} ]]; then
 		echo "${MYNAME} not Running"
 		return ${s}
 	fi
 	exec {stdin}<&0
-	[[ "${command,,}" == "stop" ]] && to="-t${conf[START_TIMEOUT]}" || to="-t${conf[QUEUE_TIMEOUT]}"
+	[[ "${command,,}" =~ ^(stop|mountsysimg)$ ]] && to="-t${conf[START_TIMEOUT]}" || to="-t${conf[QUEUE_TIMEOUT]}"
 	sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
 	socat ${to} - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- 2>/dev/null &
 	pid_socat=$!
@@ -3218,17 +3222,18 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" == "shell" ]] && stty_opt+=" raw -isig"
 	[[ ! ${command,,} =~ ^(smart|shell)$ ]] && stty_opt+=" raw isig"
 	stty ${stty_opt}
-	[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
+	[[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" ]] && echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
 	echo "control ${BASHPID},${pid_socat} ${msg}" >${conf[FIFO]}
-	echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" ]] && echo -ne "\r"
 	wait ${pid_socat}
-	echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" ]] && echo -ne "\r"
 
 	# Restore stdin, remove socket and exit.
 	stty sane
 	[[ -e ${sock} ]] && rm -f ${sock}
 
-	[[ ${conf[LOGLEVEL]} -gt 3 ]] && echo -e "\rDone Requesting \"$@\" from ${MYNAME}"
+	[[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" ]] && echo -e "\rDone Requesting \"$@\" from ${MYNAME}"
+
 	return ${s}
 }
 
@@ -3292,6 +3297,9 @@ do_systemd_daemon_start()
 	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer)
 	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal
 	set -mo pipefail
+	echo ${pid_daemon} >${conf[PIDFILE]}
+	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
+	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
@@ -3307,11 +3315,12 @@ do_systemd_daemon_start()
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
 		exit 0
 	fi
-	[[ ${FOREGROUND} -eq 1 ]] && echo "loglevel=${conf[LOGLEVEL]}"
-	[[ ! -d /etc/udev/rules.d ]] && mkdir -pv /etc/udev/rules.d
-	cat > /etc/udev/rules.d//99-startetclib.rules << EOF
-SUBSYSTEM=="block", KERNEL=="zd*", ACTION=="add|change", ENV{MD_DEVNAME}=="${conf[ETCDEV]}|${conf[LIBDEV]}", ENV{MD_STARTED}=="unsafe", ENV{MD_FOREIGN}=="no", RUN+="/sbin/mdadm --run /dev/\$env{MD_DEVICE}"
-EOF
+	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
+	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
+	[[ ! -d /etc/udev/rules.d ]] && mkdir -p /etc/udev/rules.d
+	cat > /etc/udev/rules.d/99-${conf[ETCDEV]}${conf[LIBDEV]}.rules <<-EOF
+	SUBSYSTEM=="block", KERNEL=="zd*", ACTION=="add|change", ENV{MD_DEVNAME}=="${conf[ETCDEV]}|${conf[LIBDEV]}", ENV{MD_STARTED}=="unsafe", ENV{MD_FOREIGN}=="no", RUN+="/sbin/mdadm --run /dev/\$env{MD_DEVICE}"
+	EOF
 
 	# Start the logwriter.
 	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
@@ -3319,11 +3328,6 @@ EOF
 	chmod 750 ${conf[LOGDIR]}
 	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
-	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter
-
-	do_log debug "initializing"
-	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
-	echo ${pid_daemon} >${conf[PIDFILE]}
 
 	# Check if the queue exists first, exit with error if it isn't. It should be there, or something is wrong with socket.
 	if [[ ! -p ${conf[FIFO]} ]]; then
@@ -3334,13 +3338,12 @@ EOF
 
 	# Parse and load the configuration, exit if either fails.
 	if ! do_daemon_check_conf; then 
-		do_log error "failed to load config" 
 		systemd-notify --stopping --status="${MYNAME}: Failed to Load Configuration"
 		exit 0
 	fi
 
 	# Check if there is a crypttab, log message if there isn't since everything we do is based on it.
-	if [[ ! -f ${conf[CRYPTTAB]} ]]; then
+	if [[ "${INITRD}" -eq 0 &&! -f ${conf[CRYPTTAB]} ]]; then
 		echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase(/algorithm/key-size/hash)\t\t#TRIM" >${conf[CRYPTTAB]}
 		do_log warning "crypttab not found, creating default"
 		systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
@@ -3419,7 +3422,7 @@ if [[ -e /etc/os-release ]]; then
 else
 	. /usr/lib/os-release
 fi
-MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin; unset LC_NUMERIC
+MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin INITRD=$([[ ! -L /etc/initrd-release ]])$?; unset LC_NUMERIC
 
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" NOR="\033[0m" RES="\033[2J"
@@ -3428,14 +3431,7 @@ PT="\033[u\033[38C\033[s" PK="\r\033[37C\033[s" UL="\033[4m" ULO="\033[24m"
 OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r${RED}${BOLD}[ FAIL ]${NOR}"
 
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
-if [[ "${MYNAME}" == "init" ]]; then
-	set -a
-	_MYNAME=$(basename $(readlink $0))
-	[[ -e /etc/initrd-release ]] && . /etc/initrd-release
-	exec {fd_logwriter}>/dev/null {fd_journal}>/dev/null
-	do_init_conf daemon 1 || do_problem "Failed to Load Config!"
-	do_initrd
-elif [[ $# -eq 0 ]]; then
+if [[ $# -eq 0 ]]; then
 	# No command line options specified. check if we're started from systemd, start daemon if so.
 	do_systemd_daemon_start
 elif [[ "$1" == "keyserver" ]]; then
