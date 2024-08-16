@@ -5,22 +5,10 @@ do_init_conf()
 {
 	# Initialize System Variables. Default config in /etc/cryptdisksd/cryptdisksd.conf. Systemd env CONF(DIR) will override.
 	local var val _conf= _keylife IFS=$'\n'
-	declare -gA conf keyserverconf keylife
-	[[ -z "${CONFDIR}" && -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
-	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
-	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
-	if [[ "$1" == "daemon" && ! -d "${CONFDIR}" ]]; then
-		do_log warning "${CONFDIR} not found, creating"
-		mkdir -p ${CONFDIR}
-	fi
 	if [[ -s ${CONF} ]]; then for var in $(grep -ve "^\s*#" <<<$(<${CONF})); do
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
 	done fi
-	[[ -z "${ID}" ]] && conf[DISTNAME]="unknown-linux" || conf[DISTNAME]="${ID}"
-	[[ -z "${VERSION_ID}" ]] && conf[DISTVERSION]="0.00.000" || conf[DISTVERSION]="${VERSION_ID}"
-	[[ -z "${conf[FWDIR]}" ]] && conf[FWDIR]="/sys/firmware/efi/efivars"
-	[[ -z "${conf[FWGUID]}" ]] && conf[FWGUID]="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
 	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash-completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
@@ -37,15 +25,15 @@ do_init_conf()
 	[[ -z "${conf[FIFO]}" ]] && conf[FIFO]="${conf[CRYPTDISKSDDIR]}/queue"
 	[[ -z "${conf[FIFO_MODE]}" ]] && conf[FIFO_MODE]=620
 	[[ -z "${conf[CRYPTTAB]}" ]] && conf[CRYPTTAB]="${CONFDIR}/crypttab"
-	[[ -z "${conf[FWCRYPTTAB]}" ]] && conf[FWCRYPTTAB]="${conf[FWDIR]}/${conf[DISTNAME]}_crypttab-${conf[FWGUID]}"
+	[[ -z "${conf[FWCRYPTTAB]}" ]] && conf[FWCRYPTTAB]="${FWDIR}/${DISTNAME}_${CRYPTTAB}-${FWGUID}"
 	[[ -z "${conf[BLOCKDEVSDIRS]}" ]] && conf[BLOCKDEVSDIRS]="/dev/disk/by-id"
 	[[ -z "${conf[START_TIMEOUT]}" ]] && conf[START_TIMEOUT]=5
 	[[ -z "${conf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]=3
 	[[ -z "${conf[QUEUE_TIMEOUT]}" ]] && conf[QUEUE_TIMEOUT]=2
 	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
 	[[ -z "${conf[BOOT]}" ]] && conf[BOOT]="boot.conf"
-	[[ -z "${conf[FWCONF]}" ]] && conf[FWCONF]="${conf[FWDIR]}/${conf[DISTNAME]}_$(basename ${CONF})-${conf[FWGUID]}"
-	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${conf[FWDIR]}/${conf[DISTNAME]}_${conf[BOOT]}-${conf[FWGUID]}"
+	[[ -z "${conf[FWCONF]}" ]] && conf[FWCONF]="${FWDIR}/${DISTNAME}_$(basename ${CONF})-${FWGUID}"
+	[[ -z "${conf[FWBOOTCONF]}" ]] && conf[FWBOOTCONF]="${FWDIR}/${DISTNAME}_${conf[BOOT]}-${FWGUID}"
 	[[ -z "${conf[BOOTCONF]}" ]] && conf[BOOTCONF]="${CONFDIR}/${conf[BOOT]}"
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
 	[[ -z "${conf[NET_RETRIES]}" ]] && conf[NET_RETRIES]=2
@@ -57,7 +45,7 @@ do_init_conf()
 	[[ -z "${conf[ALGO]}" ]] && conf[ALGO]="aes-xts-plain64"
 	[[ -z "${conf[KEYSZ]}" ]] && conf[KEYSZ]="256"
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
-	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/sysimg-${conf[DISTNAME]}-${conf[DISTVERSION]}.sqfs"
+	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/sysimg-${DISTNAME}-${DISTVERSION}.sqfs"
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
 	[[ -z "${conf[ETCDEV]}" ]] && conf[ETCDEV]="etc"
 	[[ -z "${conf[LIBDEV]}" ]] && conf[LIBDEV]="lib"
@@ -200,6 +188,7 @@ logwriter()
 	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
 		echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${myname} finished after $(do_timer ${_time_start})s" >>${conf[LOGFILE]}
 	fi
+	[[ "${INITRD}" -eq 1 && "${keeplog}" -eq 1 ]] && cp -a ${conf[LOGFILE]} ${conf[LOGDIR]} /sysroot/var/log/
 }
 
 do_log()
@@ -576,7 +565,7 @@ do_daemon_check_conf()
 					[[ -e ${conf[FWBOOTCONF]} ]] && t_chattr -i ${conf[FWBOOTCONF]}
 					if ! t_printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]}; then
 						do_log error "error creating ${conf[FWBOOTCONF]}"
-					elif ! t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}_${conf[BOOT]} -w -f ${conf[BOOTCONF]}; then
+					elif ! t_efivar -n ${FWGUID}-${DISTNAME}_${conf[BOOT]} -w -f ${conf[BOOTCONF]}; then
 						do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
 					fi
 					t_chattr +i ${conf[FWBOOTCONF]}
@@ -597,7 +586,7 @@ do_daemon_check_conf()
 		[[ -e ${conf[FWBOOTCONF]} ]] && t_chattr -i ${conf[FWBOOTCONF]}
 		if ! t_printf "\x07\x00\x00\x00\x00" >${conf[FWBOOTCONF]}; then
 			do_log error "error creating ${conf[FWBOOTCONF]}"
-		elif ! t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}_${conf[BOOT]} -w -f ${conf[BOOTCONF]}; then
+		elif ! t_efivar -n ${FWGUID}-${DISTNAME}_${conf[BOOT]} -w -f ${conf[BOOTCONF]}; then
 			do_log error "error copying ${conf[BOOTCONF]} to ${conf[FWBOOTCONF]}"
 		fi
 		t_chattr +i ${conf[FWBOOTCONF]}
@@ -637,10 +626,10 @@ do_daemon_check_conf()
 
 	# Check the bootserver and user keys if present.
 	[[ -z ${bootconf[BOOTSERVERS]} ]] && return
-	fwsrvvar="${conf[FWGUID]}-${conf[DISTNAME]}_${bootconf[BOOTSERVERKEYS]}"
-	fwsrvkey="${conf[FWDIR]}/${conf[DISTNAME]}_${bootconf[BOOTSERVERKEYS]}-${conf[FWGUID]}"
-	fwusrvar="${conf[FWGUID]}-${conf[DISTNAME]}_${bootconf[BOOTUSERKEY]}"
-	fwusrkey="${conf[FWDIR]}/${conf[DISTNAME]}_${bootconf[BOOTUSERKEY]}-${conf[FWGUID]}"
+	fwsrvvar="${FWGUID}-${DISTNAME}_${bootconf[BOOTSERVERKEYS]}"
+	fwsrvkey="${FWDIR}/${DISTNAME}_${bootconf[BOOTSERVERKEYS]}-${FWGUID}"
+	fwusrvar="${FWGUID}-${DISTNAME}_${bootconf[BOOTUSERKEY]}"
+	fwusrkey="${FWDIR}/${DISTNAME}_${bootconf[BOOTUSERKEY]}-${FWGUID}"
 	srvkey="${CONFDIR}/${bootconf[BOOTSERVERKEYS]}" usrkey="${CONFDIR}/${bootconf[BOOTUSERKEY]}"
 	if [[ -s ${fwsrvkey} && -s ${srvkey} ]]; then
 		# compare the keys, overwrite if necessary
@@ -1204,7 +1193,7 @@ do_control_putrmkey()
 {
 	# Remove the key file for the passphrase.
 	local _pp="$(do_eval_pp "${msg[3]}")" _res=0 _key="$(t_keyctl 1 request user "${_pp}" @s)" _passphrase _t _s
-	local _keyfile="${conf[FWDIR]}/${conf[DISTNAME]}_${_pp}.key-${conf[FWGUID]}"
+	local _keyfile="${FWDIR}/${DISTNAME}_${_pp}.key-${FWGUID}"
 	if [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 0 && ${_upd} -eq 0 ]]; then
 		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
 		_fw=1 _srv=${bootconf[BOOTSERVERS]} _add=-1 _confirm=1
@@ -1731,7 +1720,7 @@ do_check_passphrase()
 {
 	# Check the received passphrase against the stored key in firmware. Write key if it doesn't exist.
 	local pp="$1" passphrase="$2" rmkey="$3" mode="$4" t="$([[ $4 -eq 0 ]] && echo "tail -c +5" || echo "cat -")" f
-	[[ ${mode} -eq 0 ]] && f=${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]} || f=${conf[KEYDIR]}/${pp}.key
+	[[ ${mode} -eq 0 ]] && f=${FWDIR}/${DISTNAME}_${pp}.key-${FWGUID} || f=${conf[KEYDIR]}/${pp}.key
 	if [ -s ${f} ]; then
 		if  $( t_cat ${f} |${t} |t_openssl aes-256-cbc -d -salt -pbkdf2 -in - -out /dev/null); then
 			do_log debug "passphrase check ok"
@@ -1758,13 +1747,13 @@ do_write_keyfile()
 	if ! head -c256 /dev/urandom |t_openssl aes-256-cbc -e -salt -pbkdf2 -in - -out ${keydir}/${pp}.key; then
 		res=1
 		do_log error "error creating ${keydir}/${pp}.key"
-	elif [[ -z "${srv}" ]] && ! t_efivar -n ${conf[FWGUID]}-${conf[DISTNAME]}_${pp}.key -w \
+	elif [[ -z "${srv}" ]] && ! t_efivar -n ${FWGUID}-${DISTNAME}_${pp}.key -w \
 										 -f ${keydir}/${pp}.key; then
 		res=2
-		do_log error "error writing ${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]}"
+		do_log error "error writing ${FWDIR}/${DISTNAME}_${pp}.key-${FWGUID}"
 	else
 		res=0
-		do_log debug "wrote $([[ -z "${srv}" ]] && echo ${conf[FWDIR]}/${conf[DISTNAME]}_${pp}.key-${conf[FWGUID]} \
+		do_log debug "wrote $([[ -z "${srv}" ]] && echo ${FWDIR}/${DISTNAME}_${pp}.key-${FWGUID} \
 												|| echo ${keydir}/${pp}.key)"
 	fi
 	[[ -z "${srv}" ]] && t_rm -f ${keydir}/${pp}.key
@@ -2413,11 +2402,6 @@ EOF
 	mount -n -t efivarfs efivarfs /sys/firmware/efi/efivars
 	[[ ! -L /dev/fd ]] && ln -s /proc/self/fd /dev/fd
 	exec 1>&- 2>&- {fd}< <(haveged -F 1>&- 2>&- 0<&-) >/dev/null 2>&1
-	read -r cmdline < /proc/cmdline
-	for param in $cmdline ; do
-		[[ "${param}" == "recovery" ]] && recovery="yes"
-		[[ "${param}" =~ ^keeplog ]] && keeplog=1 && conf[LOGLEVEL]="${param%%*=}"
-	done
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -pv ${conf[CRYPTDISKSDDIR]}
 	conf[LOGFILE]=${CONFDIR}/${myname::-1}.log
 	exec {fd_con}>/dev/console {fd_logwriter}>&-; exec {fd_logwriter}> >(logwriter); pid_logwriter=$!
@@ -3295,32 +3279,47 @@ do_systemd_daemon_start()
 {
 	# Check if we are started from systemd (PID 1).
 	[[ ( ! "${UID}" -eq 0 || ! ${PPID} -eq 1 ) && ${FOREGROUND} -eq 0 ]] && do_echo_use
-	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer)
-	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal
+	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer) param
+	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal keeplog
+	declare -gA conf keyserverconf keylife
 	set -mo pipefail
-	echo ${pid_daemon} >${conf[PIDFILE]}
-	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
-	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
-
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
 	# Running in foreground mode evrything goes to stdout of the user's terminal. And we wish him or her good luck with that.
 	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 0</dev/null {fd_journal}>&1- 1>/dev/null 2>&1
-	[[ ${FOREGROUND} -eq 1 ]] && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
+	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: " && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
 
-	# Start new key session. On boot keys will be cached in user key ring.
-	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: "
+	# Check config fie and dir.
+	[[ -z "${CONFDIR}" && -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
+	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
+	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
+	[[ -z "${ID}" ]] && DISTNAME="unknown-linux" || DISTNAME="${ID}"
+	[[ -z "${VERSION_ID}" ]] && DISTVERSION="0.00.000" || DISTVERSION="${VERSION_ID}"
+	[[ -z "${FWDIR}" ]] && FWDIR="/sys/firmware/efi/efivars"
+	[[ -z "${FWGUID}" ]] && FWGUID="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
+	[[ -z "${CRYPTTAB}" ]] && CRYPTTAB="crypttab"
+	if [[ "$1" == "daemon" && ! -d "${CONFDIR}" ]]; then
+		do_log warning "${CONFDIR} not found, creating"
+		mkdir -p ${CONFDIR}
+	fi
+
+	# Start new key session and init conf. On boot keys will be cached in user key ring. In initrd check kernel cmdline.
 	keyctl new_session
 	if ! do_init_conf daemon 1; then
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
 		exit 0
 	fi
+	echo ${pid_daemon} >${conf[PIDFILE]}
 	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
-	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
-	[[ ! -d /etc/udev/rules.d ]] && mkdir -p /etc/udev/rules.d
-	cat > /etc/udev/rules.d/99-${conf[ETCDEV]}${conf[LIBDEV]}.rules <<-EOF
+	[[ "${INITRD}" -eq 1 ]] && for param in $(</proc/cmdline); do
+		[[ "${param}" =~ ^${MYNAME}.keeplog ]] && keeplog=1 && [[ "${param}" =~ ^.*\=[0-4]$ ]] && conf[LOGLEVEL]="${param%%*=}"
+	done
+	[[ "${INITRD}" -eq 1 && ! -d /etc/udev/rules.d ]] && mkdir -p /etc/udev/rules.d
+	[[ "${INITRD}" -eq 1 ]] && cat > /etc/udev/rules.d/99-${conf[ETCDEV]}${conf[LIBDEV]}.rules <<-EOF
 	SUBSYSTEM=="block", KERNEL=="zd*", ACTION=="add|change", ENV{MD_DEVNAME}=="${conf[ETCDEV]}|${conf[LIBDEV]}", ENV{MD_STARTED}=="unsafe", ENV{MD_FOREIGN}=="no", RUN+="/sbin/mdadm --run /dev/\$env{MD_DEVICE}"
 	EOF
+	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
+	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 
 	# Start the logwriter.
 	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
@@ -3328,6 +3327,7 @@ do_systemd_daemon_start()
 	chmod 750 ${conf[LOGDIR]}
 	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
+	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
 
 	# Check if the queue exists first, exit with error if it isn't. It should be there, or something is wrong with socket.
 	if [[ ! -p ${conf[FIFO]} ]]; then
@@ -3343,7 +3343,7 @@ do_systemd_daemon_start()
 	fi
 
 	# Check if there is a crypttab, log message if there isn't since everything we do is based on it.
-	if [[ "${INITRD}" -eq 0 &&! -f ${conf[CRYPTTAB]} ]]; then
+	if [[ "${INITRD}" -eq 0 && ! -f ${conf[CRYPTTAB]} ]]; then
 		echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase(/algorithm/key-size/hash)\t\t#TRIM" >${conf[CRYPTTAB]}
 		do_log warning "crypttab not found, creating default"
 		systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
@@ -3419,7 +3419,7 @@ do_cryptdisksd_cli()
 
 if [[ -e /etc/os-release ]]; then 
 	. /etc/os-release
-else
+elif [[ -e /usr/lib/os-release ]]; then
 	. /usr/lib/os-release
 fi
 MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin INITRD=$([[ ! -L /etc/initrd-release ]])$?; unset LC_NUMERIC
