@@ -3281,7 +3281,6 @@ do_systemd_daemon_start()
 	[[ ( ! "${UID}" -eq 0 || ! ${PPID} -eq 1 ) && ${FOREGROUND} -eq 0 ]] && do_echo_use
 	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer) param
 	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal keeplog
-	declare -gA conf keyserverconf keylife
 	set -mo pipefail
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
@@ -3423,6 +3422,7 @@ elif [[ -e /usr/lib/os-release ]]; then
 	. /usr/lib/os-release
 fi
 MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin INITRD=$([[ ! -L /etc/initrd-release ]])$?; unset LC_NUMERIC
+declare -gA conf keyserverconf keylife
 
 # Formatting parameters for console output.
 RED="\033[31m" GREY="\033[34m" YEL="\033[33m" GRN="\033[32m" BOLD="\033[1m" NOR="\033[0m" RES="\033[2J"
