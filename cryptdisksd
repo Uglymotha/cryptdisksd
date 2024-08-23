@@ -3288,15 +3288,7 @@ do_systemd_daemon_start()
 	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 0</dev/null {fd_journal}>&1- 1>/dev/null 2>&1
 	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: " && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
 
-	# Check config fie and dir.
-	[[ -z "${CONFDIR}" && -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
-	[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
-	[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
-	[[ -z "${ID}" ]] && DISTNAME="unknown-linux" || DISTNAME="${ID}"
-	[[ -z "${VERSION_ID}" ]] && DISTVERSION="0.00.000" || DISTVERSION="${VERSION_ID}"
-	[[ -z "${FWDIR}" ]] && FWDIR="/sys/firmware/efi/efivars"
-	[[ -z "${FWGUID}" ]] && FWGUID="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
-	[[ -z "${CRYPTTAB}" ]] && CRYPTTAB="crypttab"
+	# Check and create config dir.
 	if [[ "$1" == "daemon" && ! -d "${CONFDIR}" ]]; then
 		do_log warning "${CONFDIR} not found, creating"
 		mkdir -p ${CONFDIR}
@@ -3416,12 +3408,18 @@ do_cryptdisksd_cli()
 	done
 }
 
-if [[ -e /etc/os-release ]]; then 
-	. /etc/os-release
-elif [[ -e /usr/lib/os-release ]]; then
-	. /usr/lib/os-release
-fi
+# Initialize essential configuration variables.
 MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin INITRD=$([[ ! -L /etc/initrd-release ]])$?; unset LC_NUMERIC
+[[ -s /etc/os-release ]] && . /etc/os-release
+[[ $? -ne 0 && -s /usr/lib/os-release ]] && . /usr/lib/os-release
+[[ -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
+[[ -z "${ID}" ]] && DISTNAME="unknown-linux" || DISTNAME="${ID}"
+[[ -z "${VERSION_ID}" ]] && DISTVERSION="0.00.000" || DISTVERSION="${VERSION_ID}"
+[[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
+[[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
+[[ -z "${FWDIR}" ]] && FWDIR="/sys/firmware/efi/efivars"
+[[ -z "${FWGUID}" ]] && FWGUID="ca25478a-acb8-44ac-8c55-d5d45dfe25c5"
+[[ -z "${CRYPTTAB}" ]] && CRYPTTAB="crypttab"
 declare -gA conf keyserverconf keylife
 
 # Formatting parameters for console output.
