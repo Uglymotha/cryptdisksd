@@ -16,5 +16,4 @@ ExecStart=/usr/sbin/cryptdisksd
 ExecReload=/bin/kill -SIGHUP $MAINPID
 ExecStop=/bin/bash -c '/bin/kill -SIGTERM $MAINPID; /bin/waitpid $MAINPID'
 TimeoutStopSec=15
-Restart=on-abnormal
-SurviveFinalKillSignal=yes
+Restart=on-failure
