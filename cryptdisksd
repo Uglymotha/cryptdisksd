@@ -4,6 +4,7 @@
 do_init_conf()
 {
 	# Initialize System Variables. Default config in /etc/cryptdisksd/cryptdisksd.conf. Systemd env CONF(DIR) will override.
+	unset conf keylife keyserverconf; declare -gA conf keylife keyserverconf
 	local var val _conf= _keylife IFS=$'\n'
 	[[ -s ${CONF} ]] && for var in $(grep -ve "^\s*#" <<<$(<${CONF})); do
 		val=${var#*=} var=${var%%=*}
@@ -34,6 +35,7 @@ do_init_conf()
 	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
 	[[ -z "${conf[NET_RETRIES]}" ]] && conf[NET_RETRIES]=2
+	[[ -z "${conf[NET_TIMEOUT]}" ]] && conf[NET_TIMEOUT]=30
 	[[ -z "${conf[ADDONSTOP]}" ]] && conf[ADDONSTOP]=0
 	[[ -z "${conf[UPSONSTOP]}" ]] && conf[UPDONSTOP]=0
 	[[ -z "${conf[USER_TIMEOUT]}" ]] && conf[USER_TIMEOUT]=10
@@ -52,6 +54,11 @@ do_init_conf()
 	[[ -z "${conf[STORAGEALGO]}" ]] && conf[STORAGEALGO]="${conf[ALGO]}"
 	[[ -z "${conf[STORAGEKEYSZ]}" ]] && conf[STORAGEKEYSZ]="${conf[KEYSZ]}"
 	[[ -z "${conf[STORAGEHASH]}" ]] && conf[STORAGEHASH]="${conf[HASH]}"
+	[[ -z "${conf[STORAGEDEVS]}" ]] && conf[STORAGEDEVS]=""
+	[[ -z "${conf[BOOTUSER]}" ]] && conf[BOOTUSER]="$(hostname)"
+	[[ -z "${conf[BOOTUSERKEY]}" ]] && conf[BOOTUSERKEY]="${conf[BOOTUSER]}.key"
+	[[ -z "${conf[BOOTSERVERKEYS]}" ]] && conf[BOOTSERVERKEYS]="bootserver.keys"
+	[[ -z "${conf[BOOTSERVERS]}" ]] && conf[BOOTSERVERS]=""
 	conf[STORAGETRIM]=$([[ "${conf[STORAGETRIM]}" != "1" && "${conf[STORAGETRIM],,}" != "y" && "${conf[STORAGETRIM],,}" != "yes" ]])$?
 	if [[ "$1" != "daemon" ]]; then
 		if [[ -z "${KEYSRVDIR}" && -s ${HOME}/.config/systemd/${MYNAME}-keyserver.conf ]]; then
@@ -67,22 +74,22 @@ do_init_conf()
 			val=${var#*=} var=${var%%=*}
 			keyserverconf[${var^^}]="${val}"
 	   	done fi
-		[[ ! -z "${keyserverconf[KEYSRV_FIFO]}" ]]	&& conf[KEYSRV_FIFO]="${KEYSRVDIR}/${keyserverconf[KEYSRV_FIFO]##${KEYSRVDIR}}"\
+		[[ -n "${keyserverconf[KEYSRV_FIFO]}" ]]	&& conf[KEYSRV_FIFO]="${KEYSRVDIR}/${keyserverconf[KEYSRV_FIFO]##${KEYSRVDIR}}"\
 													|| conf[KEYSRV_FIFO]="${KEYSRVDIR}/queue"
-		[[ ! -z "${keyserverconf[LOGDIR]}" ]]	&& conf[LOGDIR]="${HOME}/${keyserverconf[LOGDIR]##${HOME}}" \
+		[[ -n "${keyserverconf[LOGDIR]}" ]]	&& conf[LOGDIR]="${HOME}/${keyserverconf[LOGDIR]##${HOME}}" \
 												|| conf[LOGDIR]="${KEYSRVDIR}"
-		[[ ! -z "${keyserverconf[LOGLEVEL]}" ]] && conf[LOGLEVEL]="${keyserverconf[LOGLEVEL]}"
-		[[ ! -z "${keyserverconf[KEYSRVR_GROUP]}" ]]	&& conf[KEYSRV_GROUP]="${keyserverconf[KEYSRVR_GROUP]}" \
+		[[ -n "${keyserverconf[LOGLEVEL]}" ]] && conf[LOGLEVEL]="${keyserverconf[LOGLEVEL]}"
+		[[ -n "${keyserverconf[KEYSRVR_GROUP]}" ]]	&& conf[KEYSRV_GROUP]="${keyserverconf[KEYSRVR_GROUP]}" \
 														|| conf[KEYSRV_GROUP]="bootsan"
-		[[ ! -z "${keyserverconf[LOG_GROUP]}" ]]	&& conf[LOG_GROUP]="${keyserverconf[LOG_GROUP]}" \
+		[[ -n "${keyserverconf[LOG_GROUP]}" ]]	&& conf[LOG_GROUP]="${keyserverconf[LOG_GROUP]}" \
 													|| conf[LOG_GROUP]="${conf[KEYSRV_GROUP]}"
-		[[ ! -z "${keyserverconf[KEYDIR]}" ]]	&& conf[KEYDIR]="${HOME}/${keyserverconf[KEYDIR]##${HOME}}" \
+		[[ -n "${keyserverconf[KEYDIR]}" ]]	&& conf[KEYDIR]="${HOME}/${keyserverconf[KEYDIR]##${HOME}}" \
 												|| conf[KEYDIR]="${KEYSRVDIR}/keys"
-		[[ ! -z "${keyserverconf[KEYSRV_TIMEOUT]}" ]]	&& conf[KEYSRV_TIMEOUT]="${keyserverconf[KEYSRV_TIMEOUT]}" \
+		[[ -n "${keyserverconf[KEYSRV_TIMEOUT]}" ]]	&& conf[KEYSRV_TIMEOUT]="${keyserverconf[KEYSRV_TIMEOUT]}" \
 														|| conf[KEYSRV_TIMEOUT]=5
-		[[ ! -z "${keyserverconf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]="${keyserverconf[PP_TIMEOUT]}"
-		[[ ! -z "${keyserverconf[USER_TIMEOUT]}" ]] && conf[USER_TIMEOUT]=${keyserverconf[USER_TIMEOUT]}
-		[[ ! -z "${keyserverconf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]="${keyserverconf[CLEANUP_TIMER]}"
+		[[ -n "${keyserverconf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]="${keyserverconf[PP_TIMEOUT]}"
+		[[ -n "${keyserverconf[USER_TIMEOUT]}" ]] && conf[USER_TIMEOUT]=${keyserverconf[USER_TIMEOUT]}
+		[[ -n "${keyserverconf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]="${keyserverconf[CLEANUP_TIMER]}"
 		[[ "$1" == "keyserver" && ! -s ${KEYSRVCONF} ]] && for var in KEYSRV_FIFO LOGDIR LOGLEVEL KEYSRVR_GROUP LOG_GROUP \
 																KEYSRV_TIMEOUT PP_TIMEOUT USER_TIMEOUT CLEANUP_TIMER; do
 			echo "${var}=${conf[${var}]}" >>${KEYSRVCONF}
@@ -129,17 +136,14 @@ do_init_conf()
 		[[ -n "${keyserverconf[KEYLIFE]}" ]] && conf[KEYLIFE]=${keyserverconf[KEYLIFE]}
 	fi
 	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
-	if [[ "$1" == "daemon" && $2 == "1" ]]; then
-		[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
-		[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -p ${conf[CRYPTDISKSDDIR]}
-		if [[ ! -s ${CONF} ]]; then
-			do_log warning "${CONF} not found, creating default"
-			for var in ${!conf[@]}; do echo "${var}=${conf[${var}]}" >>${CONF}; done
-		fi
+	if [[ "$1" == "daemon" && $2 == "1"  && ! -s ${CONF} ]]; then
+		do_log warning "${CONF} not found, creating default"
+		for var in ${!conf[@]}; do echo "${var}=${conf[${var}]}" >>${CONF}; done
 	fi
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
+	[[ "$1" == "daemon" && -z "${crypttab}" ]] && do_log warning "crypttab is empty"
 
 	return 0
 }
@@ -159,6 +163,7 @@ logwriter()
 	exec 1>/dev/null 2>&1
 
 	# Initialize the log file. Set the correct access rights.
+	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
 	[[ -n "$1" ]] && conf[LOGFILE]="${conf[LOGDIR]}/$1"
 	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
 		touch ${conf[LOGFILE]}
@@ -280,7 +285,7 @@ do_systemd_daemon()
 	while true; do	
 		# Evaluate cleanup, jobs, start status and set the new read timeout, we will run a cleanup every conf[CLEANUP_TIMER].
 		# Make sure the read timeout is never 0 as this will complicate things (read will not read if to = 0).
-		time_active=$(do_timer ${time_start}) passphrase="" _jobs="$(echo $(jobs -rp))"
+		time_active=$(do_timer ${time_start}) key="" passphrase="" _jobs="$(echo $(jobs -rp))"
 		for key in ${!job[@]}; do
 			res=$(cut -d'|' -f1 <<<"${key}") cmd=$(cut -d'|' -f2 <<<"${key}") pid=$(cut -d'|' -f3 <<<"${key}")
 			_time_active=$(do_timer ${job[${key}]} |cut -d'.' -f1)
@@ -348,22 +353,13 @@ do_systemd_daemon()
 
 		case ${msg[0],,} in
 		reload)
-			do_term_daemon 2;;
+			do_init_conf daemon 1;;
 		mount|unmount)
 			if [[ "${msg[0],,}" == "unmount" && ${msg[2]} -ne 1 ]]; then
 				do_log debug "removed ${msg[1]} from active mounts"
 				unset active_mnt[${msg[1]}]
 			elif [[ "${msg[0],,}" == "mount" && ${msg[2]} -ne 1 && ${msg[2]} -ne 2 && ${msg[2]} -ne 5 ]]; then
-				if crypt_arr=($(do_xcrypt_fromtab "${msg[1]}")); then
-					pp="$(do_eval_pp ${crypt_arr[2]})" dev="$(do_find_dev "${crypt_arr[1]}")" || dev"${RED}Not Found!${NOR}"
-					[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
-					[[ "${msg[2]}" -ne 0 ]] && crypt_arr[3]="${msg[2]}"
-				else
-					pp="-" dev="/dev/$(t_dmsetup 1 deps ${msg[1]} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2)"
-					[[ "$(t_lsblk -rD ${conf[DMDIR]}/${msg[1]} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && crypt_arr[3]=0 \
-																											   || crypt_arr[3]=1
-				fi
-				active_mnt[${msg[1]}]="${dev} ${pp} ${crypt_arr[3]} $(do_timer)"
+				active_mnt[${msg[1]}]="${msg[3]} ${msg[4]} ${msg[5]} $(do_timer)"
 				do_log debug "added ${msg[1]} to active mounts"
 			fi
 			if [[ "${msg[2]}" -eq 1 || "${msg[2]}" -eq 5 ]]; then
@@ -378,7 +374,7 @@ do_systemd_daemon()
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
 			if [[ "${cmd}" == "stop" ]]; then
 				do_term_daemon 0 ${pid_socat}
-			elif [[ "${msg[2],,}" == "mountsysimg" && "${INITRD}" -eq 0 ]]; then
+			elif [[ "${msg[2],,}" =~ mount(sysimg|storage) && "${INITRD}" -eq 0 ]]; then
 				echo "${RED}Not in Initramfs" |socat - UNIX-CONNECT:${sock_ctrl} && kill -SIGTERM ${pid_socat} 2>/dev/null
 			elif [[ "${msg[2],,}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
 				do_log debug "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
@@ -387,7 +383,7 @@ do_systemd_daemon()
 			elif [[ "${msg[2],,}" == "mountsysimg" ]]; then
 				mountsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
 				if [[ "${mountsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
-					[[ "${mountsysimg##* }" -eq 1 ]] || passphrase="$(t_keyctl 1 pipe "${key}")" && daemon_mount_sysimg &
+					daemon_mount_sysimg &
 				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
 					do_log debug "no active worker for ${conf[SYSTEMPP]}, starting"
 					crypt_arr[2]="${conf[SYSTEMPP]}"
@@ -447,13 +443,10 @@ do_systemd_daemon()
 					get_passphrase "${user}" & job[passphrase|${pp}|$!]="$(do_timer)"
 				fi
 			fi;;
-		passphrase)
+		?assphrase)  // Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
-			if [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]]; then
-				key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"
-				daemon_mount_sysimg &
-			fi
+			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg &
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
@@ -611,7 +604,7 @@ do_daemon_check_conf()
 	fi
 
 	# Check the bootserver and user keys if present.
-	[[ -z "${conf[BOOTSERVERS]}" ]] && return
+	[[ -z "${conf[BOOTSERVERS]}" ]] && return 0
 	fwsrvvar="${FWGUID}-${DISTNAME}_${conf[BOOTSERVERKEYS]}"
 	fwsrvkey="${FWDIR}/${DISTNAME}_${conf[BOOTSERVERKEYS]}-${FWGUID}"
 	fwusrvar="${FWGUID}-${DISTNAME}_${conf[BOOTUSERKEY]}"
@@ -657,7 +650,6 @@ do_daemon_check_conf()
 	fi
 
 	# No need to check user key, if server key not present.
-	[[ -z ${conf[BOOTSERVERS]} ]] && return 0
 	if [[ -s ${fwusrkey} && ! -s ${usrkey} ]]; then
 		# Key in fw not in confdir, copy
 		do_log info "copying ${fwusrkey} to ${usrkey}"
@@ -701,6 +693,10 @@ do_daemon_check_conf()
 		conf[BOOTSERVERS]=""
 	fi
 
+	# Check network configuration
+	[[ ! -d /boot/network ]] && mkdir -p /boot/network
+	! t_diff -qr /boot/network/ /etc/systemd/network/ >/dev/null 2>&1 && rm -rf /boot/network && cp -a /etc/systemd/network /boot/
+
 	[[ ${starting} -eq 0 && ${confok} -eq 1 ]] && echo "reload" >${conf[FIFO]}
 	return 0
 }
@@ -732,7 +728,7 @@ do_daemon_cleanup()
 	for crypt in ${mnt_crypt}; do if [[ -z "${active_mnt[${crypt}]}" ]]; then
 		crypt_arr=($(do_xcrypt_fromtab "${crypt}"))
 		[[ "$(t_lsblk -rD ${conf[DMDIR]}/${crypt} |head -n2 |tail -n1 |cut -d' ' -f3-4)" =~ 0B ]] && trim=0 || trim=1
-		if [[ ! -z "${crypt_arr[@]}" ]]; then
+		if [[ -n "${crypt_arr[@]}" ]]; then
 			dev="$(do_find_dev ${crypt_arr[1]})" pp="$(do_eval_pp "${crypt_arr[2]}")"
 			[[ -z "${cached_pp[${pp}]}" ]] && key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")" && do_move_passphrase "${pp}" "${key}"
 			[[ -n "${crypt_arr[4]}" ]] && pp+="/${crypt_arr[4]}/${crypt_arr[5]}/${crypt_arr[6]}"
@@ -757,7 +753,7 @@ do_daemon_cleanup()
 	done
 
 	# If we have reloaded look up any managed crypts removed from crypttab and make them unmanaged.
-	if [[ ! -z "${tab_crypt}" ]]; then for crypt in ${!active_mnt[@]}; do
+	if [[ -n "${tab_crypt}" ]]; then for crypt in ${!active_mnt[@]}; do
 		crypt_arr=(${active_mnt[${crypt}]})
 		[[ "${crypt_arr[1]}" == "-" ]] && continue
 		for _crypt in ${tab_crypt}; do
@@ -785,6 +781,7 @@ daemon_mount_sysimg()
 {
 	local res=0 sock="$(cut -d' ' -f2 <<< "${mountsysimg}")" enc="${mountsysimg##* }" pid="${mountsysimg%% *}"
 	do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
+	key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"
 	[[ -d /squashfs ]] || mkdir /squashfs || res=1
 	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
 	if [[ "${res}" -eq 0 && "${enc}" -eq 0 ]]; then
@@ -796,6 +793,63 @@ daemon_mount_sysimg()
 	[[ "${res}" -ne 0 ]] && do_log error "failed to mount ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 	echo "${res}" |socat - UNIX-CONNECT:${sock}
 	[[ "$(</proc/${pid}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid} 2>/dev/null
+}
+
+daemon_import_storage()
+{
+	local nr=1 i=1 status=0 storagedev storageopt dev
+	if [[ -n "${conf[STORAGEDEVS]}" ]]; then
+		for storagedev in ${conf[STORAGEDEVS]}; do
+			dev="$(findfs ${storagedev} 2>/dev/null)"
+			if [[ $? -ne 0 ]] ; then
+				do_initrd_log "incorrect storage device entry (${storagedev}) in config"
+			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
+				if [[ ${conf[STORAGETRIM]} -eq 1 && ! "$(t_lsblk -rD ${dev}|head -n2|tail -n1|cut -d' ' -f3-4)" =~ 0B ]]; then
+					storageopt="--allow-discards"
+				fi
+				storageopt+=" --cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
+				t_cryptsetup open --type plain ${storageopt} ${dev} ${2}${nr} <<<"$3"
+				if [[ "$?" -eq 0 ]]; then
+					nr=$((nr+1))
+				else
+					do_initrd_log "cannot unlock persistent storage device ${storagedev}"
+					status=2
+				fi
+			else
+				do_initrd_log "persistent storage device ${conf[DMDIR]}/${2}${nr} already present"
+				status=2
+			fi
+		done
+		if [[ "${nr}" -eq 1 ]]; then
+			do_initrd_log "no usable storage devices in conf, starting with default config"
+			do_cecho -ne "${YEL}No Usable Storage Devices in Bootconf, Starting with Default Config.${NOR}"
+			return 1
+		else
+			if ! zpool import $1 -f >/dev/null 2>&1; then
+				do_initrd_log "unable to import storage pool $1, starting with default config"
+				do_cecho -ne "${YEL}Unable to Import Storage Pool $1, Starting with Default Config.${NOR}"
+				return 1
+			fi
+			while [[ "${i}" -le ${conf[TIMEOUT]} ]]; do
+				[[ -b /dev/zvol/$1/etc || -b /dev/zvol/$1/lib ]] && mdadm --assemble --scan >/dev/null 2>&1
+				[[ -b ${etcmd} && -b ${libmd} ]] && break
+				sleep 1
+				i=$((i+1))
+			done
+			if [[ ! -b ${etcmd} || ! -b ${libmd} ]]; then
+				do_initrd_log "etc or lib zvol not found starting with default config"
+				do_cecho -ne "${YEL}No lib or etc Zvol Found. Starting with Default Config.${NOR}"
+				return 1
+			fi
+			etcsz=$(($(blockdev --getsize64 /dev/zvol/$1/etc) + 1))
+			libsz=$(($(blockdev --getsize64 /dev/zvol/$1/lib) + 1))
+		fi
+	else
+		do_initrd_log "no persistent storage devices in conf. starting with default config"
+		do_cecho -ne "${YEL}No Persistent Storage Devices in Bootconf. Starting with Default Config.${NOR}"
+		return 1
+	fi
+	return ${status}
 }
 
 daemon_mount_crypt()
@@ -840,7 +894,7 @@ daemon_mount_crypt()
 					"since $(do_timer date ${_crypt_arr[4]})"
 	fi
 
-	echo "mount ${_add_crypt} ${_res}" >${conf[FIFO]}
+	echo "mount ${_add_crypt} ${_res} ${_add_dev} ${_add_pp} ${_add_trim}" >${conf[FIFO]}
 	exit ${_res}
 }
 
@@ -883,27 +937,27 @@ do_term_get_passphrase()
 	trap 'do_log warning "unclean exit after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 
 	# Kill the workers and exit.
-	if [[ ! -z ${__pid_keyclnt} && "$(</proc/${__pid_keyclnt}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${__pid_keyclnt}" && "$(</proc/${__pid_keyclnt}/comm)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${__pid_keyclnt} 2>/dev/null
 		do_log debug "killed key client worker (PID: ${__pid_keyclnt})"
 		wait ${__pid_keyclnt}
 	fi
-	if [[ ! -z ${__pid_querypp} && "$(</proc/${__pid_querypp}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${__pid_querypp}" && "$(</proc/${__pid_querypp}/comm)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${__pid_querypp} 2>/dev/null
 		do_log debug "killed query worker (PID: ${__pid_querypp})"
 		wait ${__pid_querypp}
 	fi
-	if [[ ! -z ${_pid_getpp} && "$(</proc/${_pid_getpp}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${_pid_getpp}" && "$(</proc/${_pid_getpp}/comm)" == "${MYNAME}" ]]; then
 		kill -SIGTERM ${_pid_getpp} 2>/dev/null
 		do_log debug "killed get worker (PID: ${_pid_getpp})"
 		wait ${_pid_getpp}
 	fi
-	if [[ ! -z ${_pid_putkey} && "$(</proc/${_pid_putkey}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${_pid_putkey}" && "$(</proc/${_pid_putkey}/comm)" == "${MYNAME}" ]]; then
 		[[ $1 -ne 0 ]] && kill -SIGTERM ${_pid_putkey} 2>/dev/null && do_log debug "killed put key worker (PID: ${_pid_putkey})"
 		[[ $1 -eq 0 ]] && do_log debug "waiting for put key worker (PID: ${_pid_putkey})"
 		wait ${_pid_putkey}
 	fi
-	if [[ ! -z "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
 		do_log debug2 "stopping log writer (PID: ${_pid_logwriter} FD:${fd_logwriter})"
 	fi
 	exit $1
@@ -948,7 +1002,7 @@ get_passphrase()
 
 	# When starting we will wait max PP_TIMEOUT for the network to come up, or fail.
 	[[ ${conf[NET_ONLINE]} -eq 1 && ${starting} -ne 0 ]] && \
-	until [[ ${_time_active%%.*} -ge ${conf[PP_TIMEOUT]} || $(t_networkctl status |grep "Online state") =~ (online|partial)$ ]]; do
+	until [[ ${_time_active%%.*} -ge ${conf[NET_TIMEOUT]} || $(t_networkctl status |grep "Online state") =~ (online|partial)$ ]]; do
 		t_sleep ${conf[QUEUE_TIMEOUT]}
 		_time_active=$(do_timer ${_time_start})
 	done
@@ -1777,7 +1831,7 @@ do_term_query_passphrase()
 {
 	trap 'do_log warning "unclean finish after $(do_timer ${_time_start})s"; exit 1;' SIGINT SIGTERM
 
-	if [[ ! -z "${pid_askpp}" && "$(</proc/${pid_askpp}/comm)" == "systemd-ask-pas" ]]; then
+	if [[ -n "${pid_askpp}" && "$(</proc/${pid_askpp}/comm)" == "systemd-ask-pas" ]]; then
 		kill -SIGTERM ${pid_askpp}
 		do_log debug "killed ask worker (PID: ${pid_askpp})"
 	fi
@@ -1921,7 +1975,7 @@ do_term_keysrv()
 	trap 'do_log warning "unclean exit after $(do_timer ${time_start})s"; exit 1;' SIGINT SIGTERM
 
 	do_log warning "terminating after $(do_timer ${time_start})s"
-	if [[ ! -z "${pid_logwriter}" && "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
+	if [[ -n "${pid_logwriter}" && "$(</proc/${pid_logwriter}/comm)" == "${MYNAME}" ]]; then
 		do_log debug2 "stopping log writer (PID: ${pid_logwriter})"
 	fi
 	exec {fd_logwriter}>&- {fd_fifo}>&- 1>&- 2>&-
@@ -2140,13 +2194,13 @@ key_clnt()
 				case ${res} in
 				0)
 					do_log info "update ${f} on ${srv} ok"
-					[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${GRN}${srv}:${f}${NOR} " >&${__fd_user};;
+					[[ -n "${__fd_user}" ]] && echo -ne "${BOLD}${GRN}${srv}:${f}${NOR} " >&${__fd_user};;
 				1)
 					do_log error "update ${f} on ${srv} failed"
-					[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}:${f}${NOR} " >&${__fd_user};;
+					[[ -n "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}:${f}${NOR} " >&${__fd_user};;
 				2)
 					do_log warning "update ${f} on ${srv} equal"
-					[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${YEL}${srv}:${f}${NOR} " >&${__fd_user};;
+					[[ -n "${__fd_user}" ]] && echo -ne "${BOLD}${YEL}${srv}:${f}${NOR} " >&${__fd_user};;
 				esac
 			done
 			exit
@@ -2156,13 +2210,13 @@ key_clnt()
 		if [[ ${r} -ne 0 || ( "${cmd}" != "get" && ! "${res,,}" =~ ^(ok|same)$ ) \
 				 		 || ( "${cmd}" == "get" && $(do_check_passphrase "${pp}" "${res}" 0)$? -eq 1 ) ]]; then
 			[[ ${r} -eq 142 ]] && ts="timeout" || ts="failed"
-			[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}${NOR} " >&${__fd_user}
+			[[ -n "${__fd_user}" ]] && echo -ne "${BOLD}${RED}${srv}${NOR} " >&${__fd_user}
 			do_log info "${msg} ${srv} for ${conf[BOOTUSER]} ${ts}"
 		elif [[ "${cmd,,}" != "get" && "${res,,}" == "same" ]]; then
-			[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${YEL}${srv}${NOR} " >&${__fd_user}
+			[[ -n "${__fd_user}" ]] && echo -ne "${BOLD}${YEL}${srv}${NOR} " >&${__fd_user}
 			do_log info "${msg} ${srv} for ${conf[BOOTUSER]} equal"
 		elif [[ ( "${cmd,,}" != "get" && "${res,,}" == "ok" ) || "${cmd,,}" == "get" ]]; then
-			[[ ! -z "${__fd_user}" ]] && echo -ne "${BOLD}${GRN}${srv}${NOR} " >&${__fd_user}
+			[[ -n "${__fd_user}" ]] && echo -ne "${BOLD}${GRN}${srv}${NOR} " >&${__fd_user}
 			do_log info "${msg} ${srv} for ${conf[BOOTUSER]} succeeded"
 			[[ "${cmd}" == "get" ]] && echo "${res}" >&${__fd_up}
 		fi
@@ -2178,7 +2232,7 @@ key_clnt()
 	fi
 	if [[ ${starting} -ne 0 && ${conf[NET_ONLINE]} -eq 1 ]]; then
 		ts=$(do_timer) ret=0
-		until [[ ${ret} -ge ${conf[START_TIMEOUT]} || "$(t_networkctl status | grep "Online state")" =~ (online|partial)$ ]]; do
+		until [[ ${ret} -ge ${conf[NET_TIMEOUT]} || "$(t_networkctl status | grep "Online state")" =~ (online|partial)$ ]]; do
 			t_sleep ${conf[QUEUE_TIMEOUT]}
 			ret=$((ret+$(do_timer ${ts} |cut -d'.' -f1)))
 		done
@@ -2313,63 +2367,6 @@ do_bootsan()
 # [END OF KEY SERVER & CLIENT FUNCTIONS]
 
 # [START OF INITRD FUNCTIONS]
-
-do_import_storage()
-{
-	local nr=1 i=1 status=0 storagedev storageopt dev
-	if [[ ! -z "${conf[STORAGEDEVS]}" ]]; then
-		for storagedev in ${conf[STORAGEDEVS]}; do
-			dev="$(findfs ${storagedev} 2>/dev/null)" 
-			if [[ $? -ne 0 ]] ; then
-				do_initrd_log "incorrect storage device entry (${storagedev}) in config"
-			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
-				if [[ ${conf[STORAGETRIM]} -eq 1 && ! "$(t_lsblk -rD ${dev}|head -n2|tail -n1|cut -d' ' -f3-4)" =~ 0B ]]; then
-					storageopt="--allow-discards"
-				fi
-				storageopt+=" --cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
-				t_cryptsetup open --type plain ${storageopt} ${dev} ${2}${nr} <<<"$3"
-				if [[ "$?" -eq 0 ]]; then
-					nr=$((nr+1))
-				else
-					do_initrd_log "cannot unlock persistent storage device ${storagedev}"
-					status=2
-				fi
-			else
-				do_initrd_log "persistent storage device ${conf[DMDIR]}/${2}${nr} already present"
-				status=2
-			fi
-		done 
-		if [[ "${nr}" -eq 1 ]]; then
-			do_initrd_log "no usable storage devices in conf, starting with default config"
-			do_cecho -ne "${YEL}No Usable Storage Devices in Bootconf, Starting with Default Config.${NOR}"
-			return 1
-		else
-			if ! zpool import $1 -f >/dev/null 2>&1; then
-				do_initrd_log "unable to import storage pool $1, starting with default config"
-				do_cecho -ne "${YEL}Unable to Import Storage Pool $1, Starting with Default Config.${NOR}"
-				return 1
-			fi
-			while [[ "${i}" -le ${conf[TIMEOUT]} ]]; do
-				[[ -b /dev/zvol/$1/etc || -b /dev/zvol/$1/lib ]] && mdadm --assemble --scan >/dev/null 2>&1
-				[[ -b ${etcmd} && -b ${libmd} ]] && break
-				sleep 1
-				i=$((i+1))
-			done
-			if [[ ! -b ${etcmd} || ! -b ${libmd} ]]; then
-				do_initrd_log "etc or lib zvol not found starting with default config"
-				do_cecho -ne "${YEL}No lib or etc Zvol Found. Starting with Default Config.${NOR}"
-				return 1
-			fi
-			etcsz=$(($(blockdev --getsize64 /dev/zvol/$1/etc) + 1))
-			libsz=$(($(blockdev --getsize64 /dev/zvol/$1/lib) + 1))
-		fi
-	else
-		do_initrd_log "no persistent storage devices in conf. starting with default config"
-		do_cecho -ne "${YEL}No Persistent Storage Devices in Bootconf. Starting with Default Config.${NOR}"
-		return 1
-	fi
-	return ${status}
-}
 
 do_make_default_config()
 {
@@ -2660,12 +2657,12 @@ do_parse_opt()
 		FOREGROUND=1
 		# If there are more options continue parsing. -f can only be followed by -d.
 		shift
-		[[ ! -z "$1" ]] && return 1;;
+		[[ -n "$1" ]] && return 1;;
 	?) # If run from parse cmds function, we need to check if the option specified matches a known command.
 	   # If that is the case we have reached the end of the current command and can start processing the next.
-		if [[ ${cmd} -eq 1 && ! -z "$1" ]] && ! do_parse_cmd check $1; then
+		if [[ ${cmd} -eq 1 && -n "$1" ]] && ! do_parse_cmd check $1; then
 			next_cmd=1
-		elif [[ ${cmd} -eq 1 && ! -z "$1" ]]; then
+		elif [[ ${cmd} -eq 1 && -n "$1" ]]; then
 			# We may get here if put/rmkey command contains -s server options. Check here if it was specified without server before.
 			# If this is the last word in the command return 0 because we are done and it is the keynamen, not a server.
 			[[ (${_srv} -eq 2 && ${srv} == 1) || (${timeout} == "-1"  && ! ${!OPTIND} =~ ^[0-9]+$) ]] && do_echo_use "${command}"
@@ -2701,7 +2698,7 @@ do_parse_opt()
 	# If foreground mode was requested execute. Echo command usage if specified in wrong place.
 	if [[ ${FOREGROUND} -eq 1 ]]; then
 		# If -f is not first option specified, it must be last (after -d) and no more options can be present.
-		[[ ${nr} -gt 1 && ! -z "$1" ]] && do_echo_use "${command}"
+		[[ ${nr} -gt 1 && -n "$1" ]] && do_echo_use "${command}"
 		# Start in debug/foreground mode.
 		if [[ ${UID} -ne 0 && $# -le 1 ]]; then
 			echo "${MYNAME} foreground can only be started as root"
@@ -2783,7 +2780,7 @@ do_term_cryptdisksd_cmd()
 	trap 'echo "${RED}${MYNAME} unclean finish${NOR}"; exit 1;' SIGINT SIGTERM
 
 	# Kill socat coproc if still active and remove the socket if still present. Restore stdin to the tty.
-	if [[ ! -z "${pid_socat}" && "$(</proc/${pid_socat}/comm)" == "socat" ]]; then
+	if [[ -n "${pid_socat}" && "$(</proc/${pid_socat}/comm)" == "socat" ]]; then
 		kill -SIGTERM ${pid_socat} 2>/dev/null
 		[[ ${conf[LOGLEVEL]} -gt 2 ]] && echo -ne "\n\rKilled ${pid_socat}"
 	fi
@@ -2967,6 +2964,7 @@ do_systemd_daemon_start()
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
 		exit 0
 	fi
+	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -p ${conf[CRYPTDISKSDDIR]}
 	echo ${pid_daemon} >${conf[PIDFILE]}
 	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
 	[[ "${INITRD}" -eq 1 ]] && cat > /etc/udev/rules.d/99-${conf[ETCDEV]}${conf[LIBDEV]}.rules <<-EOF
@@ -3065,7 +3063,6 @@ do_cryptdisksd_cli()
 }
 
 # Initialize essential configuration variables. In initrd check kernel cmdline.
-declare -gA conf keyserverconf keylife
 MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin INITRD=$([[ ! -L /etc/initrd-release ]])$?; unset LC_NUMERIC
 [[ -s /etc/os-release ]] && . /etc/os-release
 [[ $? -ne 0 && -s /usr/lib/os-release ]] && . /usr/lib/os-release
