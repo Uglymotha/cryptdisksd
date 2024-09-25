@@ -3084,7 +3084,7 @@ fi
 [[ -s /etc/systemd/${MYNAME}.conf ]] && . /etc/systemd/${MYNAME}.conf
 [[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
 [[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
-[[ -z "${FWCONF}" ]] && FWCONF="${FWDIR}/${DISTNAME}-$(basename ${CONF})_${FWGUID}"
+[[ -z "${FWCONF}" ]] && FWCONF="${FWDIR}/${DISTNAME}-$(basename ${CONF})-${FWGUID}"
 [[ -z "${CRYPTTAB}" ]] && CRYPTTAB="crypttab"
 
 # Formatting parameters for console output.
