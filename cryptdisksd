@@ -46,6 +46,7 @@ do_init_conf()
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
 	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/sysimg-${DISTNAME}-${DISTVERSION}.sqfs"
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
+	[[ -z "${conf[SYSLOGDIR]}" ]] && conf[SYSLOGDIR]="${conf[ROOTDIR]}/var/log"
 	[[ -z "${conf[ETCDEV]}" ]] && conf[ETCDEV]="etc"
 	[[ -z "${conf[LIBDEV]}" ]] && conf[LIBDEV]="lib"
 	[[ -z "${conf[STORAGEPOOL]}" ]] && conf[STORAGEPOOL]=storage
@@ -165,6 +166,8 @@ logwriter()
 	# Initialize the log file. Set the correct access rights.
 	[[ ! -d ${conf[LOGDIR]} ]] && mkdir -p ${conf[LOGDIR]}
 	[[ -n "$1" ]] && conf[LOGFILE]="${conf[LOGDIR]}/$1"
+	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[LOGDIR]}
+	chmod 750 ${conf[LOGDIR]}
 	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
 		touch ${conf[LOGFILE]}
 		chgrp ${conf[LOG_GROUP]} ${conf[LOGFILE]}
@@ -185,7 +188,8 @@ logwriter()
 	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
 		echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${myname} finished after $(do_timer ${_time_start})s" >>${conf[LOGFILE]}
 	fi
-	[[ "${INITRD}" -eq 1 && "${keeplog}" -eq 1 ]] && cp -a ${conf[LOGFILE]} ${conf[LOGDIR]} /sysroot/var/log/
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} ${conf[SYSLOGDIR]}/
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} ${conf[SYSLOGDIR]}/
 }
 
 do_log()
@@ -222,6 +226,7 @@ do_term_daemon()
 	trap 'systemd-notify --stopping --status="${MYNAME}: unclean finish after $(do_timer ${time_start})s"; exit 1;' SIGINT SIGTERM
 	local res pid pp crypt timeout passphrase
 
+	starting=-2
 	do_log warning "terminating after $(do_timer ${time_start})s"
 	do_daemon_check_conf
 	for key in ${!job[@]}; do
@@ -259,6 +264,7 @@ do_term_daemon()
 	exec {fd_logwriter}>&- 1>&- 2>&-
 	wait ${pid_logwriter}
 	[[ -n "$2" ]] && kill -SIGTERM $2 2>/dev/null
+
 	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
 	exit $1
 }
@@ -374,13 +380,17 @@ do_systemd_daemon()
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
 			if [[ "${cmd}" == "stop" ]]; then
 				do_term_daemon 0 ${pid_socat}
-			elif [[ "${msg[2],,}" =~ mount(sysimg|storage) && "${INITRD}" -eq 0 ]]; then
+			elif [[ "${cmd}" == "reload" ]]; then
+				echo reload >${conf[FIFO]}
+				echo "${RED}Reloading Config${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
+				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
+			elif [[ "${cmd}" =~ mount(sysimg|storage) && "${INITRD}" -eq 0 ]]; then
 				echo "${RED}Not in Initramfs" |socat - UNIX-CONNECT:${sock_ctrl} && kill -SIGTERM ${pid_socat} 2>/dev/null
-			elif [[ "${msg[2],,}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
+			elif [[ "${cmd}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
 				do_log debug "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 				echo "${RED}Already Mounting${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
 				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
-			elif [[ "${msg[2],,}" == "mountsysimg" ]]; then
+			elif [[ "${cmd}" == "mountsysimg" ]]; then
 				mountsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
 				if [[ "${mountsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
 					daemon_mount_sysimg &
@@ -392,9 +402,9 @@ do_systemd_daemon()
 					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
 				fi
 			else
-				[[ "${msg[2],,}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase
-				[[ "${msg[2],,}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey
-				daemon_control ${msg[2],,} & job[control|${cmd}|$!]="$(do_timer)"
+				[[ "${cmd}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase
+				[[ "${cmd}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey
+				daemon_control ${cmd} & job[control|${cmd}|$!]="$(do_timer)"
 				do_log debug "started control worker for ${cmd} (PID: $!)"
 			fi;;
 		remove)
@@ -443,7 +453,8 @@ do_systemd_daemon()
 					get_passphrase "${user}" & job[passphrase|${pp}|$!]="$(do_timer)"
 				fi
 			fi;;
-		?assphrase)  // Obscure bug, sometimes the p is lost in message somehow
+		?assphrase)
+		// Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
 			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg &
@@ -536,7 +547,6 @@ do_daemon_check_conf()
 	do_log debug "checking config"
 	if [[ ${INITRD} -eq 1 && ${starting} -eq -1 && ! -s ${FWCONF} ]]; then
 		do_log warning "${FWCONF} Not Found! Starting with default config"
-		touch /default
 	elif [[ -s ${FWCONF} && ! -s ${CONF} ]]; then
 		# Config in firware, not in confdir, copy fw to confdir.
 		confok=1
@@ -553,7 +563,7 @@ do_daemon_check_conf()
 					[[ -e ${FWCONF} ]] && t_chattr -i ${FWCONF}
 					if ! t_printf "\x07\x00\x00\x00\x00" >${FWCONF}; then
 						do_log error "error creating ${FWCONF}"
-					elif ! t_efivar -n ${FWGUID}-${DISTNAME}_$(basename ${CONF}) -w -f ${CONF}; then
+					elif ! t_efivar -n ${CONFFW} -w -f ${CONF}; then
 						do_log error "error copying ${CONF} to ${FWCONF}"
 					fi
 					t_chattr +i ${FWCONF}
@@ -570,11 +580,11 @@ do_daemon_check_conf()
 	elif [[ ! -s ${FWCONF} && -s ${CONF} ]]; then
 		# No fwconfig store confdir.
 		confok=1
-		do_log info "no firmware config, copying from ${CONF}"
+		do_log warning "no firmware config, copying from ${CONF}"
 		[[ -e ${FWCONF} ]] && t_chattr -i ${FWCONF}
 		if ! t_printf "\x07\x00\x00\x00\x00" >${FWCONF}; then
 			do_log error "error creating ${FWCONF}"
-		elif ! t_efivar -n ${FWGUID}-${DISTNAME}_$(basename ${CONF}) -w -f ${CONF}; then
+		elif ! t_efivar -n ${CONFFW} -w -f ${CONF}; then
 			do_log error "error copying ${CONF} to ${FWCONF}"
 		fi
 		t_chattr +i ${FWCONF}
@@ -593,8 +603,8 @@ do_daemon_check_conf()
 		fi
 		diff="$(t_cat ${CONF} |grep -ve "^\s*#")"
 		if ! t_diff -q <(echo "${diff}") <(echo "${systemdconf}"); then
-			do_log error "${CONF} changed, terminating"
-			return 1
+			do_log error "${CONF} changed, reloading asap"
+			confok=1
 		fi
 		diff="$(t_cat ${conf[CRYPTTAB]} |grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
 		if ! t_diff -q <(echo "${diff}") <(echo "${crypttab}"); then
@@ -2974,8 +2984,7 @@ do_systemd_daemon_start()
 	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 
 	# Start the logwriter.
-	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[LOGDIR]} ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
-	chmod 750 ${conf[LOGDIR]}
+	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
 	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
 	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
@@ -3070,7 +3079,6 @@ MYNAME="$(basename $0)" FOREGROUND=0 PATH=/bin:/sbin INITRD=$([[ ! -L /etc/initr
 [[ -z "${VERSION_ID}" ]] && DISTVERSION="0.00.000" || DISTVERSION="${VERSION_ID}"
 if [[ "${INITRD}" -eq 1 ]]; then
 	for param in $(</proc/cmdline); do
-		[[ "${param}" =~ ^${MYNAME}.keeplog ]] && keeplog=1 && [[ "${param}" =~ ^.*\=[0-4]$ ]] && conf[LOGLEVEL]="${param%%*=}"
 		[[ "${param}" =~ ^${MYNAME}.fwdir ]] && FWDIR="${param}"
 		[[ "${param}" =~ ^${MYNAME}.fwguid ]] && FWGUID="${param}"
 		[[ "${param}" =~ ^${MYNAME}.id ]] && ID="${param}"
@@ -3085,6 +3093,7 @@ fi
 [[ -z "${CONFDIR}" ]] && CONFDIR="/etc/${MYNAME}"
 [[ -z "${CONF}" ]] && CONF="${CONFDIR}/${MYNAME}.conf"
 [[ -z "${FWCONF}" ]] && FWCONF="${FWDIR}/${DISTNAME}_$(basename ${CONF})-${FWGUID}"
+CONFFW="${FWGUID}-${DISTNAME}_$(basename ${CONF})"
 [[ -z "${CRYPTTAB}" ]] && CRYPTTAB="crypttab"
 
 # Formatting parameters for console output.
