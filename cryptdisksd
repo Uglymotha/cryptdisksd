@@ -93,7 +93,7 @@ do_init_conf()
 		[[ -n "${keyserverconf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]="${keyserverconf[CLEANUP_TIMER]}"
 		[[ "$1" == "keyserver" && ! -s ${KEYSRVCONF} ]] && for var in KEYSRV_FIFO LOGDIR LOGLEVEL KEYSRVR_GROUP LOG_GROUP \
 																KEYSRV_TIMEOUT PP_TIMEOUT USER_TIMEOUT CLEANUP_TIMER; do
-			echo "${var}=${conf[${var}]}" >>${KEYSRVCONF}
+			echo "# ${var}=${conf[${var}]}" >>${KEYSRVCONF}
 		done
 	fi
 	for _conf in LOGLEVEL DEBUGSHELL CRYPTDISKSDDIR_MODE FIFO_MODE START_TIMEOUT PP_TIMEOUT QUEUE_TIMEOUT CLEANUP_TIMER NET_ONLINE \
@@ -139,7 +139,7 @@ do_init_conf()
 	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
 	if [[ "$1" == "daemon" && $2 == "1"  && ! -s ${CONF} ]]; then
 		do_log warning "${CONF} not found, creating default"
-		for var in ${!conf[@]}; do echo "${var}=${conf[${var}]}" >>${CONF}; done
+		for var in ${!conf[@]}; do echo "# ${var}=${conf[${var}]}" >>${CONF}; done
 	fi
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
@@ -359,7 +359,8 @@ do_systemd_daemon()
 
 		case ${msg[0],,} in
 		reload)
-			do_init_conf daemon 1;;
+			do_init_conf daemon 1
+			do_daemon_start_logwriter;;
 		mount|unmount)
 			if [[ "${msg[0],,}" == "unmount" && ${msg[2]} -ne 1 ]]; then
 				do_log debug "removed ${msg[1]} from active mounts"
@@ -402,8 +403,6 @@ do_systemd_daemon()
 					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
 				fi
 			else
-				[[ "${cmd}" =~ ^(smart|erase)$ ]] && msg[2]=smarterase
-				[[ "${cmd}" =~ ^(putkey|rmkey)$ ]] && msg[2]=putrmkey
 				daemon_control ${cmd} & job[control|${cmd}|$!]="$(do_timer)"
 				do_log debug "started control worker for ${cmd} (PID: $!)"
 			fi;;
@@ -453,8 +452,7 @@ do_systemd_daemon()
 					get_passphrase "${user}" & job[passphrase|${pp}|$!]="$(do_timer)"
 				fi
 			fi;;
-		?assphrase)
-		// Obscure bug, sometimes the p is lost in message somehow
+		?assphrase) # Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
 			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg &
@@ -1087,22 +1085,29 @@ daemon_control()
 		exec {fd_logwriter}>&- {fd_logwriter}> >(logwriter control-${cmd}-${BASHPID}.log ${_pid_logwriter})
 		_pid_logwriter=$!
 	fi
+
+	# Check the command line, it should contain crypt, device and passphrase and two options (confirm / crypttab) for add or del.
 	[[ "${cmd}" =~ ^(add|del|smart|erase)$ ]] && _crypt_arr=($(do_xcrypt_fromtab "${msg[3]}"))
-	
-	# Check if socket exists first.
+	if [[ ${cmd} =~ ^(smart|erase)$ ]]; then
+		cmd="smarterase" _smartall=${msg[$((${#msg[@]}-2))]} _smarttest=${msg[$((${#msg[@]}-1))]}
+	elif [[ ${cmd} =~ ^(putkey|rmkey)$ ]]; then
+		cmd="putrmkey" _confirm=${msg[$((${#msg[@]}-6))]} _add=${msg[$((${#msg[@]}-5))]} _cache=${msg[$((${#msg[@]}-4))]}
+		_fw=${msg[$((${#msg[@]}-3))]} _upd=${msg[$((${#msg[@]}-2))]} _srv=$(IFS=','; echo ${msg[$((${#msg[@]}-1))]})
+	elif [[ ${cmd} =~ ^(add|del)$ ]]; then
+		_confirm=${msg[$((${#msg[@]}-2))]} _crypttab=${msg[$((${#msg[@]}-1))]}
+	fi
+
+	# Open the client socket. Check if socket exists first.
 	if [[ ! -S ${sock_ctrl} ]] && t_sleep 0.05 && [[ ! -S ${sock_ctrl} ]]; then
 		do_log warning "${sock_ctrl} is not a socket, pocket rocket or a locket"
 		do_term_control 1
 	fi
-
-	# Open the client socket.
 	do_log debug "connecting to ${sock_ctrl}"
 	if [[ "${cmd}" == "shell" && ! conf[DEBUGSHELL] -eq 1 ]]; then
 		do_log error "debug shell not enabled"
 		kill -SIGTERM ${pid_ctrl} 2>/dev/null
 		do_term_control 1
 	elif [[ "${cmd}" == "shell" ]]; then
-		# Open a connection to the listening socket. Check if it exists first.
 		export LC_ALL=en_US.UTF-8
 		TERM=xterm socat exec:"/bin/bash --login",pty,ctty,raw,stderr,sigint,setsid,sane UNIX-CONNECT:${sock_ctrl} & _socat_PID=$!
 		do_log error "debug shell started"
@@ -1113,17 +1118,8 @@ daemon_control()
 	coproc _socat ( socat - UNIX-CONNECT:${sock_ctrl} )
 	[[ ${conf[LOGLEVEL]} -ge 3 ]] && echo -e "\r${myname} Connected for ${cmd}.\r" >&${_socat[1]}
 
-	# Check the command line, it should contain crypt, device and passphrase and two options (confirm / crypttab) for add or del.
-	if [[ ${cmd} =~ ^(smart|erase)$ ]]; then
-		_smartall=${msg[$((${#msg[@]}-2))]} _smarttest=${msg[$((${#msg[@]}-1))]}
-	elif [[ ${cmd} =~ ^(putkey|rmkey)$ ]]; then
-		_confirm=${msg[$((${#msg[@]}-6))]} _add=${msg[$((${#msg[@]}-5))]} _cache=${msg[$((${#msg[@]}-4))]}
-		_fw=${msg[$((${#msg[@]}-3))]} _upd=${msg[$((${#msg[@]}-2))]} _srv=$(IFS=','; echo ${msg[$((${#msg[@]}-1))]})
-	elif [[ ${cmd} =~ ^(add|del)$ ]]; then
-		_confirm=${msg[$((${#msg[@]}-2))]} _crypttab=${msg[$((${#msg[@]}-1))]} 
-	fi
 	do_log debug "control ${cmd} connection initialized (PID: ${_socat_PID} SOCK:${sock_ctrl})"
-	do_control_$1
+	do_control_${cmd}
 }
 
 do_control_status()
