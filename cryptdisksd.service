@@ -10,10 +10,10 @@ Conflicts=shutdown.target reboot.target halt.target
 [Service]
 Type=notify
 NotifyAccess=main
-EnvironmentFile=-/etc/systemd/cryptdisksd.conf
+EnvironmentFile=-/etc/systemd/%N.conf
 ExecStartPre=-/bin/bash -c 'if [[ ! -L /root/.bashrc ]]; then /bin/ln -sf /etc/bashrc /root/.bashrc; fi'
-ExecStart=/usr/sbin/cryptdisksd
-ExecReload=/usr/sbin/cryptdisksd reload
-ExecStop=/usr/sbin/cryptdisksd stop
+ExecStart=/usr/sbin/%N
+ExecReload=/usr/sbin/%N reload
+ExecStop=/usr/sbin/%N stop
 TimeoutStopSec=15
 Restart=on-failure
