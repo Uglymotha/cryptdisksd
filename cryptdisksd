@@ -150,11 +150,11 @@ do_init_conf()
 			systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
 			[[ ${INITRD} -eq 0 ]] && start_status=2
 		fi
-		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
-		[[ -z "${crypttab}" ]] && do_log warning "crypttab is empty"
 		for dev in ${conf[STORAGEDEVS]}; do if ! t_grep 0 -e "^${conf[STORAGEPREFIX]}${i}[[:space:]]" ${conf[CRYPTTAB]}; then
 			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]}
 		fi done
+		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
+		[[ -z "${crypttab}" ]] && do_log warning "crypttab is empty"
 		if [[ ${INITRD} -eq 1 ]]; then
 			echo -e "STORAGEPOOL=${conf[STORAGEPOOL]}\nETCDEV=${conf[ETCDEV]}\nLIBDEV=${conf[LIBDEV]}\nTIMEOUT=${conf[TIMEOUT]}\nALGO=${conf[ALGO]}\nKEYSZ=${conf[KEYSZ]}\nHASH=${conf[HASH]}" >>/etc/systemd/${MYNAME}.conf
 		fi
