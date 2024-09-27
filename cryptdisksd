@@ -5,7 +5,7 @@ do_init_conf()
 {
 	# Initialize System Variables. Default config in /etc/cryptdisksd/cryptdisksd.conf. Systemd env CONF(DIR) will override.
 	unset conf keylife keyserverconf; declare -gA conf keylife keyserverconf
-	local var val _conf= _keylife IFS=$'\n'
+	local var val _conf= _keylife IFS=$'\n' i=1
 	[[ -s ${CONF} ]] && for var in $(grep -ve "^\s*#" <<<$(<${CONF})); do
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
@@ -136,15 +136,32 @@ do_init_conf()
 		done
 		[[ -n "${keyserverconf[KEYLIFE]}" ]] && conf[KEYLIFE]=${keyserverconf[KEYLIFE]}
 	fi
-	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
-	if [[ "$1" == "daemon" && $2 == "1"  && ! -s ${CONF} ]]; then
-		do_log warning "${CONF} not found, creating default"
-		for var in ${!conf[@]}; do echo "# ${var}=${conf[${var}]}" >>${CONF}; done
+
+	# Check if there is config and a crypttab. Convert timeout to secs after writing to default in minutes.
+	if [[ "$1" == "daemon" && $2 == "1" ]]; then
+		if [[ ! -s ${CONF} ]]; then
+			do_log warning "${CONF} not found, creating default"
+			systemd-notify --status="${MYNAME}: ${CONF}) not found, creating default"
+			for var in ${!conf[@]}; do echo "# ${var}=${conf[${var}]}" >>${CONF}; done
+		fi
+		if [[ ! -s ${conf[CRYPTTAB]} ]]; then
+			echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase(/algorithm/key-size/hash)\t\t#TRIM" >${conf[CRYPTTAB]}
+			do_log warning "crypttab not found, creating default"
+			systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
+			[[ ${INITRD} -eq 0 ]] && start_status=2
+		fi
+		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
+		[[ -z "${crypttab}" ]] && do_log warning "crypttab is empty"
+		for dev in ${conf[STORAGEDEVS]}; do if ! t_grep 0 -e "^${conf[STORAGEPREFIX]}${i}[[:space:]]" ${conf[CRYPTTAB]}; then
+			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]}
+		fi done
+		if [[ ${INITRD} -eq 1 ]]; then
+			echo -e "STORAGEPOOL=${conf[STORAGEPOOL]}\nETCDEV=${conf[ETCDEV]}\nLIBDEV=${conf[LIBDEV]}\nTIMEOUT=${conf[TIMEOUT]}\nALGO=${conf[ALGO]}\nKEYSZ=${conf[KEYSZ]}\nHASH=${conf[HASH]}" >>/etc/systemd/${MYNAME}.conf
+		fi
 	fi
+	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
-	[[ -s ${conf[CRYPTTAB]} ]] && crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
-	[[ "$1" == "daemon" && -z "${crypttab}" ]] && do_log warning "crypttab is empty"
 
 	return 0
 }
@@ -278,8 +295,8 @@ do_hup_daemon()
 
 do_systemd_daemon()
 {
-	local time_active=0 cleanup=0 msg fd_fifo key read_to=0 res _time_start crypt_arr crypt
-	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to _time_active mountsysimg
+	local time_active=0 cleanup=0 msg fd_fifo key read_to=0 _time_start crypt_arr crypt _time_active
+	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to mountsysimg defaultconfig res
 	declare -gA active_mnt waiting_mnt cached_pp job
 	trap 'do_term_daemon' SIGINT SIGTERM; trap 'do_hup_daemon' SIGHUP
 	starting=1
@@ -360,7 +377,8 @@ do_systemd_daemon()
 		case ${msg[0],,} in
 		reload)
 			do_init_conf daemon 1
-			do_daemon_start_logwriter;;
+			do_daemon_start_logwriter
+			do_daemon_cleanup;;
 		mount|unmount)
 			if [[ "${msg[0],,}" == "unmount" && ${msg[2]} -ne 1 ]]; then
 				do_log debug "removed ${msg[1]} from active mounts"
@@ -385,10 +403,10 @@ do_systemd_daemon()
 				echo reload >${conf[FIFO]}
 				echo "${RED}Reloading Config${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
 				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
-			elif [[ "${cmd}" =~ mount(sysimg|storage) && "${INITRD}" -eq 0 ]]; then
+			elif [[ "${cmd}" =~ (mountsysimg|defaultconfig) && "${INITRD}" -eq 0 ]]; then
 				echo "${RED}Not in Initramfs" |socat - UNIX-CONNECT:${sock_ctrl} && kill -SIGTERM ${pid_socat} 2>/dev/null
 			elif [[ "${cmd}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
-				do_log debug "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
+				do_log error "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 				echo "${RED}Already Mounting${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
 				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
 			elif [[ "${cmd}" == "mountsysimg" ]]; then
@@ -402,6 +420,10 @@ do_systemd_daemon()
 				else
 					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
 				fi
+			elif [[ "${cmd}" == "defaultconfig" ]]; then
+				[[ -n "${defaultconfig}" ]] && do_log error "already making default config" && continue
+				defaultconfig=1
+				daemon_default_config &
 			else
 				daemon_control ${cmd} & job[control|${cmd}|$!]="$(do_timer)"
 				do_log debug "started control worker for ${cmd} (PID: $!)"
@@ -415,7 +437,7 @@ do_systemd_daemon()
 				do_log info "ignoring ${msg[1]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
 			fi;;
 		add|change)
-			! crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) && continue
+			crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) || continue
 			pp="$(do_eval_pp "${crypt_arr[2]}")"; key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")"
 			dev="$(do_find_dev "${crypt_arr[1]}")"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
@@ -455,7 +477,7 @@ do_systemd_daemon()
 		?assphrase) # Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
-			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg &
+			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg & unset mountsysimg
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
@@ -803,61 +825,65 @@ daemon_mount_sysimg()
 	[[ "$(</proc/${pid}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid} 2>/dev/null
 }
 
-daemon_import_storage()
+daemon_default_config()
 {
-	local nr=1 i=1 status=0 storagedev storageopt dev
-	if [[ -n "${conf[STORAGEDEVS]}" ]]; then
-		for storagedev in ${conf[STORAGEDEVS]}; do
-			dev="$(findfs ${storagedev} 2>/dev/null)"
-			if [[ $? -ne 0 ]] ; then
-				do_initrd_log "incorrect storage device entry (${storagedev}) in config"
-			elif [[ ! -b ${conf[DMDIR]}/${2}${nr} ]]; then
-				if [[ ${conf[STORAGETRIM]} -eq 1 && ! "$(t_lsblk -rD ${dev}|head -n2|tail -n1|cut -d' ' -f3-4)" =~ 0B ]]; then
-					storageopt="--allow-discards"
-				fi
-				storageopt+=" --cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
-				t_cryptsetup open --type plain ${storageopt} ${dev} ${2}${nr} <<<"$3"
-				if [[ "$?" -eq 0 ]]; then
-					nr=$((nr+1))
+	local key passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)" passphrase="$((size/2+1))" res=0 dev
+	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" pp="size" pid_askpp fd_askpp
+
+	key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
+	if [[ ${res} -eq 0 ]]; then
+		[[ -n "${key}" ]] && dev=${conf[DMDIR]}/${conf[STORAGEPOOL]} || dev=/dev/loop1
+		mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev /sysroot/root || res=1
+		ln -s /etc/bashrc /sysroot/root/.bashrc
+		mkdir /sysroot/root/quarantine
+		if [[ ${res} -eq 0 && ! -f /boot/${conf[STORAGEPOOL]} ]]; then
+			[[ ${passphrase} -lt $((1024*1024)) ]] && do_log error "Need at least 2GB free space on boot device" && res=1
+			if [[ ${res} -eq 0 ]]; then
+				while [[ ${passphrase} -gt $((size/2)) || ${passphrase} -lt $((1024*1024)) ]]; do
+					if ! do_ask_passphrase "Storage Device Size in MB? (min: 1024, max: $((size/1024/2)))" "-t${conf[TIMEOUT]}"; then
+						passphrase=$((size/2))
+					else
+						passphrase=$((passphrase*1024))
+					fi
+				done
+				size=$((passphrase*1024))
+				touch /boot/${conf[STORAGEPOOL]} || res=1
+				truncate -s ${size} /boot/${conf[STORAGEPOOL]} || res=1
+				if [[ -n "${key}" ]]; then
+					t_cryptsetup create --type plain "${opt}" /boot/${conf[STORAGEPOOL]} ${conf[STORAGEPOOL]} <<<"${pass}" || res=1
 				else
-					do_initrd_log "cannot unlock persistent storage device ${storagedev}"
-					status=2
+					losetup ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 				fi
-			else
-				do_initrd_log "persistent storage device ${conf[DMDIR]}/${2}${nr} already present"
-				status=2
+				if [[ ${res} -eq 0 ]]; then
+					dir="$(mktemp -d)" || res=1
+					mkfs.ext4 ${dev} || res=1
+					mount ${dev} ${dir} || res=1
+					cp -a /sysroot/var/storage/* ${dir} || res=1
+					cp -a /sysroot/etc ${dir} || res=1
+					cp -a /sysroot/var/lib ${dir} || res=1
+					rm -rf /mnt/clamav || res=1
+					ssh-keygen -A -f ${dir} >/dev/null || res=1
+					/sysroot/bin/systemd-machine-id-setup || res=1
+					cp /etc/machine-id ${dir}/etc/ || res=1
+					umount ${dir} || res=1
+				fi
 			fi
-		done
-		if [[ "${nr}" -eq 1 ]]; then
-			do_initrd_log "no usable storage devices in conf, starting with default config"
-			do_cecho -ne "${YEL}No Usable Storage Devices in Bootconf, Starting with Default Config.${NOR}"
-			return 1
-		else
-			if ! zpool import $1 -f >/dev/null 2>&1; then
-				do_initrd_log "unable to import storage pool $1, starting with default config"
-				do_cecho -ne "${YEL}Unable to Import Storage Pool $1, Starting with Default Config.${NOR}"
-				return 1
-			fi
-			while [[ "${i}" -le ${conf[TIMEOUT]} ]]; do
-				[[ -b /dev/zvol/$1/etc || -b /dev/zvol/$1/lib ]] && mdadm --assemble --scan >/dev/null 2>&1
-				[[ -b ${etcmd} && -b ${libmd} ]] && break
-				sleep 1
-				i=$((i+1))
-			done
-			if [[ ! -b ${etcmd} || ! -b ${libmd} ]]; then
-				do_initrd_log "etc or lib zvol not found starting with default config"
-				do_cecho -ne "${YEL}No lib or etc Zvol Found. Starting with Default Config.${NOR}"
-				return 1
-			fi
-			etcsz=$(($(blockdev --getsize64 /dev/zvol/$1/etc) + 1))
-			libsz=$(($(blockdev --getsize64 /dev/zvol/$1/lib) + 1))
+			[[ ${res} -ne 0 ]] && do_log error "Unable to create persistent storage device"
+		elif [[ ${res} -eq 0 && -n "${key}" ]]; then
+			t_cryptsetup open --type plain "${opt}" /boot/${conf[STORAGEPOOL]} ${conf[STORAGEPOOL]} <<<"${pass}" || res=1
+		elif [[ ${res} -eq 0 ]]; then
+			losetup ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 		fi
-	else
-		do_initrd_log "no persistent storage devices in conf. starting with default config"
-		do_cecho -ne "${YEL}No Persistent Storage Devices in Bootconf. Starting with Default Config.${NOR}"
-		return 1
+		if [[ ${res} -eq 0 ]]; then
+			mount ${dev} /sysroot/var/storage || res=1
+			mount -t tmpfs tmpfs -o size=2G /sysroot/var/storage/lib/clamav || res=1
+			mount -o bind /sysroot/var/storage/etc /sysroot/etc || res=1
+			mount -o bind /sysroot/var/storage/lib /sysroot/var/lib || res=1
+		fi
+		[[ ${res} -ne 0 ]] && do_log error "unable to mount persistent storage device"
 	fi
-	return ${status}
+	echo "${res}" |socat - UNIX-CONNECT:${sock_ctrl}
+	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
 }
 
 daemon_mount_crypt()
@@ -1705,6 +1731,7 @@ t_openssl() { 	local fd r; exec {fd}<<<"${passphrase}"; \
 				r=$?; exec {fd}>&-; return ${r}; }
 t_networkctl() { NOTIFY_SOCKET= do_cmd_timeout -1 1 networkctl ${@}; return $?; }
 t_diff() { do_cmd_timeout -1 0 diff ${@}; return $?; }
+t_grep() { do_cmd_timeout -1 $1 grep ${@:2}; return $?; }
 t_printf() { do_cmd_timeout -1 1 printf ${@}; return $?; }
 
 do_xcrypt_fromtab()
@@ -1905,7 +1932,10 @@ do_ask_passphrase()
 		# Query for the passphrase in the background, record pid so we can kill if passphrase is received from server.
 		exec {fd_askpp}< <(NOTIFY_SOCKET= systemd-ask-password --timeout=0 --id=${pp} "$1" {__fd_up}>&-)
 		pid_askpp=$!
-		IFS= read -ru${fd_askpp} passphrase || exit 1
+		if ! IFS= read -ru${fd_askpp} "$2" passphrase; then
+			[[ $? -eq 142 && -n "$2" ]] && kill -SIGTERM ${pid_askpp}
+			exit 1
+		fi
 	else
 		passphrase="" CHAR=""
 		echo -ne "\r${BOLD}$1${NOR}" >&${__fd_user[1]}
@@ -2372,43 +2402,6 @@ do_bootsan()
 
 # [END OF KEY SERVER & CLIENT FUNCTIONS]
 
-# [START OF INITRD FUNCTIONS]
-
-do_make_default_config()
-{
-	local passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)"
-	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}"
-	[[ ${size} -lt $((1024*1024)) ]] && do_problem "Need at Least 1GB Free Space on /boot"
-	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${rootdir}/root
-	ln -s /etc/bashrc ${rootdir}/root/.bashrc
-	mkdir ${rootdir}/root/quarantine
-	[[ "${imgtype,,}" =~ ^openssl ]] && \
-		passphrase="$(do_read_passphrase "${conf[SYSTEMPP]}" "${network}" "${fd_con}" 0 "${_MYNAME}" || do_reset)"
-	if [[ ! -f /boot/storage ]]; then
-		touch /boot/storage
-		truncate -s $((size/2*1024)) /boot/storage
-		t_cryptsetup create --type plain "${opt}" storage /boot/storage <<<"${passphrase}" || do_problem "Unable to Create Storage Device."
-		mkfs.ext4 ${conf[DMDIR]}/storage
-		mount ${conf[DMDIR]}/storage /mnt
-		cp -a ${rootdir}/var/storage/* /mnt
-		cp -a ${rootdir}/etc /mnt
-		cp -a ${rootdir}/var/lib /mnt
-		rm -rf /mnt/clamav
-		ssh-keygen -A -f /mnt >/dev/null 2>&1
-		${rootdir}/bin/systemd-machine-id-setup >/dev/null 2>&1
-		cp /etc/machine-id /mnt/etc/
-		umount /mnt
-	else
-		t_cryptsetup open --type plain /boot/storage storage <<<"${passphrase}" || do_problem "Unable to Open Storage Device."
-	fi
-	mount ${conf[DMDIR]}/storage ${rootdir}/var/storage || do_problem "Unable to Mount Storage."
-	mount -t tmpfs tmpfs -o size=2G ${rootdir}/var/storage/lib/clamav
-	mount -o bind ${rootdir}/var/storage/etc ${rootdir}/etc
-	mount -o bind ${rootdir}/var/storage/lib ${rootdir}/var/lib
-}
-
-# [END OF INITRD FUNCTIONS]
-
 # [START OF INTERACTIVE CONTROL FUNCTIONS]
 
 do_echo_use()
@@ -2742,7 +2735,7 @@ do_parse_cmd()
 		do_init_conf daemon || return 1
 		kill -SIGHUP $(<${conf[PIDFILE]})
 		return 1;;
-	status|shell|add|del|putkey|rmkey|smart|erase|stop|mountsysimg)
+	status|shell|add|del|putkey|rmkey|smart|erase|stop|mountsysimg|defaultconfig)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cryptdisksd_cmd $@
 		return $?;;
@@ -2847,13 +2840,17 @@ do_cryptdisksd_cmd()
 	# Start socat in background and attach stdin, listen on a socket in RUNDIR. 
 	# The daemon will spawn a worker which will connect and start interactive session.
 	if [[ ! -p ${conf[FIFO]} ]]; then
-		echo "${MYNAME} not Running"
+		if [[ "${command,,}" == "mountsysimg" && "${command,,}" == "defaultconfig" ]]; then
+			echo 1
+		else
+			echo "${MYNAME} not Running"
+		fi
 		return ${s}
 	fi
 	exec {stdin}<&0
-	[[ "${command,,}" =~ ^(stop|mountsysimg)$ ]] && to="-t${conf[START_TIMEOUT]}" || to="-t${conf[QUEUE_TIMEOUT]}"
+	[[ "${command,,}" =~ ^(stop|mountsysimg|defaultconfig)$ ]] && to="${conf[START_TIMEOUT]}" || to="${conf[QUEUE_TIMEOUT]}"
 	sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
-	socat ${to} - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600 0<&${stdin}- 2>/dev/null &
+	socat - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600,accept-timeout=${to} 0<&${stdin}- 2>/dev/null &
 	pid_socat=$!
 
 	case ${command,,} in
@@ -2865,7 +2862,7 @@ do_cryptdisksd_cmd()
 	del)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
 		msg+="${confirm} ${crypttab}";;
-	status|shell|stop|mountsysimg)
+	status|shell|stop|mountsysimg|reload|defaultconfig)
 		[[ $(wc -w <<<"${msg}") -ne 1 ]] && do_echo_use "${command}";;
 	smart)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
@@ -2882,18 +2879,22 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" == "shell" ]] && stty_opt+=" raw -isig"
 	[[ ! ${command,,} =~ ^(smart|shell)$ ]] && stty_opt+=" raw isig"
 	stty ${stty_opt}
-	[[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" ]] && echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
+	if [[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]]; then
+		echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
+	fi
 	echo "control ${BASHPID},${pid_socat} ${msg}" >${conf[FIFO]}
-	[[ "${command,,}" != "mountsysimg" ]] && echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]] && echo -ne "\r"
 	wait ${pid_socat}
-	[[ "${command,,}" != "mountsysimg" ]] && echo -ne "\r"
+	[[ "${command,,}" == "mountsysimg" || "${command,,}" == "defaultconfig" ]] && [[ $? -ne 0 ]] && echo 1
+	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]] && echo -ne "\r"
 
 	# Restore stdin, remove socket and exit.
 	stty sane
 	[[ -e ${sock} ]] && rm -f ${sock}
 
-	[[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" ]] && echo -e "\rDone Requesting \"$@\" from ${MYNAME}"
-
+	if [[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]]; then
+		echo -e "\rDone Requesting \"$@\" from ${MYNAME}"
+	fi
 	return ${s}
 }
 
@@ -2990,14 +2991,6 @@ do_systemd_daemon_start()
 		do_log error "queue not found" 
 		systemd-notify --stopping --status="${MYNAME}: Queue not Found, Restart ${MYNAME}.socket" 
 		exit 0
-	fi
-
-	# Check if there is a crypttab, log message if there isn't since everything we do is based on it.
-	if [[ "${INITRD}" -eq 0 && ! -f ${conf[CRYPTTAB]} ]]; then
-		echo -e "#Crypt\t\t\t#Device\t\t\t\t#Passphrase(/algorithm/key-size/hash)\t\t#TRIM" >${conf[CRYPTTAB]}
-		do_log warning "crypttab not found, creating default"
-		systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
-		start_status=2
 	fi
 
 	do_systemd_daemon
