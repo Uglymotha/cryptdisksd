@@ -151,7 +151,7 @@ do_init_conf()
 			[[ ${INITRD} -eq 0 ]] && start_status=2
 		fi
 		for dev in ${conf[STORAGEDEVS]}; do if ! t_grep 0 -e "^${conf[STORAGEPREFIX]}${i}[[:space:]]" ${conf[CRYPTTAB]}; then
-			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]}
+			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]} && i=$((i+1))
 		fi done
 		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
 		[[ -z "${crypttab}" ]] && do_log warning "crypttab is empty"
@@ -828,7 +828,7 @@ daemon_mount_sysimg()
 daemon_default_config()
 {
 	local key passphrase="" size="$(df -k /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)" passphrase="$((size/2+1))" res=0 dev
-	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" pp="size" pid_askpp fd_askpp
+	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" pp="size" pid_askpp fd_askpp dev2 i
 
 	key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
 	if [[ ${res} -eq 0 ]]; then
@@ -850,36 +850,47 @@ daemon_default_config()
 				touch /boot/${conf[STORAGEPOOL]} || res=1
 				truncate -s ${size} /boot/${conf[STORAGEPOOL]} || res=1
 				if [[ -n "${key}" ]]; then
-					t_cryptsetup create --type plain "${opt}" /boot/${conf[STORAGEPOOL]} ${conf[STORAGEPOOL]} <<<"${pass}" || res=1
+					t_cryptsetup create --type plain "${opt}" ${conf[STORAGEPOOL]} /boot/${conf[STORAGEPOOL]} <<<"${pass}" || res=1
 				else
 					losetup ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 				fi
 				if [[ ${res} -eq 0 ]]; then
-					dir="$(mktemp -d)" || res=1
-					mkfs.ext4 ${dev} || res=1
-					mount ${dev} ${dir} || res=1
-					cp -a /sysroot/var/storage/* ${dir} || res=1
-					cp -a /sysroot/etc ${dir} || res=1
-					cp -a /sysroot/var/lib ${dir} || res=1
-					rm -rf /mnt/clamav || res=1
-					ssh-keygen -A -f ${dir} >/dev/null || res=1
-					/sysroot/bin/systemd-machine-id-setup || res=1
-					cp /etc/machine-id ${dir}/etc/ || res=1
-					umount ${dir} || res=1
+					echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1
+					t_kpartx -a ${dev}
+					if [[ ${res} -eq 0 ]]; then
+						for i in etc lib storage; do
+							[[ -n "${key}" ]] && dev2=${conf[DMDIR]}/loop1p${i} || dev2=${dev}-part${i}
+							dir="$(mktemp -d)" || res=1
+							mkfs.ext4 ${dev2} res=1
+							e2label ${dev2} ${i} || res=1
+							mount ${dev2} ${dir} || res=1
+							if [[ ${i} == etc ]]; then
+								cp -a /sysroot/etc/* ${dir} || res=1
+								[[ ! -d /etc/ssh ]] && mkdir /etc/ssh
+								ssh-keygen -A >/dev/null && cp -a /etc/ssh ${dir} || res=1
+								/sysroot/bin/systemd-machine-id-setup || res=1
+								cp /etc/machine-id ${dir} || res=1
+							elif [[ ${i} == lib ]]; then
+								cp -a /sysroot/var/lib/* ${dir} || res=1
+								rm -rf ${dir}/clamav/*
+							else
+								cp -a /sysroot/var/storage/* ${dir} || res=1
+							fi
+							umount ${dir}
+							rmdir ${dir}
+							[[ ${res} -ne -0 ]] && break
+						done
+					fi
 				fi
 			fi
 			[[ ${res} -ne 0 ]] && do_log error "Unable to create persistent storage device"
 		elif [[ ${res} -eq 0 && -n "${key}" ]]; then
-			t_cryptsetup open --type plain "${opt}" /boot/${conf[STORAGEPOOL]} ${conf[STORAGEPOOL]} <<<"${pass}" || res=1
+			t_cryptsetup open --type plain "${opt}" ${conf[STORAGEPOOL]} /boot/${conf[STORAGEPOOL]} <<<"${pass}" || res=1
 		elif [[ ${res} -eq 0 ]]; then
 			losetup ${dev} /boot/${conf[STORAGEPOOL]} || res=1
+			t_kpartx -a ${dev}
 		fi
-		if [[ ${res} -eq 0 ]]; then
-			mount ${dev} /sysroot/var/storage || res=1
-			mount -t tmpfs tmpfs -o size=2G /sysroot/var/storage/lib/clamav || res=1
-			mount -o bind /sysroot/var/storage/etc /sysroot/etc || res=1
-			mount -o bind /sysroot/var/storage/lib /sysroot/var/lib || res=1
-		fi
+		[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/storage /sysroot/var/storage || res=1
 		[[ ${res} -ne 0 ]] && do_log error "unable to mount persistent storage device"
 	fi
 	echo "${res}" |socat - UNIX-CONNECT:${sock_ctrl}
