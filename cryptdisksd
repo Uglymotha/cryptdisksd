@@ -164,6 +164,7 @@ do_init_conf()
 	conf[START_TIMEOUT]=$((conf[START_TIMEOUT]*60))
 	conf[PP_TIMEOUT]=$((conf[PP_TIMEOUT]*60))
 
+	systemdconf="$(cat ${CONF} |grep -ve "^\s*#")"
 	return 0
 }
 
@@ -2883,23 +2884,24 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" == "smart" ]] && stty_opt+=" isig"
 	[[ "${command,,}" == "shell" ]] && stty_opt+=" raw -isig"
 	[[ ! ${command,,} =~ ^(smart|shell)$ ]] && stty_opt+=" raw isig"
-	stty ${stty_opt}
-	if [[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]]; then
+	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && stty ${stty_opt}
+	if [[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]]; then
 		echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
 	fi
 	echo "control ${BASHPID},${pid_socat} ${msg}" >${conf[FIFO]}
-	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]] && echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && echo -ne "\r"
 	wait ${pid_socat}
 	[[ "${command,,}" == "mountsysimg" || "${command,,}" == "defaultconfig" ]] && [[ $? -ne 0 ]] && echo 1
-	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]] && echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && echo -ne "\r"
 
 	# Restore stdin, remove socket and exit.
 	stty sane
 	[[ -e ${sock} ]] && rm -f ${sock}
 
-	if [[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" ]]; then
+	if [[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]]; then
 		echo -e "\rDone Requesting \"$@\" from ${MYNAME}"
 	fi
+	[[ "${command,,}" != "stop" ]] && exit 0
 	return ${s}
 }
 
