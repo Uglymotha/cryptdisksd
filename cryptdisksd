@@ -828,7 +828,7 @@ daemon_mount_sysimg()
 
 daemon_default_config()
 {
-	local key passphrase="" size="$(df -m /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)" passphrase="$((size/2+1))" res=0 p=0
+	local key size="$(df -m /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)"; local passphrase=$((size/2+1)) res=0 p=0
 	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" pp="size" pid_askpp fd_askpp dev dev2 i
 
 	key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
@@ -850,11 +850,14 @@ daemon_default_config()
 			losetup -P ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 		fi
 		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1
+		udevadm settle
 		for i in etc lib ${conf[STORAGEPOOL]}; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
-			[[ -n "${key}" ]] && dev2=${dev}p${p} || dev2=${dev}-part${p}
+			[[ -n "${key}" ]] && dev2=${dev}-part${p} || dev2=${dev}p${p}
 			dir="$(mktemp -d)" || res=1
-			mkfs.ext4 ${dev2} res=1
+			mkfs.ext4 ${dev2} || res=1
 			e2label ${dev2} ${i} || res=1
+			[[ -e /dev/disk/by-label/${i} ]] && rm -f /dev/disk/by-label/${i}
+			ln -s ../../${dev2} /dev/disk/by-label/${i}
 			mount ${dev2} ${dir} || res=1
 			[[ ${res} -ne -0 ]] && break
 			if [[ ${i} == etc ]]; then
@@ -873,10 +876,11 @@ daemon_default_config()
 		fi done
 		[[ ${res} -ne 0 ]] && do_log error "Unable to create persistent storage device"
 	elif [[ ${res} -eq 0 && -n "${key}" ]]; then
-		t_cryptsetup open --type plain "${opt}" ${conf[STORAGEPOOL]} /boot/${conf[STORAGEPOOL]} <<<"${pass}" || res=1
+		t_cryptsetup open --type plain "${opt}" /boot/${conf[STORAGEPOOL]} ${conf[STORAGEPOOL]} <<<"${pass}" || res=1
 	elif [[ ${res} -eq 0 ]]; then
 		losetup -P ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 	fi
+	udevadm settle
 	[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/${conf[STORAGEPOOL]} /sysroot/var/storage || res=1
 	[[ ${res} -ne 0 ]] && do_log error "unable to mount persistent storage device"
 
@@ -1931,11 +1935,11 @@ do_ask_passphrase()
 	local CHAR DEL="$(printf "\x7F")" ca=() c=0 x
 	if [[ -z "${__fd_user[@]}" ]]; then
 		# Query for the passphrase in the background, record pid so we can kill if passphrase is received from server.
-		exec {fd_askpp}< <(NOTIFY_SOCKET= systemd-ask-password --timeout=0 --id=${pp} "$1" {__fd_up}>&-)
+		exec {fd_askpp}< <([[ -z "$2" ]] && exec {__fd_up}>&-; NOTIFY_SOCKET= systemd-ask-password --timeout=0 "--id=${pp}" "$1")
 		pid_askpp=$!
 		if ! IFS= read $2 -ru${fd_askpp} passphrase; then
 			[[ $? -eq 142 && -n "$2" ]] && kill -SIGTERM ${pid_askpp}
-			exit 1
+			return 1
 		fi
 	else
 		passphrase="" CHAR=""
