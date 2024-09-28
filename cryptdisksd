@@ -479,7 +479,13 @@ do_systemd_daemon()
 		?assphrase) # Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
-			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg & unset mountsysimg
+			if [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" && ${msg[2]} -ne 0 ]]; then
+				echo 1 | socat - UNIX-CONNECT:$(cut -d' ' -f2 <<< "${mountsysimg}")
+				[[ "$(</proc/${mountsysimg%% *}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${mountsysimg%% *} 2>/dev/null
+			elif [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]]; then
+				daemon_mount_sysimg &
+				unset mountsysimg
+			fi
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
