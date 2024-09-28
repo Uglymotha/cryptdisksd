@@ -206,8 +206,8 @@ logwriter()
 	if [[ ${conf[LOGLEVEL]} -ge 1 ]]; then
 		echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${myname} finished after $(do_timer ${_time_start})s" >>${conf[LOGFILE]}
 	fi
-	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} /sysroot/var/storage/log
-	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} /sysroot/var/storage/log
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} /sysroot/var/storage/log/
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} /sysroot/var/storage/log/
 }
 
 do_log()

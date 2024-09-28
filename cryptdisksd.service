@@ -5,7 +5,7 @@ Wants=systemd-networkd.service sysinit.target
 After=sysinit.target basic.target systemd-networkd.service %N.socket
 Requires=sysinit.target %N.socket
 Before=shutdown.target reboot.target halt.target
-Conflicts=shutdown.target reboot.target halt.target
+Conflicts=shutdown.target reboot.target halt.target initrd-switch-root.target
 
 [Service]
 Type=notify
