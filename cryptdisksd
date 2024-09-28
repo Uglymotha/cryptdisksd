@@ -1053,6 +1053,7 @@ get_passphrase()
 
 	# We should get a pssphrase or an empty response from the workers or timeout.
 	[[ ${starting} -ne 0 ]] && _to=$((conf[START_TIMEOUT]+conf[PP_TIMEOUT])) || _to=${conf[PP_TIMEOUT]}
+	[[ ${INITRD} -eq 1 ]] && _to=${conf[TIMEOUT]}
 	if ! IFS= read -t${_to} -u${_fd_getpp} _passphrase; then
 		do_log debug "$([[ $? -eq 142 ]] && echo timeout || echo failed) after $(do_timer ${_time_start})s"
 		echo "passphrase ${crypt_arr[2]} 0 0 0" >${conf[FIFO]}
