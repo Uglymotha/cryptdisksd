@@ -157,7 +157,7 @@ do_init_conf()
 		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
 		[[ -z "${crypttab}" ]] && do_log warning "crypttab is empty"
 		if [[ ${INITRD} -eq 1 ]]; then
-			echo -e "STORAGEPOOL=${conf[STORAGEPOOL]}\nETCDEV=${conf[ETCDEV]}\nLIBDEV=${conf[LIBDEV]}\nTIMEOUT=${conf[TIMEOUT]}\nALGO=${conf[ALGO]}\nKEYSZ=${conf[KEYSZ]}\nHASH=${conf[HASH]}" >>/etc/systemd/${MYNAME}.conf
+			echo -e "STORAGEPOOL=${conf[STORAGEPOOL]}\nETCDEV=${conf[ETCDEV]}\nLIBDEV=${conf[LIBDEV]}\nTIMEOUT=${conf[TIMEOUT]}\nALGO=${conf[ALGO]}\nKEYSZ=${conf[KEYSZ]}\nHASH=${conf[HASH]}\nSTORAGEDEVS=${conf[STORAGEDEVS]}" >>/etc/systemd/${MYNAME}.conf
 		fi
 	fi
 	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
