@@ -479,13 +479,7 @@ do_systemd_daemon()
 		?assphrase) # Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
-			if [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" && ${msg[2]} -ne 0 ]]; then
-				echo 1 | socat - UNIX-CONNECT:$(cut -d' ' -f2 <<< "${mountsysimg}")
-				[[ "$(</proc/${mountsysimg%% *}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${mountsysimg%% *} 2>/dev/null
-			elif [[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]]; then
-				daemon_mount_sysimg &
-				unset mountsysimg
-			fi
+			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg & unset mountsysimg
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
@@ -843,7 +837,7 @@ daemon_default_config()
 	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev /sysroot/root || res=1
 	ln -s /etc/bashrc /sysroot/root/.bashrc
 	mkdir /sysroot/root/quarantine
-	[[ ${passphrase} -lt 1024 ]] && do_log error "Need at least 2GB free space on boot device" && res=1
+	[[ ${passphrase} -lt 1024 ]] && do_log error "Need at least 2GB free space on boot device" && umount /boot
 	if [[ ${res} -eq 0 && ! -f /boot/${conf[STORAGEPOOL]} ]]; then
 		while [[ ${passphrase} -gt $((size/2)) || ${passphrase} -lt 1024 ]]; do
 			do_ask_passphrase "Storage Device Size in MB? (min: 1024, max: $((size/2)))" "-t${conf[TIMEOUT]}" || passphrase=$((size/2))
