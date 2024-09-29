@@ -179,7 +179,7 @@ do_init_conf()
 logwriter()
 {
 	local myname="logger:${BASHPID}:" _time_start=$(do_timer) ll line
-	trap 'logger -p daemon.warning "${MYNAME}: ${myname} terminating"; exit 1' SIGINT SIGTERM
+	trap 'logger -p daemon.warning "${MYNAME}: ${myname} terminating"; echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${myname} terminated after $(do_timer ${_time_start})s" >>${conf[LOGFILE]}; exit 1' SIGINT SIGTERM
 	exec 1>/dev/null 2>&1
 
 	# Initialize the log file. Set the correct access rights.
