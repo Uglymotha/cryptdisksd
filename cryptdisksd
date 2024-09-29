@@ -255,7 +255,7 @@ do_term_daemon()
 			do_log debug "killed ${res} worker for ${cmd} (PID: ${pid})"
 		fi
 	done
-	if [[ ${coonf[UPDONSTOP]} -eq 1 ]]; then
+	if [[ ${coonf[UPDONSTOP]} -eq 1 && -n "${conf[BOOTSERVERKEYS]}" ]]; then
 		key_clnt "UPDATE" & wait $!
 	fi
 	[[ ${conf[ADDONSTOP]} -gt 0 ]] && {
@@ -269,8 +269,7 @@ do_term_daemon()
 			elif [[ ${conf[ADDONSTOP]} -eq 3 ]]; then
 				timeout=-1
 			fi
-			if passphrase="$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}" @s)")"; then
-				key_clnt "ADD" "${pp}" "${timeout}" "${passphrase}" &
+			if [[ -n "${conf[BOOTSERVERS]}" ]] && passphrase="$(t_keyctl 1 pipe "$(t_keyctl 1 request user "${pp}" @s)")"; then					key_clnt "ADD" "${pp}" "${timeout}" "${passphrase}" &
 				do_log info "adding ${pp} to boot servers with ${timeout}s timeout"
 			fi
 		done
@@ -517,7 +516,7 @@ do_move_passphrase()
 	do_log debug "found cached ${pp} passphrase in user keyring"
 	t_keyctl 0 revoke "${key}"
 	t_keyctl 0 unlink "${key}" @u
-	key_clnt "PUT" "${pp}" "${passphrase}" & job[putkey|${pp}|$!]="$(do_timer)"
+	[[ -n "${conf[BOOTSERVERS]}" ]] && key_clnt "PUT" "${pp}" "${passphrase}" & job[putkey|${pp}|$!]="$(do_timer)"
 	[[ $(do_cache_pp "${pp}" "@s" "-1" "${passphrase}")$? -ne 1 ]] && cached_pp[${pp}]="$(do_timer),${to}" || unset cached_pp[${pp}]
 	return 0
 }
