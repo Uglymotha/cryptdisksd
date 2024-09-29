@@ -298,7 +298,7 @@ do_hup_daemon()
 do_systemd_daemon()
 {
 	local time_active=0 cleanup=0 msg fd_fifo key read_to=0 _time_start crypt_arr crypt _time_active
-	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to mountsysimg defaultconfig res
+	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to mntsysimg="" defconf=0 res
 	declare -gA active_mnt waiting_mnt cached_pp job
 	trap 'do_term_daemon' SIGINT SIGTERM; trap 'do_hup_daemon' SIGHUP
 	starting=1
@@ -405,27 +405,18 @@ do_systemd_daemon()
 				echo reload >${conf[FIFO]}
 				echo "${RED}Reloading Config${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
 				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
-			elif [[ "${cmd}" =~ (mountsysimg|defaultconfig) && "${INITRD}" -eq 0 ]]; then
-				echo "${RED}Not in Initramfs" |socat - UNIX-CONNECT:${sock_ctrl} && kill -SIGTERM ${pid_socat} 2>/dev/null
-			elif [[ "${cmd}" == "mountsysimg" && -n "${mountsysimg}" ]]; then
-				do_log error "already mounting ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
-				echo "${RED}Already Mounting${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
-				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
-			elif [[ "${cmd}" == "mountsysimg" ]]; then
-				mountsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
-				if [[ "${mountsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
+			elif [[ "${cmd}" =~ (mountsysimg|defaultconfig) ]]; then
+				[[ "${cmd}" == "defaultconfig" ]] && daemon_default_config &
+				[[ "${cmd}" == "defaultconfig" ]] && defconf=1 && continue
+				[[ -n "${mntsysimg}" ]] && mntsysimg="0 0 1"
+				[[ -z "${mntsysimg}" ]] && mntsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
+				if [[ "${mntsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
 					daemon_mount_sysimg &
 				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
 					do_log debug "no active worker for ${conf[SYSTEMPP]}, starting"
 					crypt_arr[2]="${conf[SYSTEMPP]}"
 					get_passphrase "" & job[passphrase|${conf[SYSTEMPP]}|$!]="$(do_timer)"
-				else
-					do_log debug "already waiting for ${conf[SYSTEMPP]} passphrase"
 				fi
-			elif [[ "${cmd}" == "defaultconfig" ]]; then
-				[[ -n "${defaultconfig}" ]] && do_log error "already making default config" && continue
-				defaultconfig=1
-				daemon_default_config &
 			else
 				daemon_control ${cmd} & job[control|${cmd}|$!]="$(do_timer)"
 				do_log debug "started control worker for ${cmd} (PID: $!)"
@@ -479,7 +470,7 @@ do_systemd_daemon()
 		?assphrase) # Obscure bug, sometimes the p is lost in message somehow
 			pp="$(do_eval_pp ${msg[1]})"
 			[[ ${msg[2]} -eq 0 ]] && do_log warning "passphrase ${msg[1]} failed" || do_log debug "passphrase ${pp} success"
-			[[ -n "${mountsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg & unset mountsysimg
+			[[ -n "${mntsysimg}" && "${pp}" == "${conf[SYSTEMPP]}" ]] && daemon_mount_sysimg &
 			[[ ${msg[3]} -eq -1 && -n "${keylife[${pp}]}" ]] && msg[3]=${keylife[${pp}]}
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
@@ -767,7 +758,8 @@ do_daemon_cleanup()
 			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		else
 			dev=/dev/"$(t_dmsetup 1 deps ${crypt} -o blkdevname |cut -d':' -f2 |tr -d " ()" |cut -d':' -f2 2>/dev/null)" pp="-"
-			active_mnt[${crypt}]="${dev} - ${trim} $(do_timer)"
+			[[ "${crypt}" == "${conf[STORAGEPOOL]}" && -z "${conf[STORAGEDEVS]}" ]] && pp="${conf[SYSTEMPP]}"
+			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		fi
 		do_log debug "found ${dev} as ${crypt} TRIM ${trim} passphrase ${pp} adding to active list"
 		unset waiting_mnt[${crypt}] 
@@ -811,11 +803,14 @@ do_daemon_cleanup()
 
 daemon_mount_sysimg()
 {
-	local res=0 sock="$(cut -d' ' -f2 <<< "${mountsysimg}")" enc="${mountsysimg##* }" pid="${mountsysimg%% *}"
-	do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
-	key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"
-	[[ -d /squashfs ]] || mkdir /squashfs || res=1
-	mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
+	local res=$([[ ${INITRD} -eq 1 && ${mntsysimg} != "0 0 1" ]])$? sock="$(cut -d' ' -f2 <<< "${mntsysimg}")"
+	local enc="${mntsysimg##* }" pid="${mntsysimg%% *}"
+	if [[ ${res} -eq 0 ]]; then
+		do_log warning "mounting system image ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
+		key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && passphrase="$(t_keyctl 1 pipe "${key}")"
+		[[ -d /squashfs ]] || mkdir /squashfs || res=1
+		mount -t tmpfs tmpfs -o size="$(($(stat -c%s ${conf[SYSIMG]})+1))" /squashfs || res=1
+	fi
 	if [[ "${res}" -eq 0 && "${enc}" -eq 0 ]]; then
 		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]} -out /squashfs/${conf[SYSIMG]##*/} >/dev/null 2>&1 || res=1
 	elif [[ "${res}" -eq 0 ]]; then
@@ -827,18 +822,31 @@ daemon_mount_sysimg()
 	[[ "$(</proc/${pid}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid} 2>/dev/null
 }
 
+# Creates default persistent storage in case no storage pool isavailable.
+# The backing is placed in /boot, or memory when /boot soed not have enough free space.
 daemon_default_config()
 {
-	local key size="$(df -m /boot/ |tail -n1 |tr -s ' ' |cut -d' ' -f4)"; local passphrase=$((size/2+1)) res=0 p=0
-	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" pp="size" pid_askpp fd_askpp dev dev2 i
+	local key size="$(df -m /boot |tail -n1 |tr -s ' ' |cut -d' ' -f4)" pp="size" pid_askpp fd_askpp dev dev2
+	local passphrase=$((size/2+1)) res=$([[ ${INITRD} -eq 1 && defconf != 1 && -z "${conf[STORAGEDEVS]}" ]])$?
+	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" i p=0
 
-	key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
-	[[ -n "${key}" ]] && dev=${conf[DMDIR]}/${conf[STORAGEPOOL]} || dev=$(losetup -f)
-	mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev /sysroot/root || res=1
-	ln -s /etc/bashrc /sysroot/root/.bashrc
-	mkdir /sysroot/root/quarantine
-	[[ ${passphrase} -lt 1024 ]] && do_log error "Need at least 2GB free space on boot device" && umount /boot
+	# Check for available free space on boot.
+	if [[ ${res} -eq 0 && ${passphrase} -lt 1024 ]]; then
+		do_log warning "Need at least 2GB free space on /boot, trying memory"
+		umount /boot || res=1
+		size="$(df -m /boot |tail -n1 |tr -s ' ' |cut -d' ' -f4)" && passphrase=$((size/2+1))
+		[[ ${passphrase} -lt 1024 ]] && do_log error "Out of memory" && res=1
+	fi
+	# Get the system passphrase, if any, to use for persistent storage device. Mount wirteable root homedir.
+	if [[ ${res} -eq 0 ]]; then
+		key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
+		[[ -n "${key}" ]] && dev=${conf[DMDIR]}/${conf[STORAGEPOOL]} || dev=$(losetup -f)
+		mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev /sysroot/root || res=1
+		ln -s /etc/bashrc /sysroot/root/.bashrc
+		mkdir /sysroot/root/quarantine
+	fi
 	if [[ ${res} -eq 0 && ! -f /boot/${conf[STORAGEPOOL]} ]]; then
+		# In case we create the backing device, ask user for size (default is half of available size / memory).
 		while [[ ${passphrase} -gt $((size/2)) || ${passphrase} -lt 1024 ]]; do
 			do_ask_passphrase "Storage Device Size in MB? (min: 1024, max: $((size/2)))" "-t${conf[TIMEOUT]}" || passphrase=$((size/2))
 		done
@@ -850,6 +858,7 @@ daemon_default_config()
 		else
 			losetup -P ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 		fi
+		# Create 3 partions on device and fill with system config.
 		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1
 		udevadm settle
 		for i in etc lib ${conf[STORAGEPOOL]}; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
