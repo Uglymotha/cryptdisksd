@@ -212,7 +212,9 @@ logwriter()
 do_log()
 {
 	# Send a message to the log writer, or to systemd if that fails.
-	echo "$1 ${myname} ${@:2}" >&${fd_logwriter} || echo "$1 ${myname} ${@:2}" >&${fd_journal}
+	if ! echo "$1 ${myname} ${@:2}" >&${fd_logwriter} && [[ "$1" =~ (warning|error) || ${conf[LOGLEVEL]} > 0 ]]; then
+		echo "${myname} ${@:2}" >&${fd_journal}
+	fi
 	return 0
 }
 
