@@ -894,7 +894,8 @@ daemon_default_config()
 	fi
 	udevadm settle
 	[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/${conf[STORAGEPOOL]} /sysroot/var/storage || res=1
-	[[ ${res} -ne 0 ]] && do_log error "unable to mount persistent storage device"
+	[[ ${res} -eq 0 ]] && do_log warning "Mounted persistent storage device"
+	[[ ${res} -ne 0 ]] && do_log error "Unable to mount persistent storage device"
 
 	echo "${res}" |socat - UNIX-CONNECT:${sock_ctrl}
 	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
