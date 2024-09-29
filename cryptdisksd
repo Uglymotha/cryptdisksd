@@ -2984,6 +2984,7 @@ do_systemd_daemon_start()
 	# Check and create config dir. Start new key session and init conf. On boot keys will be cached in user key ring.
 	[[ ! -d "${CONFDIR}" ]] && mkdir -p ${CONFDIR}
 	keyctl new_session
+	keyctl link @us @s
 	if ! do_daemon_check_conf; then
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
 		exit 0
