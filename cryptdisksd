@@ -900,6 +900,7 @@ daemon_default_config()
 	fi
 	udevadm settle
 	[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/${conf[STORAGEPOOL]} /sysroot/var/storage || res=1
+	[[ ${res} -eq 0 ]] && mount /sysroot/var/storage/home/ /sysroot/home || res=1
 	[[ ${res} -eq 0 ]] && do_log warning "Mounted persistent storage device"
 	[[ ${res} -ne 0 ]] && do_log error "Unable to mount persistent storage device"
 
