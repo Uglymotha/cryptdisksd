@@ -176,10 +176,17 @@ do_init_conf()
 # LOGLEVEL 3, extra debug logging, stdout and stderr of processes also sent to log.
 # LOGLEVEL 4, sames as level 3 with components having dedicated log file.
 # The log write will parse lines from stdin, sent by various workers. The lines are written to log and sent to syslog.
+do_term_logwriter()
+{
+	logger -p daemon.warning "${MYNAME}: ${myname} terminating"
+	echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${myname} terminated after $(do_timer ${_time_start})s" >>${conf[LOGFILE]}
+	exit 1
+}
+
 logwriter()
 {
 	local myname="logger:${BASHPID}:" _time_start=$(do_timer) ll line
-	trap 'logger -p daemon.warning "${MYNAME}: ${myname} terminating"; echo "$(date '+%d-%m %H:%M:%S.%3N') ${hostname} ${myname} terminated after $(do_timer ${_time_start})s" >>${conf[LOGFILE]}; exit 1' SIGINT SIGTERM
+	trap 'do_term_logwriter' SIGINT SIGTERM
 	exec 1>/dev/null 2>&1
 
 	# Initialize the log file. Set the correct access rights.
