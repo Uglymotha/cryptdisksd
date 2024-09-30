@@ -1290,7 +1290,8 @@ do_control_putrmkey()
 {
 	# Remove the key file for the passphrase.
 	local _pp="$(do_eval_pp "${msg[3]}")" _res=0 _key="$(t_keyctl 1 request user "${_pp}" @s)" _passphrase _t _s
-	local _keyfile="${FWDIR}/${DISTNAME}_${_pp}.key-${FWGUID}"
+	local _keyfile="${FWDIR}/${DISTNAME}_${_pp}.key-${FWGUID}" cmd="${msg[2],,}"
+
 	if [[ ${_fw} -eq 0 && ${_cache} -eq -2 && "${_srv}" == "0" && ${_add} -eq -3 && ${_confirm} -eq 0 && ${_upd} -eq 0 ]]; then
 		[[ -n "${keylife[${_pp}]}" ]] && _cache="${keylife[${_pp}]}" || _cache=${conf[KEYLIFE]}
 		_fw=1 _srv=${conf[BOOTSERVERS]} _add=-1 _confirm=1
@@ -1312,6 +1313,11 @@ do_control_putrmkey()
 	[[ ${_fw} -eq 1 ]]     && _t+=" firmware"
 	[[ "${_srv}" != "0" ]] && _t+=" ${_srv}"
 	do_log debug "${_s,,}${_pp}${_t,,}"
+
+	if [[ -n "${conf[BOOTSERVERS]}" ]]; then
+		echo -e "\r${BOLD}${RED}No Boot Servers to ${_s} ${_pp} Passphrase ${_t0:-1}.${NOR}\r" >&${_socat[1]}
+		do_term_control 1
+	fi
 	echo -e "\r${BOLD}${_s}${_pp}${_t}.${NOR}\r" >&${_socat[1]}
 
 	# Add or remove key to/from firmware
@@ -1346,7 +1352,7 @@ do_control_putrmkey()
 		if [[ ${_res} == "y" ]]; then
 			if [[ "${cmd}" == "rmkey" ]] && t_keyctl 0 revoke "${_key}" && t_keyctl 0 unlink "${_key}" @s; then
 				echo "passphrase ${_pp} 2 0" >${conf[FIFO]}
-				echo -e "\r${BOLD}${GRN}Removed ${_pp} from Cache.${NOR}\r" >&${_socat[1]}
+				echo -e "\r${BOLD}${GRN}Removed ${_pp} Passphrase from Cache.${NOR}\r" >&${_socat[1]}
 				do_log info "removed ${_pp} from cache"
 			elif [[ "${cmd}" == "putkey" && $(do_cache_pp "${_pp}" "@s" "${_cache}" "${_passphrase}")$? -ne 1 ]]; then
 				echo "passphrase ${_pp} 1 ${_cache}" >${conf[FIFO]}
@@ -1415,7 +1421,7 @@ do_control_putrmkey()
 do_control_del()
 {
 	local _del_crypt="${_crypt_arr[0]}" _del_dev="${_crypt_arr[1]}" _del_pp="${_crypt_arr[2]}" _del_trim="${_crypt_arr[3]}"
-	local _del_time="$(do_timer)" _res="" _r=0
+	local _del_time="$(do_timer)" _res="" _r=0 "${msg[2],,}"
 
 	# Check if specified crypt is on tab, user decides to exit or continue if it's not.
 	if [[ -z "${_crypt_arr[@]}" ]]; then
@@ -1588,7 +1594,7 @@ do_control_add()
 	fi
 	_add_pp="${_add_pp%%/*}"
 	[[ ${_confirm} -eq 1 || ${_r} -ne 0 ]] && do_control_confirm "Put ${_add_pp} Passphrase to Bootservers? (Y/n)" y || _res="y"
-	if [[ "${_res}" == "y" ]]; then
+	if [[ "${_res}" == "y" && -n "${conf[BOOTSERVERS]}" ]]; then
 		echo -e "\r${BOLD}${GRN}Putting ${_add_pp} Key to Boot Servers: ${GREY}${conf[BOOTSERVERS]}.${NOR}\r" >&${_socat[1]}
 		exec {__fd_user}>&${_socat[1]}
 		key_clnt "PUT" "${_add_pp}" "${_passphrase}" & _pid_putkey=$!
@@ -1631,7 +1637,7 @@ do_control_get_passphrase()
 		else
 			_res="y"
 		fi
-		if [[ "${_res}" == "y" ]]; then
+		if [[ "${_res}" == "y" && -n "${conf[BOOTSERVERS]}" ]]; then
 			do_log debug "getting ${_pp} passphrase from boot servers: ${conf[BOOTSERVERS]}"
 			echo -e "\r${BOLD}Getting ${_pp} Passphrase from Boot Servers: ${GREY}${conf[BOOTSERVERS]}${NOR}\r" >&${_socat[1]}
 			exec {_fd_getpp}< <(key_clnt "GET" "${_pp}" {__fd_up}>&1- {__fd_user}>&${_socat[1]}-)
