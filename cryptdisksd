@@ -1241,7 +1241,7 @@ do_control_status()
 do_control_smarterase()
 {
 	# Secure Erase Device.
-	local _crypt="${_crypt_arr[0]}" _dev="$(do_find_dev "${_crypt_arr[1]}")" _res=""
+	local _crypt="${_crypt_arr[0]}" _dev="$(do_find_dev "${_crypt_arr[1]}")" _res="" cmd="${msg[2],,}"
 
 	if [[ -z "${_crypt_arr[@]}" ]]; then
 		echo -e "\r${RED}${BOLD}${msg[5]} not Found on Crypttab.${NOR}\r" >&${_socat[1]}
@@ -1419,7 +1419,7 @@ do_control_putrmkey()
 do_control_del()
 {
 	local _del_crypt="${_crypt_arr[0]}" _del_dev="${_crypt_arr[1]}" _del_pp="${_crypt_arr[2]}" _del_trim="${_crypt_arr[3]}"
-	local _del_time="$(do_timer)" _res="" _r=0 "${msg[2],,}"
+	local _del_time="$(do_timer)" _res="" _r=0
 
 	# Check if specified crypt is on tab, user decides to exit or continue if it's not.
 	if [[ -z "${_crypt_arr[@]}" ]]; then
