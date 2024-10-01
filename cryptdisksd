@@ -441,7 +441,7 @@ do_systemd_daemon()
 			crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) || continue
 			pp="$(do_eval_pp "${crypt_arr[2]}")"; key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")"
 			dev="$(do_find_dev "${crypt_arr[1]}")"
-			[[  -n "${key}" ]] && do_move_passphrase "${pp}" "${key}"
+			[[ -n "${key}" && ${INNITRD} -ne 1 ]] && do_move_passphrase "${pp}" "${key}"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
 			do_log debug "adding ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase"
 			if [[ -n "${active_mnt[${crypt_arr[0]}]}" ]]; then
