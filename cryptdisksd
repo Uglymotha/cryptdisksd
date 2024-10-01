@@ -290,8 +290,8 @@ do_term_daemon()
 	wait ${pid_logwriter}
 	[[ -n "$2" ]] && kill -SIGTERM $2 2>/dev/null
 
-	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} /sysroot/var/storage/log/
-	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} /sysroot/var/storage/log/
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} /var/storage/log/
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} /var/storage/log/
 	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
 	exit $1
 }
@@ -441,6 +441,7 @@ do_systemd_daemon()
 			crypt_arr=($(do_xcrypt_fromtab ${msg[@]:1})) || continue
 			pp="$(do_eval_pp "${crypt_arr[2]}")"; key="$(t_keyctl 1 search @u user "${MYNAME}:${pp}")"
 			dev="$(do_find_dev "${crypt_arr[1]}")"
+			[[  -n "${key}" ]] && do_move_passphrase "${pp}" "${key}"
 			# Set the variables for the crypt to be added, search for the backing device in conf[BLOCKDEVSDIRS].	
 			do_log debug "adding ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase"
 			if [[ -n "${active_mnt[${crypt_arr[0]}]}" ]]; then
@@ -451,8 +452,7 @@ do_systemd_daemon()
 				do_log warning "${crypt_arr[1]} not found in ${conf[BLOCKDEVSDIRS]}"
 				[[ start_status -eq 0 ]] && start_status=2
 			elif [[ -n "${key}" || -n "$(t_keyctl 1 request user "${pp}" @s)" ]]; then
-				do_log debug "found cached ${pp} passphrase" 
-				[[  -n "${key}" ]] && do_move_passphrase "${pp}" "${key}"
+				do_log debug "found cached ${pp} passphrase"
 				if [[ ${!job[@]} =~ mount\|${crypt_arr[0]} ]];then
 					pid=$(sed "s/.*mount|${crypt_arr[0]}|//" <<<"${!job[@]}" |cut -d' ' -f1)
 					do_log info "ignoring ${msg[0]} for ${crypt_arr[0]}, active worker (PID: ${pid})"
