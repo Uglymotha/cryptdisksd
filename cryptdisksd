@@ -150,7 +150,7 @@ do_init_conf()
 			systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
 			[[ ${INITRD} -eq 0 ]] && start_status=2
 		fi
-		for dev in ${conf[STORAGEDEVS]}; do if ! t_grep 0 -e "^${conf[STORAGEPREFIX]}${i}[[:space:]]" ${conf[CRYPTTAB]}; then
+		IFS=,; for dev in ${conf[STORAGEDEVS]}; do if ! t_grep 0 -e "^${conf[STORAGEPREFIX]}${i}[[:space:]]" ${conf[CRYPTTAB]}; then
 			sed -i "/^${conf[STORAGEPREFIX]}${i}[ \t]/d" ${conf[CRYPTTAB]}
 			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]} && i=$((i+1))
 		fi done
