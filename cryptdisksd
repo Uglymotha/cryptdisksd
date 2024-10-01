@@ -519,7 +519,7 @@ do_systemd_daemon()
 do_move_passphrase()
 {
 	local pp="$1" key="$2" passphrase to="$([[ -n "${keylife[$1]}" ]] && echo ${keylife[$1]} || echo ${conf[KEYLIFE]})"
-	if ! passphrase="$(t_keyctl 1 pipe "${key}")" || [[ ${INITRD} -eq 1 ]]; then
+	if [[ ${INITRD} -eq 1 ]] || ! passphrase="$(t_keyctl 1 pipe "${key}")"; then
 		return 1
 	fi
 	do_log debug "found cached ${pp} passphrase in user keyring"
