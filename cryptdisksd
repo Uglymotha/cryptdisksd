@@ -579,7 +579,7 @@ do_daemon_check_conf()
 			if ! t_diff -q <(echo "${diff}") <(echo "${_diff}"); then
 				# Configs are different, overwrite confdir on startup firmware config otherwise.
 				confok=1
-				if [[ ${starting} -eq 0 ]]; then
+				if [[ ${starting} -le 0 ]]; then
 					do_log warning "${FWCONF} and ${CONF} differ, replacing ${FWCONF}"
 					[[ -e ${FWCONF} ]] && t_chattr -i ${FWCONF}
 					if ! t_printf "\x07\x00\x00\x00\x00" >${FWCONF}; then
