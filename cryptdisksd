@@ -288,11 +288,11 @@ do_term_daemon()
 	do_log debug2 "stopping log writer (PID: ${pid_logwriter} FD:${fd_logwriter})"
 	exec {fd_logwriter}>&- 1>&- 2>&-
 	wait ${pid_logwriter}
-	[[ -n "$2" ]] && kill -SIGTERM $2 2>/dev/null
 
 	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} /var/storage/log/
 	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} /var/storage/log/
 	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
+	[[ -n "$2" ]] && kill -SIGTERM $2 2>/dev/null
 	exit $1
 }
 
