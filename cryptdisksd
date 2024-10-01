@@ -44,7 +44,7 @@ do_init_conf()
 	[[ -z "${conf[ALGO]}" ]] && conf[ALGO]="aes-xts-plain64"
 	[[ -z "${conf[KEYSZ]}" ]] && conf[KEYSZ]="256"
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
-	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/sysimg-${DISTNAME}-${DISTVERSION}.sqfs"
+	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/squashfs/sysimg-${DISTNAME}-${DISTVERSION}.sqfs"
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
 	[[ -z "${conf[SYSLOGDIR]}" ]] && conf[SYSLOGDIR]="${conf[ROOTDIR]}/var/log"
 	[[ -z "${conf[ETCDEV]}" ]] && conf[ETCDEV]="etc"
