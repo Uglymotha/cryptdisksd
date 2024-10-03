@@ -338,8 +338,10 @@ do_systemd_daemon()
 				kill -SIGTERM ${pid}
 				job[${key}]=-1
 				[[ "${res}" == "passphrase" ]] && for crypt in ${!waiting_mnt[@]}; do
-					[[ "${waiting_mnt[${crypt}]%% *}" == "${cmd}" ]] && unset waiting_mnt[${crypt}]
-				done
+				if [[ "${waiting_mnt[${crypt}]%% *}" == "${cmd}" ]]; then
+					do_log warning "Removed ${crypt} from waiting list after passphrase timeout"
+					unset waiting_mnt[${crypt}]
+				fi done
 				do_log debug "${res} worker for ${cmd} (PID: ${pid}) timeout"
 			fi 
 		done
@@ -824,7 +826,7 @@ daemon_mount_sysimg()
 		t_openssl aes-256-cbc -salt -d -pbkdf2 -in ${conf[SYSIMG]}.enc -out ${conf[SYSIMG]} >/dev/null 2>&1 || res=1
 		rm -f ${conf[SYSIMG]}.enc
 	fi
-	[[ "${res}" -eq 0 ]] && losetup /dev/loop0 ${conf[SYSIMG]} >/dev/null 2>&1 || res=1
+	[[ "${res}" -eq 0 ]] && losetup /dev/loop0 ${conf[SYSIMG]} && udevadm trigger /dev/loop0 || res=1
 	[[ "${res}" -ne 0 ]] && do_log error "failed to mount ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 	echo "${res}" |socat - UNIX-CONNECT:${sock}
 	[[ "$(</proc/${pid}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid} 2>/dev/null
