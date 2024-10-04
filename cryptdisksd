@@ -151,8 +151,8 @@ do_init_conf()
 			[[ ${INITRD} -eq 0 ]] && start_status=2
 		fi
 		conf[STORDEVNR]=1 IFS=,; for dev in ${conf[STORAGEDEVS]}; do
-			sed -i "/^${conf[STORAGEPREFIX]}${i}[ \t]/d" ${conf[CRYPTTAB]}
-			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]}
+			sed -i "/^${conf[STORAGEPREFIX]}${conf[STORDEVNR]}}[ \t]/d" ${conf[CRYPTTAB]}
+			echo -e "${conf[STORAGEPREFIX]}${conf[STORDEVNR]}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]}
 			conf[STORDEVNR]=$((conf[STORDEVNR]+1))
 		done
 		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
