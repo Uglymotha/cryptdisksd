@@ -5,12 +5,12 @@ do_init_conf()
 {
 	# Initialize System Variables. Default config in /etc/cryptdisksd/cryptdisksd.conf. Systemd env CONF(DIR) will override.
 	unset conf keylife keyserverconf; declare -gA conf keylife keyserverconf
-	local var val _conf= _keylife IFS=$'\n' i=1
+	local var val _conf= _keylife IFS=$'\n'
 	[[ -s ${CONF} ]] && for var in $(grep -ve "^\s*#" <<<$(<${CONF})); do
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
 	done
-	[[ -z "${conf[TIMEOUT]}" ]] && conf[TIMEOUT]=30
+	[[ -z "${conf[BOOT_TIMEOUT]}" ]] && conf[BOOT_TIMEOUT]=30
 	[[ -z "${conf[LOGSIZE]}" ]] && conf[LOGSIZE]=2GiB
 	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash-completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
@@ -150,14 +150,15 @@ do_init_conf()
 			systemd-notify --status="${MYNAME}: Crypttab (${conf[CRYPTTAB]}) not Found, Creating Default"
 			[[ ${INITRD} -eq 0 ]] && start_status=2
 		fi
-		IFS=,; for dev in ${conf[STORAGEDEVS]}; do if ! t_grep 0 -e "^${conf[STORAGEPREFIX]}${i}[[:space:]]" ${conf[CRYPTTAB]}; then
+		conf[STORDEVNR]=1 IFS=,; for dev in ${conf[STORAGEDEVS]}; do
 			sed -i "/^${conf[STORAGEPREFIX]}${i}[ \t]/d" ${conf[CRYPTTAB]}
-			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]} && i=$((i+1))
-		fi done
+			echo -e "${conf[STORAGEPREFIX]}${i}\t${dev}\t${conf[STORAGEPP]}\t${conf[STORAGETRIM]}" >>${conf[CRYPTTAB]}
+			conf[STORDEVNR]=$((conf[STORDEVNR]+1))
+		done
 		crypttab="$(t_cat ${conf[CRYPTTAB]}| grep -ve "^\s*#" |tr "\t" " " |tr -s " ")"
 		[[ -z "${crypttab}" ]] && do_log warning "crypttab is empty"
 		if [[ ${INITRD} -eq 1 ]]; then
-			echo -e "STORAGEPOOL=${conf[STORAGEPOOL]}\nETCDEV=${conf[ETCDEV]}\nLIBDEV=${conf[LIBDEV]}\nTIMEOUT=${conf[TIMEOUT]}\nALGO=${conf[ALGO]}\nKEYSZ=${conf[KEYSZ]}\nHASH=${conf[HASH]}\nSTORAGEDEVS=${conf[STORAGEDEVS]}" >>/etc/systemd/${MYNAME}.conf
+			echo -e "STORAGEPOOL=${conf[STORAGEPOOL]}\nETCDEV=${conf[ETCDEV]}\nLIBDEV=${conf[LIBDEV]}\nTIMEOUT=${conf[BOOT_TIMEOUT]}\nALGO=${conf[ALGO]}\nKEYSZ=${conf[KEYSZ]}\nHASH=${conf[HASH]}\nSTORAGEDEVS=${conf[STORAGEDEVS]}" >>/etc/systemd/${MYNAME}.conf
 		fi
 	fi
 	conf[KEYLIFE]=$((conf[KEYLIFE]*60))
@@ -858,7 +859,7 @@ daemon_default_config()
 	if [[ ${res} -eq 0 && ! -f /boot/${conf[STORAGEPOOL]} ]]; then
 		# In case we create the backing device, ask user for size (default is half of available size / memory).
 		while [[ ${passphrase} -gt $((size/2)) || ${passphrase} -lt 1024 ]]; do
-			do_ask_passphrase "Storage Device Size in MB? (min: 1024, max: $((size/2)))" "-t${conf[TIMEOUT]}" || passphrase=$((size/2))
+			do_ask_passphrase "Storage Device Size in MB? (min: 1024, max: $((size/2)))" "-t${conf[BOOT_TIMEOUT]}" || passphrase=$((size/2))
 		done
 		size=$((passphrase*1024*1024))
 		touch /boot/${conf[STORAGEPOOL]} || res=1
@@ -869,8 +870,7 @@ daemon_default_config()
 			losetup -P ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 		fi
 		# Create 3 partions on device and fill with system config.
-		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1
-		udevadm settle
+		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1 && udevadm settle || res=1
 		for i in etc lib ${conf[STORAGEPOOL]}; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
 			[[ -n "${key}" ]] && dev2=${dev}-part${p} || dev2=${dev}p${p}
 			dir="$(mktemp -d)" || res=1
@@ -1074,7 +1074,7 @@ get_passphrase()
 
 	# We should get a pssphrase or an empty response from the workers or timeout.
 	[[ ${starting} -ne 0 ]] && _to=$((conf[START_TIMEOUT]+conf[PP_TIMEOUT])) || _to=${conf[PP_TIMEOUT]}
-	[[ ${INITRD} -eq 1 ]] && _to=${conf[TIMEOUT]}
+	[[ ${INITRD} -eq 1 ]] && _to=${conf[BOOT_TIMEOUT]}
 	if ! IFS= read -t${_to} -u${_fd_getpp} _passphrase; then
 		do_log debug "$([[ $? -eq 142 ]] && echo timeout || echo failed) after $(do_timer ${_time_start})s"
 		echo "passphrase ${crypt_arr[2]} 0 0 0" >${conf[FIFO]}
@@ -1997,7 +1997,7 @@ do_read_passphrase()
 		if [[ ${network} -eq 1 ]]; then
 			exec {fd_pp}< <(key_clnt "GET" "${pp}" {__fd_up}>&1- {__fd_user}>&${fd_user}-); pid=$!
 			IFS= do_initrd_cmd "($5) Getting ${pp} Passphrase from Boot Servers: " \
-					read -t${conf[TIMEOUT]} -ru${fd_pp} passphrase && fd_pp=1 || fd_pp=0
+					read -t${conf[PP_TIMEOUT]} -ru${fd_pp} passphrase && fd_pp=1 || fd_pp=0
 		fi
 		if [[ ${fd_pp} -eq 0 ]]; then
 			exec {fd_pp}< <(query_passphrase "${pp}" "${PI}" "${OK}" "${WARN}" "${FAIL}" "${mode}" "(${MYNAME}) " \
