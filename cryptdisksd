@@ -10,8 +10,7 @@ do_init_conf()
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
 	done
-	[[ -z "${conf[BOOT_TIMEOUT]}" ]] && conf[BOOT_TIMEOUT]=30
-	[[ -z "${conf[LOGSIZE]}" ]] && conf[LOGSIZE]=2GiB
+	[[ -z "${conf[BOOT_TIMEOUT]}" ]] && conf[BOOT_TIMEOUT]=60
 	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash-completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
@@ -33,6 +32,8 @@ do_init_conf()
 	[[ -z "${conf[PP_TIMEOUT]}" ]] && conf[PP_TIMEOUT]=3
 	[[ -z "${conf[QUEUE_TIMEOUT]}" ]] && conf[QUEUE_TIMEOUT]=2
 	[[ -z "${conf[CLEANUP_TIMER]}" ]] && conf[CLEANUP_TIMER]=60
+	[[ -z "${conf[NET_CONFIG]}" ]] && conf[NET_CONFIG]="networkd.conf"
+	[[ -z "${conf[NETWORKDDIR]}" ]] && conf[NETWORKDDIR]="/etc/systemd/network"
 	[[ -z "${conf[NET_ONLINE]}" ]] && conf[NET_ONLINE]=1
 	[[ -z "${conf[NET_RETRIES]}" ]] && conf[NET_RETRIES]=2
 	[[ -z "${conf[NET_TIMEOUT]}" ]] && conf[NET_TIMEOUT]=30
@@ -412,10 +413,9 @@ do_systemd_daemon()
 			sock_ctrl="${conf[CRYPTDISKSDDIR]}/${MYNAME}-${msg[1]%%,*}.sock"
 			if [[ "${cmd}" == "stop" ]]; then
 				do_term_daemon 0 ${pid_socat}
-			elif [[ "${cmd}" == "reload" ]]; then
-				echo reload >${conf[FIFO]}
-				echo "${RED}Reloading Config${NOR}" |socat - UNIX-CONNECT:${sock_ctrl}
-				[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
+			elif [[ "${cmd}" =~ (reload|networkconfig) ]]; then
+				[[ "${cmd}" == "reload" ]] && echo reload >${conf[FIFO]} && cmd="${RED}Reloading Config${NOR}"
+				echo -e "${cmd}" |socat - UNIX-CONNECT:${sock_ctrl}
 			elif [[ "${cmd}" =~ (mountsysimg|defaultconfig) ]]; then
 				[[ "${cmd}" == "defaultconfig" ]] && daemon_default_config &
 				[[ "${cmd}" == "defaultconfig" ]] && defconf=1 && continue
@@ -569,7 +569,7 @@ do_daemon_notify_systemd()
 do_daemon_check_conf()
 {
 	# Parse the configuration from firmware and compare it to the config stored in the confdir.
-	local diff _diff fwsrvvar fwsrvkey fwusrvar fwusrkey srvkey usrkey confok=0
+	local diff _diff files fwsrvvar fwsrvkey fwusrvar fwusrkey srvkey fwnetvar fwnetkey usrkey confok=0
 	do_log debug "checking config"
 	if [[ ${INITRD} -eq 1 && ${starting} -eq -1 && ! -s ${FWCONF} ]]; then
 		do_log warning "${FWCONF} Not Found! Starting with default config"
@@ -639,6 +639,36 @@ do_daemon_check_conf()
 		fi
 	fi
 
+	# Check network configuration
+	shopt -s nullglob
+	fwnetvar="${FWGUID}-${DISTNAME}_${conf[NET_CONFIG]}" fwnetkey="${FWDIR}/${DISTNAME}_${conf[NET_CONFIG]}-${FWGUID}"
+	files=( $conf[NETWORKDDIR]}/* )
+	if [[ ${INITRD} -eq 1 && -s ${fwnetkey} ]]; then
+		# In initrd we copy the config from firmware if it exists
+		do_log info "copying ${fwnetkey} to ${conf[NETWORKDDIR]}"
+		t_cat ${fwnetkey} | t_tail -c +5 |tar zxf - -C ${conf[NETWORKDDIR]}
+	elif [[ ${INITRD} -eq 0 && ${#files[@]} -eq 0 && -e ${fwnetkey} ]]; then
+		# When there is no networkd config, remove firmware config
+		do_log warning "removing ${fwnetkey}, no networkd config"
+		t_chattr -i ${fwnetkey} && t_rm -f ${fwnetkey} || do_log error "error removing ${fwnetkey}"
+	elif [[ ${INITRD} -eq 0 && ${#files[@]} -gt 0 ]]; then
+		diff=$(TMPDIR=${conf[CRYPTDISKSDDIR]} mktemp -d)
+		[[ -s ${fwnetkey} ]] && t_cat ${fwnetkey} | t_tail -c +5 |tar zxf - -C ${diff}
+		if ! t_diff -q ${diff} ${conf[NETWORKDDIR]} >/dev/null 2>&1; then
+			do_log warning "${conf[NETWORKDDIR]} and ${fwnetkey} differ, replacing ${fwnetkey}"
+			tar zcf ${diff}/${conf[NET_CONFIG]} -C ${conf[NETWORKDDIR]} .
+			[[ -e ${fwnetkey} ]] && t_chattr -i ${fwnetkey}
+			if ! t_printf "\x07\x00\x00\x00\x00" >${fwnetkey}; then
+				do_log error "error creating ${fwnetkey}"
+			elif ! t_efivar -n ${fwnetvar} -w -f ${diff}/${conf[NET_CONFIG]}; then
+				do_log error "error copying ${diff}/${conf[NET_CONFIG]} to ${fwnetkey}"
+			fi
+			t_chattr +i ${fwnetkey}
+		fi
+		t_rm -rf ${diff}
+	fi
+	shopt -u nullglob
+
 	# Check the bootserver and user keys if present.
 	[[ -z "${conf[BOOTSERVERS]}" ]] && return 0
 	fwsrvvar="${FWGUID}-${DISTNAME}_${conf[BOOTSERVERKEYS]}"
@@ -686,6 +716,7 @@ do_daemon_check_conf()
 	fi
 
 	# No need to check user key, if server key not present.
+	[[ -z "${conf[BOOTSERVERS]}" ]] && return 0
 	if [[ -s ${fwusrkey} && ! -s ${usrkey} ]]; then
 		# Key in fw not in confdir, copy
 		do_log info "copying ${fwusrkey} to ${usrkey}"
@@ -728,10 +759,6 @@ do_daemon_check_conf()
 		# No bootuserkeys at all
 		conf[BOOTSERVERS]=""
 	fi
-
-	# Check network configuration
-	[[ ! -d /boot/network ]] && mkdir -p /boot/network
-	! t_diff -qr /boot/network/ /etc/systemd/network/ >/dev/null 2>&1 && rm -rf /boot/network && cp -a /etc/systemd/network /boot/
 
 	[[ ${starting} -eq 0 && ${confok} -eq 1 ]] && echo "reload" >${conf[FIFO]}
 	return 0
@@ -852,9 +879,9 @@ daemon_default_config()
 	if [[ ${res} -eq 0 ]]; then
 		key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
 		[[ -n "${key}" ]] && dev=${conf[DMDIR]}/${conf[STORAGEPOOL]} || dev=$(losetup -f)
-		mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev /sysroot/root || res=1
-		ln -s /etc/bashrc /sysroot/root/.bashrc
-		mkdir /sysroot/root/quarantine
+		mount -t tmpfs tmpfs -o size=1G,mode=0750,nosuid,noexec,nodev ${conf[ROOTDIR]}/root || res=1
+		ln -s /etc/bashrc ${conf[ROOTDIR]}/root/.bashrc
+		mkdir ${conf[ROOTDIR]}/root/quarantine
 	fi
 	if [[ ${res} -eq 0 && ! -f /boot/${conf[STORAGEPOOL]} ]]; then
 		# In case we create the backing device, ask user for size (default is half of available size / memory).
@@ -881,17 +908,24 @@ daemon_default_config()
 			mount ${dev2} ${dir} || res=1
 			[[ ${res} -ne -0 ]] && break
 			if [[ ${i} == etc ]]; then
-				cp -a /sysroot/etc/* ${dir} || res=1
+				cp -a ${conf[ROOTDIR]}/etc/* ${dir} || res=1
 				[[ ! -d /etc/ssh ]] && mkdir /etc/ssh
 				ssh-keygen -A >/dev/null && cp -a /etc/ssh ${dir} || res=1
-				/sysroot/bin/systemd-machine-id-setup || res=1
+				${conf[ROOTDIR]}/bin/systemd-machine-id-setup || res=1
 				cp /etc/machine-id ${dir} || res=1
 			elif [[ ${i} == lib ]]; then
-				cp -a /sysroot/var/lib/* ${dir} || res=1
+				cp -a ${conf[ROOTDIR]}/var/lib/* ${dir} || res=1
 				rm -rf ${dir}/clamav/*
 			else
-				cp -a /sysroot/var/storage/* ${dir} || res=1
+				cp -a ${conf[ROOTDIR]}/var/storage/* ${dir} || res=1
 			fi
+			cat >${conf[ROOTDIR]}/${conf[NETWORKDDIR]} <<-EOF
+			[Match]
+			Name=en*
+
+			[Network]
+			DHCP=yes
+			EOF
 			umount ${dir} && rmdir ${dir}
 		fi done
 		[[ ${res} -ne 0 ]] && do_log error "Unable to create persistent storage device"
@@ -901,13 +935,13 @@ daemon_default_config()
 		losetup -P ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 	fi
 	udevadm settle
-	[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/${conf[STORAGEPOOL]} /sysroot/var/storage || res=1
-	[[ ${res} -eq 0 ]] && mount /sysroot/var/storage/home/ /sysroot/home || res=1
+	[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/${conf[STORAGEPOOL]} ${conf[ROOTDIR]}/var/storage || res=1
+	[[ ${res} -eq 0 ]] && mount ${conf[ROOTDIR]}/var/storage/home/ ${conf[ROOTDIR]}/home || res=1
 	[[ ${res} -eq 0 ]] && do_log warning "Mounted persistent storage device"
 	[[ ${res} -ne 0 ]] && do_log error "Unable to mount persistent storage device"
 
 	echo "${res}" |socat - UNIX-CONNECT:${sock_ctrl}
-	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
+	sleep 0.01 && [[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && kill -SIGTERM ${pid_socat} 2>/dev/null
 }
 
 daemon_mount_crypt()
@@ -1117,12 +1151,12 @@ do_term_control()
 			wait ${_pid_getpp}
 		fi
 	fi
-	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid_socat} 2>/dev/null
 	[[ $1 -eq 0 && -n "${_pid_putkey}" ]] && wait ${_pid_putkey}
 	if [[ -n "${_pid_logwriter}" && "$(</proc/${_pid_logwriter}/comm)" == "${MYNAME}" ]]; then
 		do_log debug2 "stopping log writer (PID: ${_pid_logwriter} FD:${fd_logwriter})"
 	fi
 	exec {fd_logwriter}>&-
+	[[ "$(</proc/${pid_socat}/comm)" == "socat" ]] && kill -SIGTERM ${pid_socat} 2>/dev/null
 	exit $!
 }
 
@@ -2769,7 +2803,7 @@ do_parse_cmd()
 		do_init_conf daemon || return 1
 		kill -SIGHUP $(<${conf[PIDFILE]})
 		return 1;;
-	status|shell|add|del|putkey|rmkey|smart|erase|stop|mountsysimg|defaultconfig)
+	status|shell|add|del|putkey|rmkey|smart|erase|stop|mountsysimg|defaultconfig|networkconfig)
 		[[ ${check} -eq 1 ]] && return 1
 		do_cryptdisksd_cmd $@
 		return $?;;
@@ -2882,7 +2916,7 @@ do_cryptdisksd_cmd()
 		return ${s}
 	fi
 	exec {stdin}<&0
-	[[ "${command,,}" =~ ^(stop|mountsysimg|defaultconfig)$ ]] && to="${conf[START_TIMEOUT]}" || to="${conf[QUEUE_TIMEOUT]}"
+	[[ "${command,,}" =~ ^(stop|mountsysimg|(default|network)config)$ ]] && to="${conf[START_TIMEOUT]}" || to="${conf[QUEUE_TIMEOUT]}"
 	sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
 	socat - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600,accept-timeout=${to} 0<&${stdin}- 2>/dev/null &
 	pid_socat=$!
@@ -2896,7 +2930,7 @@ do_cryptdisksd_cmd()
 	del)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
 		msg+="${confirm} ${crypttab}";;
-	status|shell|stop|mountsysimg|reload|defaultconfig)
+	status|shell|stop|mountsysimg|reload|defaultconfig|networkconfig)
 		[[ $(wc -w <<<"${msg}") -ne 1 ]] && do_echo_use "${command}";;
 	smart)
 		[[ $(wc -w <<<"${msg}") -ne 2 ]] && do_echo_use "${command}"
@@ -2912,7 +2946,7 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" == "smart" ]] && stty_opt+=" isig"
 	[[ "${command,,}" == "shell" ]] && stty_opt+=" raw -isig"
 	[[ ! ${command,,} =~ ^(smart|shell)$ ]] && stty_opt+=" raw isig"
-	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && stty ${stty_opt}
+	[[ "${command,,}" != "mountsysimg" && ! "${command,,}" =~ (default|network)config && "${command,,}" != "stop" ]] && stty ${stty_opt}
 	if [[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]]; then
 		echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
 	fi
@@ -2923,10 +2957,10 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && echo -ne "\r"
 
 	# Restore stdin, remove socket and exit.
-	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && stty sane
+	[[ "${command,,}" != "mountsysimg" && ! "${command,,}" =~ (default|network)config && "${command,,}" != "stop" ]] && stty sane
 	[[ -e ${sock} ]] && rm -f ${sock}
 
-	if [[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]]; then
+	if [[ ${conf[LOGLEVEL]} -gt 3 && "${command,,}" != "mountsysimg" && ! "${command,,}" =~ (default|network)config && "${command,,}" != "stop" ]]; then
 		echo -e "\rDone Requesting \"$@\" from ${MYNAME}"
 	fi
 	[[ "${command,,}" != "stop" ]] && exit 0
