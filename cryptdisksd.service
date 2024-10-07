@@ -1,7 +1,7 @@
 [Unit]
 Description=Cryptdisks Daemon
 Wants=systemd-networkd.service boot.mount
-After=systemd-networkd.service boot.mount %N.socket
+After=boot.mount %N.socket
 Requires=%N.socket
 
 [Service]

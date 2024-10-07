@@ -857,7 +857,7 @@ daemon_mount_sysimg()
 	[[ "${res}" -eq 0 ]] && losetup -r /dev/loop0 ${conf[SYSIMG]} && udevadm trigger /dev/loop0 || res=1
 	[[ "${res}" -ne 0 ]] && do_log error "failed to mount ${conf[SYSIMG]} on ${conf[ROOTDIR]}"
 	echo "${res}" |socat - UNIX-CONNECT:${sock}
-	[[ "$(</proc/${pid}/comm)" == "socat" ]] && sleep 0.01 && kill -SIGTERM ${pid} 2>/dev/null
+	sleep 0.01 && [[ "$(</proc/${pid}/comm)" == "socat" ]] && kill -SIGTERM ${pid} 2>/dev/null
 }
 
 # Creates default persistent storage in case no storage pool isavailable.
@@ -898,7 +898,7 @@ daemon_default_config()
 		fi
 		# Create 3 partions on device and fill with system config.
 		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1 && udevadm settle || res=1
-		for i in etc lib ${conf[STORAGEPOOL]}; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
+		for i in ${conf[ETCDEV]} ${conf[LIBDEV]} ${conf[STORAGEPOOL]}; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
 			[[ -n "${key}" ]] && dev2=${dev}-part${p} || dev2=${dev}p${p}
 			dir="$(mktemp -d)" || res=1
 			mkfs.ext4 ${dev2} || res=1
@@ -2947,14 +2947,14 @@ do_cryptdisksd_cmd()
 	[[ "${command,,}" == "shell" ]] && stty_opt+=" raw -isig"
 	[[ ! ${command,,} =~ ^(smart|shell)$ ]] && stty_opt+=" raw isig"
 	[[ "${command,,}" != "mountsysimg" && ! "${command,,}" =~ (default|network)config && "${command,,}" != "stop" ]] && stty ${stty_opt}
-	if [[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]]; then
+	if [[ ${conf[LOGLEVEL]} -gt 2 && "${command,,}" != "mountsysimg" && ! ${command,,} =~ (default|network)config && "${command,,}" != "stop" ]]; then
 		echo -e "\rRequesting \"$@\" from ${MYNAME} - ${conf[FIFO]}\r"
 	fi
 	echo "control ${BASHPID},${pid_socat} ${msg}" >${conf[FIFO]}
-	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" && ${command,,} =~ (default|network)config && "${command,,}" != "stop" ]] && echo -ne "\r"
 	wait ${pid_socat}
 	[[ "${command,,}" == "mountsysimg" || "${command,,}" == "defaultconfig" ]] && [[ $? -ne 0 ]] && echo 1
-	[[ "${command,,}" != "mountsysimg" && "${command,,}" != "defaultconfig" && "${command,,}" != "stop" ]] && echo -ne "\r"
+	[[ "${command,,}" != "mountsysimg" && ! ${command,,} =~ (default|network)config && "${command,,}" != "stop" ]] && echo -ne "\r"
 
 	# Restore stdin, remove socket and exit.
 	[[ "${command,,}" != "mountsysimg" && ! "${command,,}" =~ (default|network)config && "${command,,}" != "stop" ]] && stty sane
@@ -3051,7 +3051,7 @@ do_systemd_daemon_start()
 	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 
 	# Start the logwriter.
-	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
+	chgrp $([[ ${INITRD} -eq 0 ]] && echo ${conf[CRYPTDISKSD_GROUP]} || echo systemd) ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
 	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
 	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
