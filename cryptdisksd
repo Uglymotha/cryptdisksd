@@ -642,7 +642,7 @@ do_daemon_check_conf()
 	# Check network configuration
 	shopt -s nullglob
 	fwnetvar="${FWGUID}-${DISTNAME}_${conf[NET_CONFIG]}" fwnetkey="${FWDIR}/${DISTNAME}_${conf[NET_CONFIG]}-${FWGUID}"
-	files=( $conf[NETWORKDDIR]}/* )
+	files=( ${conf[NETWORKDDIR]}/* )
 	if [[ ${INITRD} -eq 1 && -s ${fwnetkey} ]]; then
 		# In initrd we copy the config from firmware if it exists
 		do_log info "copying ${fwnetkey} to ${conf[NETWORKDDIR]}"
