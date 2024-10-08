@@ -10,7 +10,7 @@ do_init_conf()
 		val=${var#*=} var=${var%%=*}
 		conf[${var^^}]="${val}"
 	done
-	[[ -z "${conf[BOOT_TIMEOUT]}" ]] && conf[BOOT_TIMEOUT]=60
+	[[ -z "${conf[BOOT_TIMEOUT]}" ]] && conf[BOOT_TIMEOUT]=90
 	[[ -z "${conf[FILES]}" ]] && conf[FILES]="$0 /usr/share/bash-completion/completions/${MYNAME}"
 	[[ -z "${conf[SYSTEMPP]}" ]] && conf[SYSTEMPP]="system"
 	[[ -z "${conf[LOGLEVEL]}" ]] && conf[LOGLEVEL]=0
@@ -329,11 +329,11 @@ do_systemd_daemon()
 			if [[ ! ${_jobs} =~ ^(|.*[[:space:]])${pid}(|[[:space:]].*)$ ]]; then
 				wait ${pid}
 				do_log debug "${res} worker for ${cmd} finished (PID: ${pid}: $?)"
-				unset job[${key}]
+				unset -v 'job[${key}]'
 			elif [[ "${job[${key}]}" == "-1" ]]; then
 				do_log warning "${res} worker for ${cmd} (PID: ${pid}) not terminated"
 				kill -SIGKILL ${pid} 2>/dev/null
-				unset job[${key}]
+				unset -v 'job[${key}]'
 			elif   [[ "${res}" == "passphrase" && ${_time_active} -gt ${to} ]] \
 				|| [[ "${res}" == "control" && "${cmd}" != "erase" && ${_time_active} -gt $((2*conf[START_TIMEOUT])) ]] \
 				|| [[ "${res}" == "mount" && ${_time_active} -gt ${conf[MOUNT_TIMEOUT]} ]] \
@@ -343,7 +343,7 @@ do_systemd_daemon()
 				[[ "${res}" == "passphrase" ]] && for crypt in ${!waiting_mnt[@]}; do
 				if [[ "${waiting_mnt[${crypt}]%% *}" == "${cmd}" ]]; then
 					do_log warning "Removed ${crypt} from waiting list after passphrase timeout"
-					unset waiting_mnt[${crypt}]
+					unset -v 'waiting_mnt[${crypt}]'
 				fi done
 				do_log debug "${res} worker for ${cmd} (PID: ${pid}) timeout"
 			fi 
@@ -397,7 +397,7 @@ do_systemd_daemon()
 		mount|unmount)
 			if [[ "${msg[0],,}" == "unmount" && ${msg[2]} -ne 1 ]]; then
 				do_log debug "removed ${msg[1]} from active mounts"
-				unset active_mnt[${msg[1]}]
+				unset -v 'active_mnt[${msg[1]}]'
 			elif [[ "${msg[0],,}" == "mount" && ${msg[2]} -ne 1 && ${msg[2]} -ne 2 && ${msg[2]} -ne 5 ]]; then
 				active_mnt[${msg[1]}]="${msg[3]} ${msg[4]} ${msg[5]} $(do_timer)"
 				do_log debug "added ${msg[1]} to active mounts"
@@ -425,7 +425,7 @@ do_systemd_daemon()
 				if [[ "${mntsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
 					daemon_mount_sysimg &
 				elif [[ ! ${!job[@]} =~ passphrase\|${conf[SYSTEMPP]} ]]; then
-					do_log debug "no active worker for ${conf[SYSTEMPP]}, starting"
+					do_log debug "no active passphrase worker for ${conf[SYSTEMPP]}, starting"
 					crypt_arr[2]="${conf[SYSTEMPP]}"
 					get_passphrase "" & job[passphrase|${conf[SYSTEMPP]}|$!]="$(do_timer)"
 				fi
@@ -475,7 +475,7 @@ do_systemd_daemon()
 				do_log debug "adding ${dev} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} to waiting list for ${pp} passphrase"
 				waiting_mnt[${crypt_arr[0]}]="${pp} ${dev} ${crypt_arr[3]} $(do_timer)"
 				if [[ ! ${!job[@]} =~ passphrase\|${pp} ]]; then
-					do_log debug "no active worker for ${pp}, starting"
+					do_log debug "no active passphrase worker for ${pp}, starting"
 					get_passphrase "${user}" & job[passphrase|${pp}|$!]="$(do_timer)"
 				fi
 			fi;;
@@ -487,7 +487,7 @@ do_systemd_daemon()
 			[[ ${msg[3]} -eq -1 && -z "${keylife[${pp}]}" ]] && msg[3]=${conf[KEYLIFE]}
 			[[ ${msg[2]} -ne 2 ]] && for crypt in ${!waiting_mnt[@]}; do if [[ "${waiting_mnt[${crypt}]%% *}" == "${pp}" ]]; then
 				crypt_arr=($(do_xcrypt_fromtab "${crypt}")); crypt_arr[7]="$(do_timer ${waiting_mnt[${crypt}]##* })s"
-				unset waiting_mnt[${crypt}]
+				unset -v 'waiting_mnt[${crypt}]'
 				if [[ ${msg[2]} == 0 ]]; then
 					do_log debug "removed ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase,"\
 								 "waited for ${crypt_arr[7]}s"
@@ -511,7 +511,7 @@ do_systemd_daemon()
 					do_log debug "killed passphrase worker (PID: ${pid})"
 				fi
 			fi
-			[[ ${msg[2]} -eq 1 ]] && cached_pp[${pp}]="$(do_timer),${msg[3]}" || unset cached_pp[${pp}];;
+			[[ ${msg[2]} -eq 1 ]] && cached_pp[${pp}]="$(do_timer),${msg[3]}" || unset -v 'cached_pp[${pp}]';;
 		*)	
 			do_log warning "received invalid message \"${msg[@]}\"";;
 		esac
@@ -530,7 +530,7 @@ do_move_passphrase()
 	t_keyctl 0 revoke "${key}"
 	t_keyctl 0 unlink "${key}" @u
 	[[ -n "${conf[BOOTSERVERS]}" ]] && key_clnt "PUT" "${pp}" "${passphrase}" & job[putkey|${pp}|$!]="$(do_timer)"
-	[[ $(do_cache_pp "${pp}" "@s" "-1" "${passphrase}")$? -ne 1 ]] && cached_pp[${pp}]="$(do_timer),${to}" || unset cached_pp[${pp}]
+	[[ $(do_cache_pp "${pp}" "@s" "-1" "${passphrase}")$? -ne 1 ]] && cached_pp[${pp}]="$(do_timer),${to}" || unset -v 'cached_pp[${pp}]'
 	return 0
 }
 
@@ -797,9 +797,8 @@ do_daemon_cleanup()
 			active_mnt[${crypt}]="${dev} ${pp} ${trim} $(do_timer)"
 		fi
 		do_log debug "found ${dev} as ${crypt} TRIM ${trim} passphrase ${pp} adding to active list"
-		unset waiting_mnt[${crypt}] 
+		unset -v 'waiting_mnt[${crypt}]'
 	fi done
-
 	# Check for removed crypts and remove the from active list.
 	for crypt in ${!active_mnt[@]}; do
 		for _crypt in ${mnt_crypt}; do
@@ -808,7 +807,7 @@ do_daemon_cleanup()
 		crypt_arr=(${active_mnt[${crypt}]})
 		do_log warning "${crypt_arr[0]} as ${crypt} TRIM ${crypt_arr[2]} passphrase ${crypt_arr[1]}"\
 					   "mounted since $(do_timer date ${crypt_arr[3]}) disapeared"
-		unset active_mnt[${crypt}]
+		unset -v 'active_mnt[${crypt}]'
 	done
 
 	# If we have reloaded look up any managed crypts removed from crypttab and make them unmanaged.
@@ -826,7 +825,7 @@ do_daemon_cleanup()
 	# Check Cached Passphrases
 	for _pp in ${!cached_pp[@]}; do if ! t_keyctl 0 request user "${_pp}" @s; then
 		do_log info "${_pp} passphrase no longer cached"
-		unset cached_pp[${_pp}]
+		unset -v 'cached_pp[${_pp}]'
 	fi done
 
 	[[ -n "${!cached_pp[@]}" ]] && pp=", cached passphrases: ${!cached_pp[@]}" || pp=""
@@ -2102,7 +2101,7 @@ do_systemd_keysrv()
 		r=$? res=0 msg=(${msg})
 		for pp in ${!cached_pp[@]}; do if ! t_keyctl 0 request user "${pp}" @s; then
 			do_log info "${pp} passphrase has expired"
-			unset cached_pp[${pp}]
+			unset -v 'cached_pp[${pp}]'
 		fi done
 		[[ ${r} -eq 142 ]] && continue
 		[[ ${r} -ne 0 ]] && break
@@ -2151,7 +2150,7 @@ do_systemd_keysrv()
 					fi
 				fi
 				if [[ ${res} -eq 1 ]]; then
-					unset cached_pp[${pp}]
+					unset -v 'cached_pp[${pp}]'
 					do_keysrv_send "NOK"
 				else
 					cached_pp[${pp}]="$(do_timer),${timeout}"
@@ -2168,7 +2167,7 @@ do_systemd_keysrv()
 				[[ "${cmd}" == "rem" ]] && do_keysrv_send "NOK" 
 			else
 				do_log info "${cmd^^} ${pp} passphrase from cache succeeded"
-				unset cached_pp[${pp}]
+				unset -v 'cached_pp[${pp}]'
 				[[ "${cmd}" == "rem" ]] && do_keysrv_send "OK"
 			fi
 			[[ "${cmd}" == "del" ]] && if [[ ! -e ${conf[KEYDIR]}/${pp}.key ]]; then
