@@ -47,7 +47,7 @@ do_init_conf()
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
 	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/squashfs/sysimg-${DISTNAME}-${DISTVERSION}.sqfs"
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
-	[[ -z "${conf[SYSLOGDIR]}" ]] && conf[SYSLOGDIR]="${conf[ROOTDIR]}/var/log"
+	[[ -z "${conf[SYSLOGDIR]}" ]] && conf[SYSLOGDIR]="/var/storage/log"
 	[[ -z "${conf[ETCDEV]}" ]] && conf[ETCDEV]="etc"
 	[[ -z "${conf[LIBDEV]}" ]] && conf[LIBDEV]="lib"
 	[[ -z "${conf[STORAGEPOOL]}" ]] && conf[STORAGEPOOL]=storage
@@ -267,7 +267,7 @@ do_term_daemon()
 	if [[ ${coonf[UPDONSTOP]} -eq 1 && -n "${conf[BOOTSERVERKEYS]}" ]]; then
 		key_clnt "UPDATE" & wait $!
 	fi
-	[[ ${conf[ADDONSTOP]} -gt 0 ]] && {
+	[[ ${INITRD} -eq 0 && ${conf[ADDONSTOP]} -gt 0 ]] && {
 		for pp in ${!cached_pp[@]}; do
 			if [[ ${conf[ADDONSTOP]} -ge 4 || ( ${conf[ADDONSTOP]} -eq 1 && ${cached_pp[${pp}]##*,} -eq 0 ) ]]; then
 				timeout=0
@@ -291,8 +291,9 @@ do_term_daemon()
 	exec {fd_logwriter}>&- 1>&- 2>&-
 	wait ${pid_logwriter}
 
-	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} /var/storage/log/
-	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} /var/storage/log/
+	[[ -e /etc/default ]] && conf[SYSLOGDIR]=${conf[ROOTDIR]}/${conf[SYSLOGDIR]}
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp -a ${conf[LOGFILE]} ${conf[SYSLOGDIR]}
+	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -a ${conf[LOGDIR]} ${conf[SYSIMG]}
 	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
 	[[ -n "$2" ]] && kill -SIGTERM $2 2>/dev/null
 	exit $1
@@ -416,9 +417,9 @@ do_systemd_daemon()
 			elif [[ "${cmd}" =~ (reload|networkconfig) ]]; then
 				[[ "${cmd}" == "reload" ]] && echo reload >${conf[FIFO]} && cmd="${RED}Reloading Config${NOR}"
 				echo -e "${cmd}" |socat - UNIX-CONNECT:${sock_ctrl}
-			elif [[ "${cmd}" =~ (mountsysimg|defaultconfig) ]]; then
-				[[ "${cmd}" == "defaultconfig" ]] && daemon_default_config &
-				[[ "${cmd}" == "defaultconfig" ]] && defconf=1 && continue
+			elif [[ "${cmd}" == defaultconfig ]]; then
+				[daemon_default_config & defconf=1
+			elif [[ "${cmd}" == "mountsysimg" ]]; then
 				[[ -n "${mntsysimg}" ]] && mntsysimg="0 0 1"
 				[[ -z "${mntsysimg}" ]] && mntsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
 				if [[ "${mntsysimg##* }" -eq 1 ]] || key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)"; then
@@ -489,7 +490,7 @@ do_systemd_daemon()
 				unset waiting_mnt[${crypt}]
 				if [[ ${msg[2]} == 0 ]]; then
 					do_log debug "removed ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase,"\
-								 "waited for ${crypt_arr[4]}s"
+								 "waited for ${crypt_arr[7]}s"
 				else
 					do_log debug2 "can mount ${crypt_arr[1]} as ${crypt_arr[0]} TRIM ${crypt_arr[3]} using ${pp} passphrase,"\
 								  "waited for ${crypt_arr[7]}s"
@@ -640,7 +641,6 @@ do_daemon_check_conf()
 	fi
 
 	# Check network configuration
-	shopt -s nullglob
 	fwnetvar="${FWGUID}-${DISTNAME}_${conf[NET_CONFIG]}" fwnetkey="${FWDIR}/${DISTNAME}_${conf[NET_CONFIG]}-${FWGUID}"
 	files=( ${conf[NETWORKDDIR]}/* )
 	if [[ ${INITRD} -eq 1 && -s ${fwnetkey} ]]; then
@@ -667,10 +667,8 @@ do_daemon_check_conf()
 		fi
 		t_rm -rf ${diff}
 	fi
-	shopt -u nullglob
 
 	# Check the bootserver and user keys if present.
-	[[ -z "${conf[BOOTSERVERS]}" ]] && return 0
 	fwsrvvar="${FWGUID}-${DISTNAME}_${conf[BOOTSERVERKEYS]}"
 	fwsrvkey="${FWDIR}/${DISTNAME}_${conf[BOOTSERVERKEYS]}-${FWGUID}"
 	fwusrvar="${FWGUID}-${DISTNAME}_${conf[BOOTUSERKEY]}"
@@ -712,11 +710,8 @@ do_daemon_check_conf()
 	else
 		# No bootserverkeys at all
 		do_log error "no bootserver keys found"
-		conf[BOOTSERVERS]=""
 	fi
 
-	# No need to check user key, if server key not present.
-	[[ -z "${conf[BOOTSERVERS]}" ]] && return 0
 	if [[ -s ${fwusrkey} && ! -s ${usrkey} ]]; then
 		# Key in fw not in confdir, copy
 		do_log info "copying ${fwusrkey} to ${usrkey}"
@@ -757,7 +752,7 @@ do_daemon_check_conf()
 		fi
 	else
 		# No bootuserkeys at all
-		conf[BOOTSERVERS]=""
+		do_log error "no bootuser key found"
 	fi
 
 	[[ ${starting} -eq 0 && ${confok} -eq 1 ]] && echo "reload" >${conf[FIFO]}
@@ -2918,7 +2913,7 @@ do_cryptdisksd_cmd()
 	exec {stdin}<&0
 	[[ "${command,,}" =~ ^(stop|mountsysimg|(default|network)config)$ ]] && to="${conf[START_TIMEOUT]}" || to="${conf[QUEUE_TIMEOUT]}"
 	sock=${conf[CRYPTDISKSDDIR]}/${MYNAME}-${BASHPID}.sock
-	socat - UNIX-LISTEN:${sock},unlink-early,unlink-close,group=${conf[CRYPTDISKSD_GROUP]},mode=600,accept-timeout=${to} 0<&${stdin}- 2>/dev/null &
+	socat - UNIX-LISTEN:${sock},unlink-early,unlink-close,mode=600,accept-timeout=${to} 0<&${stdin}- 2>/dev/null &
 	pid_socat=$!
 
 	case ${command,,} in
@@ -3022,23 +3017,30 @@ do_keysrv_cmd()
 
 do_systemd_daemon_start()
 {
-	# Check if we are started from systemd (PID 1).
-	[[ ( ! "${UID}" -eq 0 || ! ${PPID} -eq 1 ) && ${FOREGROUND} -eq 0 ]] && do_echo_use
 	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer) param
 	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal keeplog
-	set -mo pipefail
+	set -mo pipefail; shopt -s nullglob
+	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
+	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
+
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
 	# Running in foreground mode evrything goes to stdout of the user's terminal. And we wish him or her good luck with that.
 	[[ ${FOREGROUND} -ne 1 ]] && exec 0>&- 0</dev/null {fd_journal}>&1- 1>/dev/null 2>&1
 	[[ ${FOREGROUND} -eq 1 ]] && echo -n "Session Key: " && exec {fd_logwriter}>&1 {fd_journal}>&${fd_logwriter} 2>&1
-
-	# Check and create config dir. Start new key session and init conf. On boot keys will be cached in user key ring.
-	[[ ! -d "${CONFDIR}" ]] && mkdir -p ${CONFDIR}
+	# Check and create config dir. Start new key session and init conf. Start logwriter.
 	keyctl new_session
 	keyctl link @us @s
+	[[ ! -d "${CONFDIR}" ]] && mkdir -p ${CONFDIR}
 	if ! do_daemon_check_conf; then
 		systemd-notify --stopping --status="${MYNAME}: Cannot Initialize Config" 
+		exit 0
+	fi
+	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
+	# Check if the queue exists, exit with error if it isn't. It should be there, or something is wrong with socket.
+	if [[ ! -p ${conf[FIFO]} ]]; then
+		do_log error "queue not found"
+		systemd-notify --stopping --status="${MYNAME}: Queue not Found, Restart ${MYNAME}.socket"
 		exit 0
 	fi
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -p ${conf[CRYPTDISKSDDIR]}
@@ -3047,22 +3049,11 @@ do_systemd_daemon_start()
 	[[ "${INITRD}" -eq 1 ]] && cat > /etc/udev/rules.d/99-${conf[ETCDEV]}${conf[LIBDEV]}.rules <<-EOF
 	SUBSYSTEM=="block", KERNEL=="zd*", ACTION=="add|change", ENV{MD_DEVNAME}=="${conf[ETCDEV]}|${conf[LIBDEV]}", ENV{MD_STARTED}=="unsafe", ENV{MD_FOREIGN}=="no", RUN+="/sbin/mdadm --run /dev/\$env{MD_DEVICE}"
 	EOF
-	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
-	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 
-	# Start the logwriter.
-	chgrp $([[ ${INITRD} -eq 0 ]] && echo ${conf[CRYPTDISKSD_GROUP]} || echo systemd) ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
+	[[ ${INITRD} -eq 1 ]] && conf[CRYPTDISKSDDIR_MODE]=750 conf[FIFO_MODE]=620 conf[CRYPTDISKSD_GROUP]=systemd
+	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
 	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}
-	[[ ${FOREGROUND} -eq 0 ]] && do_daemon_start_logwriter && do_log debug "initializing" || echo "Log Level: ${conf[LOGLEVEL]}"
-
-	# Check if the queue exists, exit with error if it isn't. It should be there, or something is wrong with socket.
-	if [[ ! -p ${conf[FIFO]} ]]; then
-		do_log error "queue not found" 
-		systemd-notify --stopping --status="${MYNAME}: Queue not Found, Restart ${MYNAME}.socket" 
-		exit 0
-	fi
-
 	do_systemd_daemon
 }
 
@@ -3164,6 +3155,7 @@ OK="\r${GRN}${BOLD}[  OK  ]${NOR}" WARN="\r${YEL}${BOLD}[ WARN ]${NOR}" FAIL="\r
 # Check if we're started interactively (options must be specified) or from systemd (run without any options from PID 1).
 if [[ $# -eq 0 ]]; then
 	# No command line options specified. check if we're started from systemd, start daemon if so.
+	[[ ( ${UID} -ne 0 || ${PPID} -ne 1 ) && ${FOREGROUND} -eq 0 ]] && do_echo_use
 	do_systemd_daemon_start
 elif [[ "$1" == "keyserver" ]]; then
 	[[ -n "$3" ]] && HOME=$(getent passwd "$3" |cut -d':' -f6 2>/dev/null)
