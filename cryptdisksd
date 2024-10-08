@@ -1067,7 +1067,7 @@ get_passphrase()
 			if [[ -n "${conf[BOOTSERVERS]}" ]]; then
 				key_clnt "GET" "${crypt_arr[2]}" & __pid_keyclnt=$!
 				do_log debug "started key client (PID: ${__pid_keyclnt})"
-				t_sleep ${conf[USER_TIMEOUT]}
+				[[ ${INITRD} -eq 0 ]] && t_sleep ${conf[USER_TIMEOUT]}
 			fi
 		fi
 		if [[ $2 -eq 1 ]]; then
@@ -1090,7 +1090,7 @@ get_passphrase()
 	do_log debug "started"
 
 	# When starting we will wait max PP_TIMEOUT for the network to come up, or fail.
-	[[ ${conf[NET_ONLINE]} -eq 1 && ${starting} -ne 0 && -n "${conf[BOOTSERVERS]}" ]] && \
+	[[ ${INITRD} -eq 0 && ${conf[NET_ONLINE]} -eq 1 && ${starting} -ne 0 && -n "${conf[BOOTSERVERS]}" ]] && \
 	until [[ ${_time_active%%.*} -ge ${conf[NET_TIMEOUT]} || $(t_networkctl status |grep "Online state") =~ (online|partial)$ ]]; do
 		t_sleep ${conf[QUEUE_TIMEOUT]}
 		_time_active=$(do_timer ${_time_start})
