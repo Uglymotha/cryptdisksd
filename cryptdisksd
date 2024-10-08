@@ -529,7 +529,9 @@ do_move_passphrase()
 	do_log debug "found cached ${pp} passphrase in user keyring"
 	t_keyctl 0 revoke "${key}"
 	t_keyctl 0 unlink "${key}" @u
-	[[ -n "${conf[BOOTSERVERS]}" ]] && key_clnt "PUT" "${pp}" "${passphrase}" & job[putkey|${pp}|$!]="$(do_timer)"
+	if [[ -n "${conf[BOOTSERVERS]}" ]]; then
+		key_clnt "PUT" "${pp}" "${passphrase}" & job[putkey|${pp}|$!]="$(do_timer)"
+	fi
 	[[ $(do_cache_pp "${pp}" "@s" "-1" "${passphrase}")$? -ne 1 ]] && cached_pp[${pp}]="$(do_timer),${to}" || unset -v 'cached_pp[${pp}]'
 	return 0
 }
@@ -1110,7 +1112,9 @@ get_passphrase()
 	fi
 
 	# Put key (back) to servers, cache and send to daemon.
-	[[ -n "${conf[BOOTSERVERS]}" ]] && key_clnt "PUT" "${crypt_arr[2]}" "${_passphrase}" & _pid_putkey=$!
+	if [[ -n "${conf[BOOTSERVERS]}" ]]; then
+		key_clnt "PUT" "${crypt_arr[2]}" "${_passphrase}" & _pid_putkey=$!
+	fi
 	[[ "${INITRD}" -eq 1 ]] && do_cache_pp "${MYNAME}:${crypt_arr[2]}" "@u" "$((2*conf[START_TIMEOUT]))" "${_passphrase}"
 	do_cache_pp "${crypt_arr[2]}" "@s" "-1" "${_passphrase}" || do_term_get_passphrase 1
 	echo "passphrase ${crypt_arr[2]} 1 -1 0" >${conf[FIFO]}
