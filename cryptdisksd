@@ -418,7 +418,7 @@ do_systemd_daemon()
 				[[ "${cmd}" == "reload" ]] && echo reload >${conf[FIFO]} && cmd="${RED}Reloading Config${NOR}"
 				echo -e "${cmd}" |socat - UNIX-CONNECT:${sock_ctrl}
 			elif [[ "${cmd}" == defaultconfig ]]; then
-				[daemon_default_config & defconf=1
+				daemon_default_config & defconf=1
 			elif [[ "${cmd}" == "mountsysimg" ]]; then
 				[[ -n "${mntsysimg}" ]] && mntsysimg="0 0 1"
 				[[ -z "${mntsysimg}" ]] && mntsysimg="${pid_socat} ${sock_ctrl} $([[ "$(file -b ${conf[SYSIMG]})" =~ ^openssl ]])$?"
