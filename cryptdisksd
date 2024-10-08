@@ -3019,8 +3019,6 @@ do_systemd_daemon_start()
 	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer) param
 	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal keeplog
 	set -mo pipefail; shopt -s nullglob
-	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
-	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
@@ -3042,6 +3040,8 @@ do_systemd_daemon_start()
 		systemd-notify --stopping --status="${MYNAME}: Queue not Found, Restart ${MYNAME}.socket"
 		exit 0
 	fi
+	systemd-notify --status="${MYNAME}: Starting Up, Timeout $((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2))s"
+	systemd-notify EXTEND_TIMEOUT_USEC=$(((conf[START_TIMEOUT]+conf[QUEUE_TIMEOUT]*2)*1000000))
 	[[ ! -d ${conf[CRYPTDISKSDDIR]} ]] && mkdir -p ${conf[CRYPTDISKSDDIR]}
 	echo ${pid_daemon} >${conf[PIDFILE]}
 	[[ ${conf[DEBUGSHELL]} -eq 1 ]] && set -a
