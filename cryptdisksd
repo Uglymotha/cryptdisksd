@@ -644,7 +644,7 @@ do_daemon_check_conf()
 
 	# Check network configuration
 	fwnetvar="${FWGUID}-${DISTNAME}_${conf[NET_CONFIG]}" fwnetkey="${FWDIR}/${DISTNAME}_${conf[NET_CONFIG]}-${FWGUID}"
-	files=( ${conf[NETWORKDDIR]}/* )
+	files=( t_ls ${conf[NETWORKDDIR]}/ )
 	if [[ ${INITRD} -eq 1 && -s ${fwnetkey} ]]; then
 		# In initrd we copy the config from firmware if it exists
 		do_log info "copying ${fwnetkey} to ${conf[NETWORKDDIR]}"
@@ -909,19 +909,19 @@ daemon_default_config()
 				ssh-keygen -A >/dev/null && cp -a /etc/ssh ${dir} || res=1
 				${conf[ROOTDIR]}/bin/systemd-machine-id-setup || res=1
 				cp /etc/machine-id ${dir} || res=1
+				cat >${dir}/${conf[NETWORKDDIR]##*/etc/} <<-EOF
+				[Match]
+				Name=en*
+
+				[Network]
+				DHCP=yes
+				EOF
 			elif [[ ${i} == lib ]]; then
 				cp -a ${conf[ROOTDIR]}/var/lib/* ${dir} || res=1
 				rm -rf ${dir}/clamav/*
 			else
 				cp -a ${conf[ROOTDIR]}/var/storage/* ${dir} || res=1
 			fi
-			cat >${conf[ROOTDIR]}/${conf[NETWORKDDIR]} <<-EOF
-			[Match]
-			Name=en*
-
-			[Network]
-			DHCP=yes
-			EOF
 			umount ${dir} && rmdir ${dir}
 		fi done
 		[[ ${res} -ne 0 ]] && do_log error "Unable to create persistent storage device"
@@ -1798,6 +1798,7 @@ t_networkctl() { NOTIFY_SOCKET= do_cmd_timeout -1 1 networkctl ${@}; return $?; 
 t_diff() { do_cmd_timeout -1 0 diff ${@}; return $?; }
 t_grep() { do_cmd_timeout -1 $1 grep ${@:2}; return $?; }
 t_printf() { do_cmd_timeout -1 1 printf ${@}; return $?; }
+t_ls() { do_cmd_timeout -1 1 ls ${@}; return $?; }
 
 do_xcrypt_fromtab()
 {
@@ -3022,7 +3023,7 @@ do_systemd_daemon_start()
 {
 	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer) param
 	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal keeplog
-	set -mo pipefail; shopt -s nullglob
+	set -mo pipefail;
 
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
