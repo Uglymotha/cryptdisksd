@@ -711,9 +711,10 @@ do_daemon_check_conf()
 			do_log error "error copying ${srvkey} to ${fwsrvkey}"
 		fi
 		t_chattr +i ${fwsrvkey}
-	else
+	elif [[ -n "${conf[BOOTSERVERS]}" ]]; then
 		# No bootserverkeys at all
-		do_log info "no bootserver keys found"
+		do_log warning "no bootserver keys found, fetching"
+		for diff in "${conf[BOOTSERVERS]}"; do ssh-keyscan "${diff}" >>${srvkey}; done
 	fi
 
 	if [[ -s ${fwusrkey} && ! -s ${usrkey} ]]; then
