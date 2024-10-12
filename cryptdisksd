@@ -711,7 +711,7 @@ do_daemon_check_conf()
 			do_log error "error copying ${srvkey} to ${fwsrvkey}"
 		fi
 		t_chattr +i ${fwsrvkey}
-	elif [[ -n "${conf[BOOTSERVERS]}" ]]; then
+	elif [[ -n "${conf[BOOTSERVERS]}" && ${INITRD} -eq 0 ]]; then
 		# No bootserverkeys at all
 		do_log warning "no bootserver keys found, fetching"
 		for diff in "${conf[BOOTSERVERS]}"; do ssh-keyscan "${diff}" >>${srvkey}; done
@@ -755,7 +755,7 @@ do_daemon_check_conf()
 		   ! t_chmod 400 ${fwusrkey} || ! t_chattr +i ${fwusrkey}; then
 			do_log error "error copying ${usrkey} to ${fwusrkey}"
 		fi
-	else
+	elif [[ ${INITRD} -eq 0 ]]; then
 		# No bootuserkeys at all
 		do_log warning "no bootuser key found, creating"
 		ssh-keygen -t "${conf[SSHKEYALGO]}" -b "${conf[SSHKEYSZ]}" -f "${usrkey}" -N ""
