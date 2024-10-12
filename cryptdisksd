@@ -45,6 +45,8 @@ do_init_conf()
 	[[ -z "${conf[ALGO]}" ]] && conf[ALGO]="aes-xts-plain64"
 	[[ -z "${conf[KEYSZ]}" ]] && conf[KEYSZ]="256"
 	[[ -z "${conf[HASH]}" ]] && conf[HASH]="sha256"
+	[[ -z "${conf[SSHKEYSZ]}" ]] && conf[SSHKEYSZ]="4096"
+	[[ -z "${conf[SSHKEYALGO]}" ]] && conf[SSHKEYALGO]="ed25519"
 	[[ -z "${conf[SYSIMG]}" ]] && conf[SYSIMG]="/squashfs/sysimg-${DISTNAME}-${DISTVERSION}.sqfs"
 	[[ -z "${conf[ROOTDIR]}" ]] && conf[ROOTDIR]="/sysroot"
 	[[ -z "${conf[SYSLOGDIR]}" ]] && conf[SYSLOGDIR]="/var/storage/log"
@@ -711,7 +713,7 @@ do_daemon_check_conf()
 		t_chattr +i ${fwsrvkey}
 	else
 		# No bootserverkeys at all
-		do_log error "no bootserver keys found"
+		do_log info "no bootserver keys found"
 	fi
 
 	if [[ -s ${fwusrkey} && ! -s ${usrkey} ]]; then
@@ -754,7 +756,8 @@ do_daemon_check_conf()
 		fi
 	else
 		# No bootuserkeys at all
-		do_log error "no bootuser key found"
+		do_log warning "no bootuser key found, creating"
+		ssh-keygen -t "${conf[SSHKEYALGO]}" -b "${conf[SSHKEYSZ]}" -f "${usrkey}" -N ""
 	fi
 
 	[[ ${starting} -eq 0 && ${confok} -eq 1 ]] && echo "reload" >${conf[FIFO]}
