@@ -915,7 +915,7 @@ daemon_default_config()
 				ssh-keygen -A >/dev/null && cp -a /etc/ssh ${dir} || res=1
 				${conf[ROOTDIR]}/bin/systemd-machine-id-setup || res=1
 				cp /etc/machine-id ${dir} || res=1
-				cat >${dir}/systemd/network} <<-EOF
+				cat >${dir}/${conf[NETWORKDDIR]##*/etc/}/default.network <<-EOF
 				[Match]
 				Name=en*
 
