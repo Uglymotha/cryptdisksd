@@ -885,9 +885,9 @@ daemon_default_config()
 	fi
 	if [[ ${res} -eq 0 && ! -f /boot/${conf[STORAGEPOOL]} ]]; then
 		# In case we create the backing device, ask user for size (default is half of available size / memory).
-		do_ask_passphrase "Enter Host Name (${conf[BOOTUSER]}): " "-t$((conf[BOOT_TIMEOUT]/3))" && conf[BOOTUSER]="${passphrase}"
+		do_ask_passphrase "Enter Host Name (${conf[BOOTUSER]}): " "-t$((conf[BOOT_TIMEOUT]/3))" "-e" && conf[BOOTUSER]="${passphrase}"
 		while [[ ${passphrase} -gt $((size/2)) || ${passphrase} -lt 1024 ]]; do
-			do_ask_passphrase "Storage Device Size in MB? (min: 1024, max: $((size/2))): " "-t$((conf[BOOT_TIMEOUT]/3))" || passphrase=$((size/2))
+			do_ask_passphrase "Storage Size in MB? (min: 1024, max: $((size/2))): " "-t$((conf[BOOT_TIMEOUT]/3))" "-e" || passphrase=$((size/2))
 		done
 		size=$((passphrase*1024*1024))
 		touch /boot/${conf[STORAGEPOOL]} || res=1
@@ -898,8 +898,9 @@ daemon_default_config()
 			losetup -P ${dev} /boot/${conf[STORAGEPOOL]} || res=1
 		fi
 		# Create 3 partions on device and fill with system config.
-		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1 && udevadm settle || res=1
-		for i in ${conf[ETCDEV]} ${conf[LIBDEV]} ${conf[STORAGEPOOL]}; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
+		echo -e "g\nn\n\n\n+128M\nn\n\n\n+512M\nn\n\n\n\nw\n" |fdisk ${dev} >/dev/null 2>&1
+		udevadm settle || res=1
+		for i in "${conf[ETCDEV]}" "${conf[LIBDEV]}" "${conf[STORAGEPOOL]}"; do p=$((p+1)); if [[ ${res} -eq 0 ]]; then
 			[[ -n "${key}" ]] && dev2=${dev}-part${p} || dev2=${dev}p${p}
 			dir="$(mktemp -d)" || res=1
 			mkfs.ext4 ${dev2} || res=1
@@ -908,7 +909,7 @@ daemon_default_config()
 			ln -s ../../${dev2} /dev/disk/by-label/${i}
 			mount ${dev2} ${dir} || res=1
 			[[ ${res} -ne -0 ]] && break
-			if [[ ${i} == etc ]]; then
+			if [[ "${i}" == "etc" ]]; then
 				cp -a ${conf[ROOTDIR]}/etc/* ${dir} || res=1
 				[[ ! -d /etc/ssh ]] && mkdir /etc/ssh
 				ssh-keygen -A >/dev/null && cp -a /etc/ssh ${dir} || res=1
@@ -922,7 +923,7 @@ daemon_default_config()
 				DHCP=yes
 				EOF
 				echo "${conf[BOOTUSER]}" >${dir}/hostname
-			elif [[ ${i} == lib ]]; then
+			elif [[ "${i}" == "lib" ]]; then
 				cp -a ${conf[ROOTDIR]}/var/lib/* ${dir} || res=1
 				rm -rf ${dir}/clamav/*
 			else
@@ -938,7 +939,7 @@ daemon_default_config()
 	fi
 	udevadm settle
 	[[ ${res} -eq 0 ]] && mount /dev/disk/by-label/${conf[STORAGEPOOL]} ${conf[ROOTDIR]}/var/storage || res=1
-	[[ ${res} -eq 0 ]] && mount ${conf[ROOTDIR]}/var/storage/home/ ${conf[ROOTDIR]}/home || res=1
+	[[ ${res} -eq 0 ]] && mount -o bind ${conf[ROOTDIR]}/var/storage/home/ ${conf[ROOTDIR]}/home || res=1
 	[[ ${res} -eq 0 ]] && do_log warning "Mounted persistent storage device"
 	[[ ${res} -ne 0 ]] && do_log error "Unable to mount persistent storage device"
 
@@ -1571,12 +1572,12 @@ do_control_add()
 			do_term_control 1
 		fi
 	fi
-	if [[ ${_add_crypt}${_add_dev}${_add_pp} =~ ( |,|\||\$) || ( ${_crypttab} -eq 0 && -z "${_add_dev}" ) ]]; then
+	if [[ ${_add_crypt}${_add_dev}${_add_pp} =~ (| |\||\$|\[|\]) || ( ${_crypttab} -eq 0 && -z "${_add_dev}" ) ]]; then
 		do_log debug "incorrect crypt or dev"
 		if [[ ${_crypttab} -eq 0 && -z "${_add_dev}" ]]; then
 			echo -e "\r${BOLD}${RED}${_crypt_arr[1]} not Found in \"${conf[BLOCKDEVDIRS]}\"${NOR}\r" >&${_socat[1]}
 		elif [[ -n "${_add_dev}" ]]; then
-			echo -e "\r${BOLD}${RED}Illegal Characters \" $,|\" in Crypt or Dev.${NOR}\r" >&${_socat[1]}
+			echo -e "\r${BOLD}${RED}Illegal Characters \" $,|[]\" in Crypt or Dev.${NOR}\r" >&${_socat[1]}
 		fi
 		do_term_control 1
 	elif ! do_control_get_passphrase "${_add_pp}"; then
@@ -1816,7 +1817,7 @@ do_xcrypt_fromtab()
 		[[ "${#crypt_arr[@]}" -eq 3 ]] && crypt_arr[3]=0
 		if [[ "${#crypt_arr[@]}" -eq 0 ]]; then
 			do_log debug "device ${!i} not found on crypttab"
-		elif [[ "${#crypt_arr[@]}" -ne 4 || ${crypt_arr[0]}${crypt_arr[1]}${crypt_arr[2]} =~ (,| |\||\$) ]]; then
+		elif [[ "${#crypt_arr[@]}" -ne 4 || ${crypt_arr[0]}${crypt_arr[1]}${crypt_arr[2]} =~ (,| |\||\$|\[|\]) ]]; then
 			do_log warning "incorrect crypttab entry ${crypt_arr[@]}"
 		else
 			do_log debug "device ${!i} found on crypttab"
@@ -2003,9 +2004,9 @@ do_ask_passphrase()
 	local CHAR DEL="$(printf "\x7F")" ca=() c=0 x
 	if [[ -z "${__fd_user[@]}" ]]; then
 		# Query for the passphrase in the background, record pid so we can kill if passphrase is received from server.
-		exec {fd_askpp}< <([[ -z "$2" ]] && exec {__fd_up}>&-; NOTIFY_SOCKET= systemd-ask-password --timeout=0 "--id=${pp}" "$1")
+		exec {fd_askpp}< <([[ -z "$2" ]] && exec {__fd_up}>&-; NOTIFY_SOCKET= systemd-ask-password --timeout=0 $3 --id=${pp} "$1")
 		pid_askpp=$!
-		if ! IFS= read $2 -ru${fd_askpp} passphrase; then
+		if ! IFS= read "$2" -ru${fd_askpp} passphrase; then
 			[[ $? -eq 142 && -n "$2" ]] && kill -SIGTERM ${pid_askpp}
 			return 1
 		fi
