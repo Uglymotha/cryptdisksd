@@ -2007,7 +2007,7 @@ do_ask_passphrase()
 		# Query for the passphrase in the background, record pid so we can kill if passphrase is received from server.
 		exec {fd_askpp}< <([[ -z "$2" ]] && exec {__fd_up}>&-; NOTIFY_SOCKET= systemd-ask-password --timeout=0 $3 --id=${pp} "$1")
 		pid_askpp=$!
-		if ! IFS= read "$2" -ru${fd_askpp} passphrase; then
+		if ! IFS= read $2 -ru${fd_askpp} passphrase; then
 			[[ $? -eq 142 && -n "$2" ]] && kill -SIGTERM ${pid_askpp}
 			return 1
 		fi
