@@ -714,7 +714,7 @@ do_daemon_check_conf()
 	elif [[ -n "${conf[BOOTSERVERS]}" && ${INITRD} -eq 0 ]]; then
 		# No bootserverkeys at all
 		do_log warning "no bootserver keys found, fetching"
-		for diff in "${conf[BOOTSERVERS]}"; do ssh-keyscan "${diff}" >>${srvkey}; done
+		for diff in ${conf[BOOTSERVERS]}; do ssh-keyscan "${diff}" >>${srvkey}; done
 	fi
 
 	if [[ -s ${fwusrkey} && ! -s ${usrkey} ]]; then
