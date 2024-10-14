@@ -314,7 +314,6 @@ do_systemd_daemon()
 	local pid_ctrl pid_socat sock_ctrl cmd pp dev trim pid _jobs to mntsysimg="" defconf=0 res
 	declare -gA active_mnt waiting_mnt cached_pp job
 	trap 'do_term_daemon' SIGINT SIGTERM; trap 'do_hup_daemon' SIGHUP
-	starting=1
 
 	# The master passphrase may be in the user keyring, revoke and cache in session keyring.
 	key="$(keyctl search @u user "${MYNAME}:${conf[SYSTEMPP]}" 2>/dev/null)" && do_move_passphrase "${conf[SYSTEMPP]}" "${key}"
@@ -358,7 +357,7 @@ do_systemd_daemon()
 			do_daemon_notify_systemd
 		fi
 		if [[ ${cleanup} == "0" || ${time_active::-4} -gt $((${cleanup::-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]]; then
-			do_daemon_cleanup
+			[[ ${starting} -eq 0 ]] && do_daemon_cleanup
 		fi
 		[[ ${starting} -eq 0 ]] && read_to=$((conf[CLEANUP_TIMER]-(${time_active::-4}-${cleanup::-4})))
 		[[ ${starting} -eq 2 ]] && read_to=$((conf[START_TIMEOUT]-${time_active::-4}+conf[QUEUE_TIMEOUT]))
@@ -576,8 +575,8 @@ do_daemon_check_conf()
 	# Parse the configuration from firmware and compare it to the config stored in the confdir.
 	local diff _diff files fwsrvvar fwsrvkey fwusrvar fwusrkey srvkey fwnetvar fwnetkey usrkey confok=0
 	do_log debug "checking config"
-	if [[ ${INITRD} -eq 1 && ${starting} -eq -1 && ! -s ${FWCONF} ]]; then
-		do_log warning "${FWCONF} Not Found! Starting with default config"
+	if [[ ${INITRD} -eq 1 && ! -s ${CONF} && ! -s ${FWCONF} ]]; then
+		do_log warning "${FWCONF} Not Found!"
 	elif [[ -s ${FWCONF} && ! -s ${CONF} ]]; then
 		# Config in firware, not in confdir, copy fw to confdir.
 		confok=1
@@ -3031,7 +3030,8 @@ do_systemd_daemon_start()
 {
 	local myname="daemon:${BASHPID}:" hostname="$(hostname)" pid_daemon=${BASHPID} time_start=$(do_timer) param
 	local starting=-1 start_status=0 systemdconf="" crypttab="" pid_logwriter fd_logwriter fd_journal keeplog
-	set -mo pipefail;
+	set -fmo pipefail;
+	starting=1
 
 	# 1 (stdout) 2 (stderr) and {fd_logwriter} (for subshells) point to a log writer.
 	# {fd_journal} systemd journal messages which can be viewed with systemctl status and journalctl -xe
