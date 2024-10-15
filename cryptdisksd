@@ -266,7 +266,7 @@ do_term_daemon()
 			do_log debug "killed ${res} worker for ${cmd} (PID: ${pid})"
 		fi
 	done
-	if [[ ${coonf[UPDONSTOP]} -eq 1 && -n "${conf[BOOTSERVERKEYS]}" ]]; then
+	if [[ ${INITRD} -eq 0 && ${coonf[UPDONSTOP]} -eq 1 && -n "${conf[BOOTSERVERKEYS]}" ]]; then
 		key_clnt "UPDATE" & wait $!
 	fi
 	[[ ${INITRD} -eq 0 && ${conf[ADDONSTOP]} -gt 0 ]] && {
