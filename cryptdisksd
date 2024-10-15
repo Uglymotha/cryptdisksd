@@ -864,11 +864,12 @@ daemon_mount_sysimg()
 daemon_default_config()
 {
 	local key size="$(df -m /boot |tail -n1 |tr -s ' ' |cut -d' ' -f4)" pp="size" pid_askpp fd_askpp dev dev2
-	local pass passphrase=x res=$([[ ${INITRD} -eq 1 && defconf != 1 && -z "${conf[STORAGEDEVS]}" ]])$?
-	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" i p=0 file="/boot/${conf[STORAGEPOOL]}"
+	local i=0 p=0 pass passphrase=x res=$([[ ${INITRD} -eq 1 && defconf != 1 && -z "${conf[STORAGEDEVS]}" ]])$?
+	local opt="--cipher ${conf[ALGO]} --key-size ${conf[KEYSZ]} --hash ${conf[HASH]}" file="/boot/${conf[STORAGEPOOL]}"
 
 	# Check space. Get the system passphrase to use for persistent storage device. Mount writeable root homedir.
-	[[ ${size} -lt 2048 ]] && do_log warning "Need at least 2GB on /boot, trying memory" && file="/root/${conf[STORAGEPOOL]}"
+	[[ ${size} -lt 2048 ]] && i=1 file="${conf[ROOTDIR]}/root/${conf[STORAGEPOOL]}"
+	[[ ${i} -eq 1 ]] && do_log warning "Need at least 2GB on /boot, trying memory"
 	if [[ ${res} -eq 0 ]]; then
 		key="$(t_keyctl 1 request user "${conf[SYSTEMPP]}" @s)" && pass="$(t_keyctl 1 pipe "${key}")" || res=$([[ -n "${key}" ]])$?
 		[[ -n "${key}" ]] && dev=${conf[DMDIR]}/${conf[STORAGEPOOL]} || dev=$(losetup -f)
@@ -879,10 +880,11 @@ daemon_default_config()
 	if [[ ${res} -eq 0 && ! -f ${file} ]]; then
 		# In case we create the backing device, ask user for size (default is half of available size / memory).
 		do_ask_passphrase "Enter Host Name (${conf[BOOTUSER]}): " "-t$((conf[BOOT_TIMEOUT]/3))" "-e" && conf[BOOTUSER]="${passphrase}"
-		while [[ ! "${passphrase}" =~ ^[0-9]*$ || ${size} -lt 1024 || ${size} -gt $((size/2)) ]]; do
+		[[ ${i} -eq 0 ]] && while [[ ! "${passphrase}" =~ ^[0-9]*$ || ${passphrase} -lt 1024 || ${passphrase} -gt $((size/2)) ]]; do
 			do_ask_passphrase "Storage Size in MB? (min: 1024, max: $((size/2))): " "-t$((conf[BOOT_TIMEOUT]/3))" "-e"
-			[[ $? -ne 0 || -z "${passphrase}" ]] && size=$((size/2)) || size=$((passphrase*1024*1024))
+			[[ $? -ne 0 || -z "${passphrase}" ]] && passphrase=$((size/2)) || passphrase=$((passphrase*1024*1024))
 		done
+		[[ ${i} -eq 0 ]] && size="${passphrase}"
 		do_ask_passphrase "Enter Boot Servers: " "-t$((conf[BOOT_TIMEOUT]/3))" "-e" && conf[BOOTSERVERS]="${passphrase}"
 		touch ${file} || res=1
 		truncate -s${size} ${file} || res=1
