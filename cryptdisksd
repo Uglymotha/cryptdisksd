@@ -884,7 +884,7 @@ daemon_default_config()
 			do_ask_passphrase "Storage Size in MB? (min: 1024, max: $((size/2))): " "-t$((conf[BOOT_TIMEOUT]/3))" "-e"
 			[[ $? -ne 0 || -z "${passphrase}" ]] && passphrase=$((size/2)) || passphrase=$((passphrase*1024*1024))
 		done
-		[[ ${i} -eq 0 ]] && size="${passphrase}"
+		[[ ${i} -eq 0 ]] && size=$((passphrase*1024**2)) || size=$((size*1024**2))
 		do_ask_passphrase "Enter Boot Servers: " "-t$((conf[BOOT_TIMEOUT]/3))" "-e" && conf[BOOTSERVERS]="${passphrase}"
 		touch ${file} || res=1
 		truncate -s${size} ${file} || res=1
