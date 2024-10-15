@@ -293,7 +293,7 @@ do_term_daemon()
 	exec {fd_logwriter}>&- 1>&- 2>&-
 	wait ${pid_logwriter}
 
-	[[ -e /etc/default ]] && conf[SYSLOGDIR]=${conf[ROOTDIR]}/${conf[SYSLOGDIR]}
+	[[ -e /default ]] && conf[SYSLOGDIR]=${conf[ROOTDIR]}${conf[SYSLOGDIR]}
 	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 1 || ${conf[LOGLEVEL]} -eq 3 ]] && cp ${conf[LOGFILE]} ${conf[SYSLOGDIR]}
 	[[ ${INITRD} -eq 1 ]] && [[ ${conf[LOGLEVEL]} -eq 2 || ${conf[LOGLEVEL]} -eq 4 ]] && cp -r ${conf[LOGDIR]} ${conf[SYSLOGDIR]}
 	systemd-notify --stopping --status="${MYNAME}: Daemon Terminated After $(do_timer ${time_start})s (PID: ${BASHPID})"
