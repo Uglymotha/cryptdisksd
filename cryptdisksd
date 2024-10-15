@@ -886,7 +886,7 @@ daemon_default_config()
 		done
 		[[ ${i} -eq 0 ]] && size=$((passphrase*1024**2)) || size=$((size*1024**2))
 		do_ask_passphrase "Enter Boot Servers: " "-t$((conf[BOOT_TIMEOUT]/3))" "-e" && conf[BOOTSERVERS]="${passphrase}"
-		[[ -n "${conf[BOOTSERVERS]}" ]] && sed -i "/^.*BOOTSERVERS\=.*$/d" && echo "BOOTSERVERS=${conf[BOOTSERVERS]}" >>${CONF}
+		[[ -n "${conf[BOOTSERVERS]}" ]] && sed -i "/^.*BOOTSERVERS\=.*$/d" ${CONF} && echo "BOOTSERVERS=${conf[BOOTSERVERS]}" >>${CONF}
 		touch ${file} || res=1
 		truncate -s${size} ${file} || res=1
 		if [[ -n "${key}" ]]; then
