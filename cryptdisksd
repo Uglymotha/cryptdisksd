@@ -359,9 +359,7 @@ do_systemd_daemon()
 		if [[ ${cleanup} == "0" || ${time_active::-4} -gt $((${cleanup::-4}+${conf[CLEANUP_TIMER]}-${conf[QUEUE_TIMEOUT]})) ]]; then
 			[[ ${starting} -eq 0 ]] && do_daemon_cleanup
 		fi
-		[[ ${starting} -eq 0 ]] && read_to=$((conf[CLEANUP_TIMER]-(${time_active::-4}-${cleanup::-4})))
-		[[ ${starting} -eq 2 ]] && read_to=$((conf[START_TIMEOUT]-${time_active::-4}+conf[QUEUE_TIMEOUT]))
-		[[ ${starting} -eq 1 || -n "${_jobs}" ]] && read_to=${conf[QUEUE_TIMEOUT]}
+		[[ ${starting} -eq 0 ]] && read_to=$((conf[CLEANUP_TIMER]-(${time_active::-4}-${cleanup::-4}))) || read_to=${conf[QUEUE_TIMEOUT]}
 		do_log debug2 "running since $(do_timer date ${time_start}), workers: ${!job[@]}"
 		IFS=' ' read -t${read_to} -ru${fd_fifo} -a msg; res=$?
 		
@@ -372,7 +370,7 @@ do_systemd_daemon()
 			if [[ ${starting} -ne 0 && -z "${!waiting_mnt[@]}" && -z "${!job[@]}" ]]; then
 				starting=0
 				do_daemon_notify_systemd
-			elif [[ ${starting} -eq 1 && -n "${!waiting_mnt[@]}" ]]; then
+			elif [[ ${starting} -eq 1 ]]; then
 				starting=2
 			fi
 			continue
