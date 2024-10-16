@@ -60,8 +60,8 @@ do_init_conf()
 	[[ -z "${conf[STORAGEHASH]}" ]] && conf[STORAGEHASH]="${conf[HASH]}"
 	[[ -z "${conf[STORAGEDEVS]}" ]] && conf[STORAGEDEVS]=""
 	[[ -z "${conf[BOOTUSER]}" ]] && conf[BOOTUSER]="$(hostname)"
-	[[ -z "${conf[BOOTUSERKEY]}" ]] && conf[BOOTUSERKEY]="${conf[BOOTUSER]}.key"
-	[[ -z "${conf[BOOTSERVERKEYS]}" ]] && conf[BOOTSERVERKEYS]="bootserver.keys"
+	[[ -z "${conf[BOOTUSERKEY]}" ]] && conf[BOOTUSERKEY]="${conf[BOOTUSER]}.key.priv"
+	[[ -z "${conf[BOOTSERVERKEYS]}" ]] && conf[BOOTSERVERKEYS]="bootserver.keys.pub"
 	[[ -z "${conf[BOOTSERVERS]}" ]] && conf[BOOTSERVERS]=""
 	conf[STORAGETRIM]=$([[ "${conf[STORAGETRIM]}" != "1" && "${conf[STORAGETRIM],,}" != "y" && "${conf[STORAGETRIM],,}" != "yes" ]])$?
 	if [[ "$1" != "daemon" ]]; then
@@ -644,7 +644,7 @@ do_daemon_check_conf()
 	# Check network configuration
 	fwnetvar="${FWGUID}-${DISTNAME}_${conf[NET_CONFIG]}" fwnetkey="${FWDIR}/${DISTNAME}_${conf[NET_CONFIG]}-${FWGUID}"
 	files=( t_ls ${conf[NETWORKDDIR]}/ )
-	if [[ ${INITRD} -eq 1 && -s ${fwnetkey} ]]; then
+	if [[ ${INITRD} -eq 1 && ${starting} -eq 1 && -s ${fwnetkey} ]]; then
 		# In initrd we copy the config from firmware if it exists
 		do_log info "copying ${fwnetkey} to ${conf[NETWORKDDIR]}"
 		t_cat ${fwnetkey} | t_tail -c +5 |tar zxf - -C ${conf[NETWORKDDIR]}
@@ -718,7 +718,7 @@ do_daemon_check_conf()
 		# Key in fw not in confdir, copy
 		do_log info "copying ${fwusrkey} to ${usrkey}"
 		if ! t_chattr -i ${fwusrkey} || ! t_chmod 400 ${fwusrkey} || ! t_chattr +i ${fwusrkey} || \
-		   ! t_cat ${fwusrkey} |t_tail -c +5 >${usrkey} && t_chmod 400 ${usrkey}; then
+		   ! t_cat ${fwusrkey} |t_tail -c +5 >${usrkey} || ! t_chmod 400 ${usrkey}; then
 			do_log error "failed to copy ${fwusrkey} to ${usrkey}"
 		fi
 	elif [[ -s ${fwusrkey} && -s ${usrkey} ]]; then
@@ -946,7 +946,7 @@ daemon_mount_crypt()
 {
 	local myname="mount:$1:${BASHPID}:" _add_crypt="$1" _add_dev="$2" _add_pp="$(do_eval_pp "$3")" _add_trim="$4" _passphrase=""
 	local _add_time=$(do_timer) _crypt_arr _key="$(t_keyctl 1 request user "${_add_pp}" @s)" _res=0 _cmd _pid_cmd _fd_cmd
-	trap 'do_log debug "terminating after $(do_timer ${_add_time})s"; exit 1' SIGINT SIGTERM
+	trap 'exit 1' SIGINT SIGTERM
 	do_log debug "mounting ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} with ${_add_pp} passphrase"
 
 	if [[ -z "${_key}" ]] || ! _passphrase="$(t_keyctl 1 pipe "${_key}")"; then
@@ -991,7 +991,7 @@ daemon_mount_crypt()
 daemon_unmount_crypt()
 {
 	local myname="unmount:$1:${BASHPID}:" _time_start=$(do_timer) _cmd _pid_cmd _res=0 _del_crypt="$1" _crypt_arr
-	trap 'do_log debug "terminating after $(do_timer ${_time_start})s"; exit 1' SIGINT SIGTERM
+	trap 'exit 1' SIGINT SIGTERM
 	if [[ -n "${active_mnt[${_del_crypt}]}" ]]; then
 		_crypt_arr=(${_del_crypt} ${active_mnt[${_del_crypt}]})
 	elif ! _crypt_arr=($(do_xcrypt_fromtab "${_del_crypt}")); then
@@ -1066,7 +1066,7 @@ get_passphrase()
 	if [[ $# -eq 2 ]]; then
 		# Start key client, wait for a little bit if appropriate, start the query worker and wait.
 		_pid_getpp= _pid_logwriter= _pid_putkey=
-		if [[ ${conf[NET_ONLINE]} -eq 0 || "$(t_networkctl status |grep "Online state")" =~ (online|partial)$ ]]; then
+		if [[ ${INITRD} -eq 1 || ${conf[NET_ONLINE]} -eq 0 || "$(t_networkctl status |grep "Online state")" =~ (online|partial)$ ]]; then
 			if [[ -n "${conf[BOOTSERVERS]}" ]]; then
 				key_clnt "GET" "${crypt_arr[2]}" & __pid_keyclnt=$!
 				do_log debug "started key client (PID: ${__pid_keyclnt})"
@@ -1743,7 +1743,7 @@ do_cmd_timeout()
 	[[ ${res} -eq 2 ]] && exec {out}>&1 {err}>&1
 	ti="$(trap -p SIGINT)"; ti="${ti%\'*}"; ti="${ti##*\'}"; ti=(${ti})
 	tt="$(trap -p SIGTERM)"; tt="${tt%\'*}"; tt="${tt##*\'}"; tt=(${tt})
-	trap 'do_term_cmd_timeout SIGINT' SIGINT; trap 'do_term_cmd_timeout SIGTERM' SIGTERM
+	[[ ${starting} -ge 0 ]] && trap 'do_term_cmd_timeout SIGINT' SIGINT && trap 'do_term_cmd_timeout SIGTERM' SIGTERM
 	shift 3
 	exec {in}<&0- {stdout}>&1- {stderr}>&2- {fd_cmd}< <(${cmd} $@ 0<&${in}- >&${out}- 2>&${err}- & echo $!; wait $!; echo $?;)
 	pid[0]=$!
@@ -2279,6 +2279,7 @@ key_clnt()
 	[[ "${cmd}" == "put" ]] && passphrase="$3" srv="$4" msg="put ${pp} key to"
 	[[ ! ${cmd} =~ ^(put|add|update)$ ]] && srv="$3" msg="${cmd} key from"
 	[[ ${starting} -eq 0 ]] && timeout=${conf[PP_TIMEOUT]} || timeout=${conf[START_TIMEOUT]}
+	[[ ${INITRD} -eq 1 ]] && timeout=${conf[BOOT_TIMEOUT]}
 	[[ "${cmd}" == "get" ]] && timeout=$((timeout/(conf[NET_RETRIES]+1)))
 
 	# If we are called with exactly one server, execute the command on that server.
@@ -3057,7 +3058,7 @@ do_systemd_daemon_start()
 	SUBSYSTEM=="block", KERNEL=="zd*", ACTION=="add|change", ENV{MD_DEVNAME}=="${conf[ETCDEV]}|${conf[LIBDEV]}", ENV{MD_STARTED}=="unsafe", ENV{MD_FOREIGN}=="no", RUN+="/sbin/mdadm --run /dev/\$env{MD_DEVICE}"
 	EOF
 
-	[[ ${INITRD} -eq 1 ]] && conf[CRYPTDISKSDDIR_MODE]=750 conf[FIFO_MODE]=620 conf[CRYPTDISKSD_GROUP]=systemd
+	[[ ${INITRD} -eq 1 ]] && conf[CRYPTDISKSD_GROUP]=systemd conf[CRYPTDISKSDDIR_MODE]=1770
 	chgrp ${conf[CRYPTDISKSD_GROUP]} ${conf[CRYPTDISKSDDIR]} ${conf[FIFO]}
 	chmod ${conf[CRYPTDISKSDDIR_MODE]} ${conf[CRYPTDISKSDDIR]}
 	chmod ${conf[FIFO_MODE]} ${conf[FIFO]}

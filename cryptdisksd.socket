@@ -1,14 +1,13 @@
 [Unit]
 Description=Cryptdisks udev FiFo
-After=systemd-journald.service
-Before=systemd-udevd.service
 DefaultDependencies=no
-Before=shutdown.target
-Conflicts=shutdown.target emergency.target
+After=systemd-journald.service
+Before=systemd-udevd.service shutdown.target initrd-switch-root.target
+Conflicts=shutdown.target emergency.target initrd-switch-root.target
 
 [Socket]
 ListenFIFO=/run/%N/queue
-DirectoryMode=700
+DirectoryMode=1777
 SocketUser=root
 SocketGroup=systemd
 SocketMode=0620

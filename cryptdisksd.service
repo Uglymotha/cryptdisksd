@@ -1,8 +1,8 @@
 [Unit]
 Description=Cryptdisks Daemon
 Wants=systemd-networkd.service systemd-resolved.service boot.mount
-After=boot.mount %N.socket
-Requires=%N.socket
+Conflicts=initrd-switch-root.target
+Before=initrd-switch-root.target
 
 [Service]
 Type=notify
