@@ -1537,17 +1537,17 @@ do_control_add()
 			do_term_control 1
 		fi
 		[[ -n "${_add_ppa[1]}" ]] && _add_algo="${_add_ppa[1]}" _add_keysz="${_add_ppa[2]}" _add_hash="${_add_ppa[3]}"
-		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}")) _add_pp="${_add_ppa[0]}"
-		if [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ || "${__crypt_arr[0]}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ ]]; then
+		if [[ "${_add_dev}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ || "${_add_dev2}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ ]]; then
 			do_log warning "${conf[STORAGEPOOL]} crpyt specified with nr"
 			echo -e "\r${BOLD}${RED}Device nr for ${conf[STORAGEPOOL]} Device May not be Specified.${NOR}\r" >&${_socat[1]}
 			do_term_control 1
-		elif [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}$ || "${__crypt_arr[0]}" =~ ^${conf[STORAPOOL]}$ ]]; then
+		elif [[ "${_add_dev}" =~ ^${conf[STORAGEPOOL]}$ || "${_add_dev2}" =~ ^${conf[STORAPOOL]}$ ]]; then
 			do_log info "assigning ${conf[STORDEVNR]} to new ${conf[STORAGEPOOL]} device"
 			echo -e "\r${BOLD}Assigning ${conf[STORDEVNR]} to New ${conf[STORAGEPOOL]} Device.${NOR}\r" >&${_socat[1]}
-			[[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]} ]] && _add_crypt="${_add_crypt}${conf[STORDEVNR]}"
-			[[ "${__crypt_arr[0]}" =~ ^${conf[STORAPOOL]}$ ]] && __crypt_arr[0]="${__crypt_arr[0]}${conf[STORDEVNR]}"
+			[[ "${_add_dev}" =~ ^${conf[STORAGEPOOL]}$ ]] && _add_dev="${_add_dev}${conf[STORDEVNR]}" && _cryp_arr=($(do_xcrypt_fromtab "${_add_dev}"))
+			[[ "${_add_dev2}" =~ ^${conf[STORAGEPOOL]}$ ]] && _add_dev2="${_add_dev2}${conf[STORDEVNR]}"
 		fi
+		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}")) _add_pp="${_add_ppa[0]}"
 		if [[ -z "${_crypt_arr[@]}" && -z "${__crypt_arr[@]}" ]]; then
 			# Crypt and dev not on tab, find device.
 			_add_dev="$(do_find_dev "${_add_dev}")" _add_dev2="$(do_find_dev "${_add_dev2}")"
