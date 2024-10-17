@@ -1538,6 +1538,16 @@ do_control_add()
 		fi
 		[[ -n "${_add_ppa[1]}" ]] && _add_algo="${_add_ppa[1]}" _add_keysz="${_add_ppa[2]}" _add_hash="${_add_ppa[3]}"
 		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}")) _add_pp="${_add_ppa[0]}"
+		if [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ || "${__crypt_arr[0]}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ ]]; then
+			do_log warning "storage crpyt specified with nr"
+			echo -e "\r${BOLD}${RED}Device nr for ${conf[STORAGEPOOL]} Device May not be Specified.${NOR}\r" >&${_socat[1]}
+			do_term_control 1
+		elif [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}$ || "${__crypt_arr[0]}" =~ ^${conf[STORAPOOL]}$ ]]; then
+			do_log info "assigning ${conf[STORDEVNR]} to new ${conf[STORAGEPOOL]} device"
+			echo -e "\r${BOLD}Assigning ${conf[STORDEVNR]} to New ${conf[STORAGEPOOL]} Device.${NOR}\r" >&${_socat[1]}
+			[[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]} ]] && _add_crypt="${_add_crypt}${conf[STORDEVNR]}"
+			[[ "${__crypt_arr[0]}" =~ ^${conf[STORAPOOL]}$ ]] && __crypt_arr[0]="${__crypt_arr[0]}${conf[STORDEVNR]}"
+		fi
 		if [[ -z "${_crypt_arr[@]}" && -z "${__crypt_arr[@]}" ]]; then
 			# Crypt and dev not on tab, find device.
 			_add_dev="$(do_find_dev "${_add_dev}")" _add_dev2="$(do_find_dev "${_add_dev2}")"
@@ -1615,8 +1625,13 @@ do_control_add()
 		[[ -n "${_add_ppa[1]}" ]] && _add_pp+="/${_add_algo}/${_add_keysz}/${_add_hash}"
 		if [[ ${_r} -ne 0 || ${_confirm} -eq 1 ]]; then
 		# Crypt should be added to tab, ask for confirmation if necessary (error or request by user).
-			do_control_confirm \
-					"Add ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase to Crypttab? (Y/n)"
+			if [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ && ${_r} -ne 0 && ${_r} -ne 3 ]]; then
+				_res="n"
+			elif [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ ]]; then
+				_res="y"
+			else
+				do_control_confirm "Add ${_add_dev} as ${_add_crypt} TRIM ${_add_trim} Using ${_add_pp} Passphrase to Crypttab? (Y/n)"
+			fi
 		else
 			_res="y"
 		fi
@@ -1624,8 +1639,15 @@ do_control_add()
 			# Add the crypt to the crypttab and send reload signal to daemon.
 			echo -e "${_add_crypt}\t${_add_dev##*/}\t${_add_pp}\t${_add_trim}" >>${conf[CRYPTTAB]}
 			do_log warning "added ${_add_dev} as ${_add_crypt} passphrase ${_add_pp} trim ${_add_trim} to crypttab"
-			echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim}"\
-					"to Crypttab.${NOR}\r" >&${_socat[1]}
+			echo -e "\r${BOLD}${GRN}Added ${_add_dev} as ${_add_crypt} Passphrase ${_add_pp} TRIM ${_add_trim} to Crypttab.${NOR}\r" >&${_socat[1]}
+			if [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}[0-9]+$ ]]; then
+				[[ -n "${conf[STORAGEDEVS]}" ]] && conf[STORAGEDEVS]+=",${_add_dev}" || conf[STORAGEDEVS]+="${_add_dev}"
+				sed -i "/.*STORAGEDEVS\=/d" ${CONF}
+				echo "STORAGEDEVS=${conf[STORAGEDEVS]}" >>${CONF}
+				do_log info "added ${_add_dev} to ${conf[STORAGEPOOL]} boot devices"
+				echo -e "\r${BOLD}${GRN}Added ${_add_dev} to ${conf[STORAGEPOOL]} Boot Devices.${NOR}\r" &${_socat[1]}
+				conf[STORDEVNR]=$((conf[STORDEVNR]+1))
+			fi
 			echo "reload" >${conf[FIFO]}
 		fi
 	fi
