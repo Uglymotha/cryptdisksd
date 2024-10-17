@@ -1544,7 +1544,8 @@ do_control_add()
 		elif [[ "${_add_dev}" =~ ^${conf[STORAGEPOOL]}$ || "${_add_dev2}" =~ ^${conf[STORAPOOL]}$ ]]; then
 			do_log info "assigning ${conf[STORDEVNR]} to new ${conf[STORAGEPOOL]} device"
 			echo -e "\r${BOLD}Assigning ${conf[STORDEVNR]} to New ${conf[STORAGEPOOL]} Device.${NOR}\r" >&${_socat[1]}
-			[[ "${_add_dev}" =~ ^${conf[STORAGEPOOL]}$ ]] && _add_dev="${_add_dev}${conf[STORDEVNR]}" && _cryp_arr=($(do_xcrypt_fromtab "${_add_dev}"))
+			[[ "${_add_dev}" =~ ^${conf[STORAGEPOOL]}$ ]] && _add_dev="${_add_dev}${conf[STORDEVNR]}" \
+														  && _cryp_arr=($(do_xcrypt_fromtab "${_add_dev}"))
 			[[ "${_add_dev2}" =~ ^${conf[STORAGEPOOL]}$ ]] && _add_dev2="${_add_dev2}${conf[STORDEVNR]}"
 		fi
 		__crypt_arr=($(do_xcrypt_fromtab "${_add_dev2}")) _add_pp="${_add_ppa[0]}"
