@@ -906,7 +906,8 @@ daemon_default_config()
 			mount ${dev2} ${dir} || res=1
 			[[ ${res} -ne -0 ]] && break
 			if [[ "${i}" == "etc" ]]; then
-				cp -a $(find ${conf[ROOTDIR]}/etc/ -maxdepth 1) ${dir} || res=1
+				cd ${conf[ROOTDIR]}/etc/
+				cp -a $(ls) ${dir} || res=1
 				[[ ! -d /etc/ssh ]] && mkdir /etc/ssh
 				ssh-keygen -A >/dev/null && cp -a /etc/ssh ${dir} || res=1
 				${conf[ROOTDIR]}/bin/systemd-machine-id-setup || res=1
@@ -920,12 +921,14 @@ daemon_default_config()
 				EOF
 				echo "${conf[BOOTUSER]}" >${dir}/hostname
 			elif [[ "${i}" == "lib" ]]; then
-				cp -a $(find ${conf[ROOTDIR]}/var/lib/ -maxdepth 1) ${dir} || res=1
+				cd ${conf[ROOTDIR]}/var/lib/
+				cp -a $(ls) ${dir} || res=1
 				rm -rf $(find ${dir}/clamav/ -maxdepth 1)
 			else
-				cp -a $(find ${conf[ROOTDIR]}/var/storage/ -maxdepth 1) ${dir} || res=1
+				cd ${conf[ROOTDIR]}/var/storage/
+				cp -a $(ls) ${dir} || res=1
 			fi
-			umount ${dir} && rmdir ${dir}
+			cd ${conf[CRYPTDISKSDDIR]} && umount ${dir} && rmdir ${dir}
 		fi done
 		[[ ${res} -ne 0 ]] && do_log error "Unable to create persistent storage device"
 	elif [[ ${res} -eq 0 && -n "${key}" ]]; then
