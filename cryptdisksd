@@ -1543,11 +1543,6 @@ do_control_add()
 			echo -e "\r${BOLD}${RED}Device nr for ${conf[STORAGEPOOL]} Device May not be Specified.${NOR}\r" >&${_socat[1]}
 			do_term_control 1
 		elif [[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]}$ || "${__crypt_arr[0]}" =~ ^${conf[STORAPOOL]}$ ]]; then
-			if [[ -e ${conf[DMDIR]}/${conf[STORAGEPOOL]} ]]; then
-				do_log warning "${conf[STORAGEPOOL]} crpyt not valid with default config"
-				echo -e "\r${BOLD}${RED}${conf[STORAGEPOOL]} is Reserverd.${NOR}\r" >&${_socat[1]}
-				do_term_control 1
-			fi
 			do_log info "assigning ${conf[STORDEVNR]} to new ${conf[STORAGEPOOL]} device"
 			echo -e "\r${BOLD}Assigning ${conf[STORDEVNR]} to New ${conf[STORAGEPOOL]} Device.${NOR}\r" >&${_socat[1]}
 			[[ "${_add_crypt}" =~ ^${conf[STORAGEPOOL]} ]] && _add_crypt="${_add_crypt}${conf[STORDEVNR]}"
